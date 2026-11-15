@@ -18,13 +18,14 @@ library item IDs are a hash of the file path (unstable across renames).
 
 * Setup checklist
 
-- [ ] Add =acid-state= (+ =safecopy=; historically =cereal=) to the cabal file
-- [ ] Create =FMS/Modules/Library/State.hs= with the state type and events
-- [ ] Add =AcidState LibraryState= + state dir to =AppEnv=
-- [ ] Open the state in =main= (=openLocalStateFrom=), checkpoint on shutdown
-- [ ] Rewrite the =MonadLibrary= instance to use =query= / =update=
-- [ ] Update the scanner to call =registerItem=
-- [ ] Test persistence across restarts
+- [X] Add =acid-state= + =safecopy= to the cabal file
+- [X] Create =FMS/Modules/Library/State.hs= with the state type and events
+- [X] AcidState handle stored in the typed state registry (=putState "library.acid"=) - adapts the "add to AppEnv" sketch to the module-system rule (core never knows module state)
+- [X] Open the state in =libraryModule='s init (=openLocalStateFrom (stateDir </> "acid-state" </> "library")=)
+- [ ] Checkpoint on shutdown (=createCheckpointAndClose= via signal handler)
+- [X] =MonadLibrary= instance uses =query= / =update=
+- [X] Scanner calls =registerItem=
+- [X] Test persistence across restarts (unit test + live restart)
 - [ ] Configure checkpoint frequency
 
 * Persistent state
@@ -52,6 +53,10 @@ existing one, otherwise it allocates =nextId= and stores both mappings.
 
 - =AppEnv= gains =appLibraryState :: AcidState LibraryState= and
   =appStateDir :: FilePath= (core change, one field).
+  NOTE (as implemented in milestone 2): instead of an =AppEnv= field, the
+  handle lives in the typed state registry (=putState "library.acid"=) and
+  is opened in =libraryModule='s init, per the module-system rule in
+  [[file:modules.org][modules.org]] (the core never knows module state).
 - =main= creates the dir, opens the state:
 
 #+begin_src haskell

@@ -33,8 +33,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Library model: media folders (=GET /Library/MediaFolders=, add/remove/update)
 ** TODO Library types: movies, shows, music, books, photos, mixed, home videos
 ** TODO Virtual folders / path mapping per library (multiple paths per library)
-** TODO Scanner: recursive walk, media-extension filter, mime map
-** TODO [#A] Stable IDs via acid-state (see [[file:acid-state.org][acid-state.org]]); migrate off path-hash IDs
+** DONE Scanner: recursive walk, media-extension filter, mime map
+** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
+** DONE [#A] Stable IDs via acid-state (see [[file:acid-state.org][acid-state.org]]) - monotonic ids persisted across restarts
 ** TODO Symlink policy (follow/ignore, circular detection) and race-safe scanning
 ** TODO Incremental scan + filesystem watching (inotify/FSEvents)
 ** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)

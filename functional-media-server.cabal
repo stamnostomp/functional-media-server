@@ -30,7 +30,13 @@ library
                       FMS.Core.Router
                       FMS.Core.Range
                       FMS.Core.Types.Config
+                      FMS.Core.Types.MediaItem
                       FMS.Modules.System
+                      FMS.Modules.Library
+                      FMS.Modules.Library.Monad
+                      FMS.Modules.Library.Routes
+                      FMS.Modules.Library.Scan
+                      FMS.Modules.Library.State
     build-depends:    base >=4.14 && <5
                     , mtl
                     , transformers
@@ -41,7 +47,11 @@ library
                     , directory
                     , filepath
                     , time
+                    , stm
+                    , template-haskell
                     , aeson
+                    , acid-state
+                    , safecopy
                     , wai
                     , warp
                     , http-types
@@ -54,6 +64,12 @@ test-suite fms-test
     build-depends:    base >=4.14 && <5
                     , bytestring
                     , text
+                    , containers
+                    , directory
+                    , filepath
+                    , time
+                    , acid-state
+                    , safecopy
                     , functional-media-server
 
 executable fms

@@ -30,20 +30,22 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO CLI arg + config files (JSON/YAML) + env validation :improvement:
 
 * Milestone 2 — library scanning and stable IDs :feature:
-** TODO [#A] acid-state persistent library IDs (path-hash IDs are unstable) :fix:
-   - [ ] LibraryState + events + makeAcidic (see [[file:acid-state.org][acid-state.org]])
-   - [ ] AppEnv gains AcidState LibraryState; open in main, checkpoint on exit
-   - [ ] MonadLibrary instance uses query/update
-   - [ ] Scanner calls registerItem; migration from hash IDs
-   - [ ] Test persistence across restarts
-** TODO Filesystem scanner with media-extension filter and mime mapping
+** DONE [#A] acid-state persistent library IDs (path-hash IDs are unstable) :fix:
+   - [X] LibraryState + events + makeAcidic (see [[file:acid-state.org][acid-state.org]])
+   - [X] AcidState handle stored in the state registry ("library.acid") and opened in libraryModule init (adapts the AppEnv-field sketch to the module-system rule)
+   - [X] MonadLibrary instance uses query/update
+   - [X] Scanner calls registerItem (monotonic ids, not path hashes - no migration needed)
+   - [X] Test persistence across restarts (unit test + live restart check)
+   - [ ] Checkpoint on shutdown (createCheckpointAndClose via signal handler)
+** DONE Filesystem scanner with media-extension filter and mime mapping
 ** TODO Handle symbolic links: follow/ignore option, detect circular chains :fix:
 ** TODO Fix race conditions during scan (file locking, files changing mid-scan) :fix:
 ** TODO Parallel directory walking :improvement:
 ** TODO Incremental scanning + filesystem event watching (inotify/FSEvents) :improvement:
-** TODO Library API: GET /library, GET /library/:id, POST /library/rescan
+** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
 ** TODO Filtering (type, genre, year), sorting, pagination, search endpoint :improvement:
-** TODO Extra item fields: size, mtime, checksum :improvement:
+** DONE Extra item fields: size + mtime (addedAt) in MediaItem
+** TODO Checksum/hash for integrity verification :improvement:
 
 * Milestone 3 — streaming, transcoding, subtitles
 ** TODO GET /stream/:id with byte-range support (single range, as designed)

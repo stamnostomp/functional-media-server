@@ -14,12 +14,13 @@ import FMS.Core.Module (Module(..))
 import FMS.Core.Monad (AppError, runApp, newAppEnv)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
+import FMS.Modules.Library (libraryModule)
 import FMS.Modules.System (systemModule)
 
 -- | The active module list. Adding a module never changes the core
 -- (docs/modules.org).
 modules :: [Module]
-modules = [systemModule]
+modules = [systemModule, libraryModule]
 
 -- | Boot the server: build the environment, run each module's init, then
 -- serve HTTP with warp.

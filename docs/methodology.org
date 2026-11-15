@@ -11,8 +11,9 @@ folder as org files.
 - All project docs and tasks live in =docs/= as =.org= files.
 - Every task is an org headline with a TODO state; sub-steps are org
   checkboxes (= - [ ] = / = - [X] =).
-- The roadmap ([[file:roadmap.org][roadmap.org]]) is updated in the same commit
-  as the work it describes.
+- The roadmap ([[file:roadmap.org][roadmap.org]]) and the parity checklist
+  ([[file:todo.org][todo.org]]) are updated in the same commit as the work
+  they describe.
 - Each doc file starts with =#+TITLE=, and task files add =#+TODO= and
   =#+STARTUP: overview=.
 

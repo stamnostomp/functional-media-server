@@ -1,0 +1,143 @@
+#+TITLE: TODO — step-by-step checklist for Jellyfin feature parity
+#+AUTHOR: stamnostomp
+#+TODO: TODO(t) NEXT(n) WAIT(w) | DONE(d) CANCELLED(c)
+#+STARTUP: overview
+
+The fine-grained, step-by-step checklist for feature parity with
+https://github.com/jellyfin/jellyfin (server side). Milestones and grouping
+live in [[file:roadmap.org][roadmap.org]]; conventions (states, priorities,
+tags) in [[file:methodology.org][methodology.org]]. Every item here should be
+flipped to DONE in the same commit as the code that implements it.
+
+* 1. Server core and HTTP API :feature:
+** TODO System endpoints
+   - [ ] =GET /System/Info/Public= (server name, version, id, startup wizard flag)
+   - [ ] =GET /System/Info= (authenticated: full info)
+   - [ ] =GET /System/Configuration= and update
+   - [ ] =POST /System/Restart= / =POST /System/Shutdown=
+** TODO OpenAPI/Swagger spec generated from code + =/api-docs= UI
+** TODO CORS configurable per config; OPTIONS preflight handling
+** TODO WebSocket endpoint (=Socket=) for server events
+** TODO Error model: structured errors, request IDs, consistent JSON error body
+** TODO Graceful shutdown; finish in-flight requests; health endpoint
+** TODO Config: file (JSON/YAML) + env vars + CLI, with validation and defaults
+
+* 2. Libraries and scanning :feature:
+** TODO Library model: media folders (=GET /Library/MediaFolders=, add/remove/update)
+** TODO Library types: movies, shows, music, books, photos, mixed, home videos
+** TODO Virtual folders / path mapping per library (multiple paths per library)
+** TODO Scanner: recursive walk, media-extension filter, mime map
+** TODO [#A] Stable IDs via acid-state (see [[file:acid-state.org][acid-state.org]]); migrate off path-hash IDs
+** TODO Symlink policy (follow/ignore, circular detection) and race-safe scanning
+** TODO Incremental scan + filesystem watching (inotify/FSEvents)
+** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
+** TODO Multi-version media (multiple files for one movie, version selection)
+** TODO Extras: trailers, behind-the-scenes, deleted scenes, theme songs/videos
+** TODO Playlists and box sets as first-class virtual items
+
+* 3. Metadata :feature:
+** TODO Item model fields: overview, genres, tags, studios, persons, production year, premiere date, ratings (critics/community), community rating, official rating, run time, series linkage (series/season/episode), index numbers
+** TODO NFO/local metadata parsing (movies, series, episodes, artists, albums, tracks)
+** TODO Remote providers: TMDB, OMDb, TVDB, AniDB, MusicBrainz, AudioDB
+** TODO Provider search + identify + auto-match on scan
+** TODO Rate limiting with exponential backoff; cache API errors
+** TODO Download images on scan: primary, backdrop, logo, thumb, banner, art, disc, menu
+** TODO Chapter images from video files (ffmpeg thumbnails)
+** TODO Metadata refresh (manual + scheduled), "replace all metadata" option
+** TODO Manual metadata editing with field locking
+** TODO Identify/failures queue: items with no match, reported in UI/API
+
+* 4. Items API :feature:
+** TODO =GET /Items= with filters: recursive, include item types, genres, years, person, studio, exclusive, search term
+** TODO Sorting (sortBy + sortOrder), pagination (startIndex/limit)
+** TODO =Fields= projection, =EnableImages=, image type selection
+** TODO User-scoped queries: =userId=, filters IsPlayed/IsFavorite/IsResumable, IsLiked
+** TODO =GET /Items/{id}=, =GET /Items/{id}/Similar=, =GET /Items/{id}/SpecialFeatures=
+** TODO Ancestors/breadcrumb endpoints (=/Items/{id}/Ancestors=), next-up for series
+** TODO Item counts per library, =GET /Items/Counts=
+** TODO Search endpoint =/Search/Hints= + full-text search across titles/people
+
+* 5. Images API :feature:
+** TODO =GET /Items/{id}/Images/{type}= with =maxWidth=/=maxHeight=/=quality=
+** TODO Image tags and cache-busting; =POST= image upload, =DELETE= image
+** TODO Backdrop fanart selection (=/Items/{id}/Images/Backdrop=, index)
+** TODO Image resizing/transcoding (native or ImageMagick); blurhash placeholders
+** TODO Serve artist/album/series images
+
+* 6. Playback and streaming :feature:
+** TODO Direct play: =GET /Videos/{id}/stream= (and /Audio/, /MediaSegments) with byte-range support
+** TODO =POST /Items/{id}/PlaybackInfo= — returns direct-play/direct-stream/transcode decisions per client profile
+** TODO Client device profiles (=/DeviceProfiles=, playback profiles per codec/container)
+** TODO Transcoding via ffmpeg: remux vs transcode, HLS (=/videos/{id}/main.m3u8= + segments), DASH
+** TODO Audio/subtitle stream selection, codec profiles and levels
+** TODO Hardware acceleration (VAAPI, NVENC, QSV, VideoToolbox) behind config
+** TODO Bitrate limits per user/network; quality options
+** TODO Session reporting: =/Sessions=, playback start/progress/stop, =POST /Sessions/Playing=, =/Playing/Ping=, =/Playing/Stopped=
+** TODO Playback progress, resume points (="/Users/{id}/Items/{id}/UserData=")
+** TODO Mark played/unplayed, set favorite/like
+** TODO Intro skipping via MediaSegments (intro start/end detection)
+
+* 7. Subtitles :feature:
+** TODO Detect external subtitle files (.srt/.vtt/.ass/.ssa/.sub) next to media
+** TODO Embedded subtitle extraction via ffmpeg
+** TODO Subtitle delivery: burn-in during transcode, or sidecar =.vtt=/=.srt= endpoints
+** TODO Format conversion (ASS/SRT -> VTT), encoding handling
+
+* 8. Users, auth, sessions :feature:
+** TODO User CRUD (=/Users=), =POST /Users/AuthenticateByName=, token issuance
+** TODO API keys (=X-Emby-Token= / =X-MediaBrowser-Token= header auth)
+** TODO Password policy, reset, hashing (bcrypt-class)
+** TODO Sessions and devices (=/Sessions=, =/Devices=, device capabilities)
+** TODO Per-library permissions per user; enabled/disabled users; admin flag
+** TODO Parental controls: rating restrictions, allowed tags, access schedules (basic)
+** TODO First-run startup wizard (admin creation) like Jellyfin's
+
+* 9. User data and personalization :feature:
+** TODO =/Users/{id}/Items/{id}/UserData= get/update (playback position, play count, played, favorite, likes)
+** TODO =POST /Users/{id}/PlayedItems/{id}= (mark played/unplayed), batch delete
+** TODO Continue watching / next up / recently added per user
+** TODO Watch history
+
+* 10. Organization endpoints :feature:
+** TODO Genres, studios, persons, tags endpoints (=/Genres=, =/Studios=, =/Persons=)
+** TODO Box sets (=/Collections=) create/manage
+** TODO Playlists (=/Playlists=) create/manage/items reorder
+** TODO Custom metadata fields / tags on items
+
+* 11. Server administration :feature:
+** TODO Dashboard: server status, active devices/sessions, activity log (=/System/ActivityLog=)
+** TODO Scheduled tasks framework (=/ScheduledTasks=, run on interval/cron): library scan, metadata refresh, cleanup
+** TODO Server logs endpoint + log levels config
+** TODO Branding (name, login disclaimer), startup wizard state
+** TODO Notifications and webhooks (=/Webhooks=) on item added/playback events
+** TODO Plugin system architecture (install/list/enable plugins) — see [[file:modules.org][modules.org]]
+
+* 12. Live TV and DLNA (low priority) :feature:
+** TODO Tuners: M3U, HDHomeRun; channel lineups (=/LiveTv/Channels=)
+** TODO EPG / program guide data (XMLTV)
+** TODO DVR recordings and timers
+** TODO DLNA server profile (low priority)
+
+* 13. Clients :feature:
+** TODO Serve the official jellyfin-web static client (or a minimal web UI of our own)
+** TODO API must be compatible enough for jellyfin-web to browse/play
+** TODO Chromecast/AirPlay are client-side; ensure casting endpoints work
+
+* 14. Security :fix:
+** TODO Path sanitization everywhere (no directory traversal via ids/paths)
+** TODO Rate limiting per-IP and per-endpoint
+** TODO HTTPS/TLS termination config; security headers
+** TODO Validate all user input; safe Range parsing (see roadmap milestone 3)
+
+* 15. Performance and robustness :improvement:
+** TODO Lazy streaming of large files; memory monitoring
+** TODO Metadata and file-stat caching with invalidation
+** TODO Parallel scanning; in-memory index refresh without restart
+** TODO ffmpeg process management: timeouts, cleanup, concurrent transcode limits
+
+* 16. Testing, packaging, ops :techdebt:
+** TODO Unit tests for Range parsing, NFO parsing, ID stability across restarts
+** TODO Integration tests against the API (items, playback info, auth flow)
+** TODO CI pipeline (nix build + cabal test on push)
+** TODO Docker image + docker-compose
+** TODO Haddock docs on all exports

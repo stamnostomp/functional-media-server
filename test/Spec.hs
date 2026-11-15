@@ -18,6 +18,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (matchSegments)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
+import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
   , GetIdByPath(..)
@@ -53,6 +54,23 @@ main = do
   check "bytes=5-2 (end < start -> Nothing)" Nothing (parseRangeHeader "bytes=5-2")
   check "no bytes= prefix"                    Nothing (parseRangeHeader "0-100")
   check "suffix range bytes=-500"             Nothing (parseRangeHeader "bytes=-500")
+
+  -- resolveRange against a 1000-byte file (stream module, milestone 3):
+  -- valid ranges clamp to (start, end) inclusive, invalid ones are Left.
+  let isLeftE :: Either a b -> Bool
+      isLeftE (Left _)  = True
+      isLeftE (Right _) = False
+  check "resolveRange (0, Just 99)"   (Right (0, 99))   (resolveRange 1000 (ByteRange 0 (Just 99)))
+  check "resolveRange (900, Nothing)" (Right (900, 999)) (resolveRange 1000 (ByteRange 900 Nothing))
+  check "resolveRange (0, Nothing)"   (Right (0, 999))  (resolveRange 1000 (ByteRange 0 Nothing))
+  check "resolveRange (5000, Just 6000) is Left (start >= size)"
+    True (isLeftE (resolveRange 1000 (ByteRange 5000 (Just 6000))))
+  check "resolveRange (5, Just 2) is Left (end < start)"
+    True (isLeftE (resolveRange 1000 (ByteRange 5 (Just 2))))
+  check "resolveRange (1000, Nothing) is Left (start >= size)"
+    True (isLeftE (resolveRange 1000 (ByteRange 1000 Nothing)))
+  check "resolveRange (0, Just 1000) is Left (end >= size)"
+    True (isLeftE (resolveRange 1000 (ByteRange 0 (Just 1000))))
 
   -- Route segment matching.
   check "literal match"        (Just [])                  (matchSegments [Lit "a", Lit "b"] ["a", "b"])

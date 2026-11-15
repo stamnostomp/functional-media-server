@@ -48,11 +48,13 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO Checksum/hash for integrity verification :improvement:
 
 * Milestone 3 — streaming, transcoding, subtitles
-** TODO GET /stream/:id with byte-range support (single range, as designed)
+** DONE GET /stream/:id with byte-range support (single range; streams bytes itself via responseStream, no warp range interference)
 ** TODO [#B] Fix Range header edge cases :fix:
    - [ ] Multiple ranges (rarely used)
-   - [ ] Better errors for malformed ranges; handle empty range requests
-** TODO [#B] Fix file handle leaks; add timeout for stalled streams :fix:
+   - [X] Malformed/empty/suffix ranges treated as no-range (200 full body); parsed-but-unsatisfiable -> 400
+** TODO [#B] File handle leaks / stalled streams :fix:
+   - [X] File handles closed via bracket in streamFileRange
+   - [ ] Timeout for stalled streams
 ** TODO Transcoding via FFmpeg: on-the-fly for unsupported formats, quality/bitrate adaptation :feature:
 ** TODO Thumbnail generation :feature:
 ** TODO Subtitles: detection, streaming, format conversion (SRT/VTT) :feature:

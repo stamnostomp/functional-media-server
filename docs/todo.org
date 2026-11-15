@@ -73,7 +73,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Serve artist/album/series images
 
 * 6. Playback and streaming :feature:
-** TODO Direct play: =GET /Videos/{id}/stream= (and /Audio/, /MediaSegments) with byte-range support
+** TODO Direct play
+   - [X] =GET /stream/:id= with byte-range support (200 full / 206 + Content-Range; malformed -> 200 full; unsatisfiable -> 400)
+   - [ ] Jellyfin-shaped aliases: =/Videos/{id}/stream=, =/Audio/{id}/stream=, =/MediaSegments=
 ** TODO =POST /Items/{id}/PlaybackInfo= — returns direct-play/direct-stream/transcode decisions per client profile
 ** TODO Client device profiles (=/DeviceProfiles=, playback profiles per codec/container)
 ** TODO Transcoding via ffmpeg: remux vs transcode, HLS (=/videos/{id}/main.m3u8= + segments), DASH

@@ -13,6 +13,11 @@ build-type:         Simple
 
 common shared
     default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , LambdaCase
+                      , ScopedTypeVariables
+                      , DerivingStrategies
+                      , GeneralizedNewtypeDeriving
     ghc-options:      -Wall -Wcompat
 
 library
@@ -20,7 +25,26 @@ library
     hs-source-dirs:   src
     exposed-modules:  FMS
                       FMS.Server
+                      FMS.Core.Monad
+                      FMS.Core.Module
+                      FMS.Core.Router
+                      FMS.Core.Range
+                      FMS.Core.Types.Config
+                      FMS.Modules.System
     build-depends:    base >=4.14 && <5
+                    , mtl
+                    , transformers
+                    , text
+                    , bytestring
+                    , containers
+                    , unordered-containers
+                    , directory
+                    , filepath
+                    , time
+                    , aeson
+                    , wai
+                    , warp
+                    , http-types
 
 test-suite fms-test
     import:           shared
@@ -28,6 +52,8 @@ test-suite fms-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     build-depends:    base >=4.14 && <5
+                    , bytestring
+                    , text
                     , functional-media-server
 
 executable fms

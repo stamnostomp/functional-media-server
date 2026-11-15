@@ -16,16 +16,18 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    ([[file:modules.org][modules.org]], [[file:acid-state.org][acid-state.org]], [[file:methodology.org][methodology.org]])
 
 * Milestone 1 — core server and module system :feature:
-** TODO Adopt AppM / AppEnv / Router / Module core from the monadic module system
-   - [ ] FMS.Core.Monad (AppM, AppError, runApp, MonadLog, putState/getState)
-   - [ ] FMS.Core.Module (Module, Route, Segment, get/post)
-   - [ ] FMS.Core.Router (buildApplication, CORS, error mapping)
-   - [ ] FMS.Server with the modules list
-** TODO Configuration from CLI arg + env vars (MEDIA_LIBRARY_PATH, MEDIA_SERVER_PORT, ...)
-** TODO Structured error logging with request IDs :improvement:
-** TODO Request tracing/metrics (duration, error rates) + health endpoint :improvement:
+** DONE Adopt AppM / AppEnv / Router / Module core from the monadic module system
+   - [X] FMS.Core.Monad (AppM, AppError, runApp, MonadLog, putState/getState)
+   - [X] FMS.Core.Module (Module, Route, Segment, get/post)
+   - [X] FMS.Core.Router (buildApplication, CORS, error mapping)
+   - [X] FMS.Server with the modules list
+   - [X] systemModule: GET /System/Info/Public + GET /healthz
+** DONE env-var configuration + defaults (MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR)
+** TODO Structured error logging with request IDs + JSON error body :improvement:
+** DONE health endpoint (GET /healthz)
+** TODO Request tracing/metrics (duration, error rates) :improvement:
 ** TODO Graceful shutdown on SIGTERM; finish in-flight requests :improvement:
-** TODO Config files (JSON/YAML) + env validation + defaults :improvement:
+** TODO CLI arg + config files (JSON/YAML) + env validation :improvement:
 
 * Milestone 2 — library scanning and stable IDs :feature:
 ** TODO [#A] acid-state persistent library IDs (path-hash IDs are unstable) :fix:

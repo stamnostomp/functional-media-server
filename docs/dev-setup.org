@@ -55,6 +55,10 @@ nix develop --command cabal2nix . > default.nix
 
 - Work on branches, merge to =main=.
 - Commit messages: short imperative subject, details in the body.
+- *Commit after each major step*: every time a [[file:todo.org][todo.org]] /
+  [[file:roadmap.org][roadmap.org]] item (or a coherent chunk of one) lands,
+  commit it immediately as a small, focused commit. Never leave a major step
+  uncommitted.
 - Don't commit =dist-newstyle/= or =result= (see .gitignore).
 - Keep the roadmap in [[file:roadmap.org][docs/roadmap.org]] up to date in the same
   commit as the work it describes; follow the conventions in

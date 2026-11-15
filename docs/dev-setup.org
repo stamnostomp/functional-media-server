@@ -1,0 +1,60 @@
+#+TITLE: Dev setup — git, nix, cabal2nix
+#+AUTHOR: stamnostomp
+#+STARTUP: overview
+
+How to work on this project day to day.
+
+* Prerequisites
+
+- Nix with flakes enabled (=nix-command flakes=)
+- git
+
+Everything else (ghc, cabal-install, cabal2nix, haskell-language-server)
+comes from the Nix dev shell.
+
+* Common commands
+
+#+begin_src sh
+nix develop                 # enter dev shell
+nix build                   # build ./result (the fms executable)
+nix run .#default           # build + run
+nix flake check             # evaluate all flake outputs
+nix flake update            # bump nixpkgs
+cabal build all             # inside dev shell: local build in dist-newstyle/
+cabal test                  # run the test suite
+cabal run fms               # run the server locally
+ghc -e ... / hls            # editor integration via haskell-language-server
+#+end_src
+
+* cabal2nix workflow
+
+The flake uses =haskellPackages.callCabal2nix "functional-media-server" ./.\;=
+so the =.cabal= file is re-read on every evaluation — after adding a
+dependency to the .cabal file, just rebuild; no manual regeneration step is
+required.
+
+If you ever want a static Nix expression (e.g. to vendor or diff it):
+
+#+begin_src sh
+nix develop --command cabal2nix . > default.nix
+#+end_src
+
+* Project layout
+
+#+begin_src text
+├── flake.nix / flake.lock   -- nix build + dev shell
+├── cabal.project            -- cabal project definition
+├── functional-media-server.cabal
+├── src/FMS/...              -- library
+├── app/Main.hs              -- fms executable
+├── test/Spec.hs             -- test suite
+└── docs/*.org               -- all project docs and the roadmap
+#+end_src
+
+* Git workflow
+
+- Work on branches, merge to =main=.
+- Commit messages: short imperative subject, details in the body.
+- Don't commit =dist-newstyle/= or =result= (see .gitignore).
+- Keep the roadmap in [[file:roadmap.org][docs/roadmap.org]] up to date in the same
+  commit as the work it describes.

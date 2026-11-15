@@ -1,0 +1,73 @@
+#+TITLE: Architecture
+#+AUTHOR: stamnostomp
+#+STARTUP: overview
+
+Design decisions for the Haskell media server. Update this file as decisions
+are made; see [[file:roadmap.org][roadmap.org]] for what to build and when.
+
+* Principles
+
+- Pure core, effectful shell: domain logic (scanning, metadata merging,
+  transcoding decisions) is pure and testable; IO (HTTP, ffmpeg, DB) is
+  pushed to the edges.
+- One process, library-first: start with a single =fms= executable serving a
+  REST API; avoid premature microservices.
+- Nix is the source of truth for builds; cabal is used for local iteration
+  inside the dev shell. The flake translates the .cabal file with
+  =callCabal2nix=, so the .cabal file is the single package description.
+
+* Planned module layout (library =FMS=)
+
+#+begin_src text
+src/
+├── FMS.hs              -- package info (name, version)
+├── FMS/Server.hs       -- executable entry point, warp/wai app wiring
+├── FMS/Config.hs       -- runtime configuration (port, media roots, db path)
+├── FMS/Api.hs          -- REST endpoint definitions (servant-style)
+├── FMS/Library/
+│   ├── Model.hs        -- MediaItem, Library, Episode, ...
+│   ├── Scan.hs         -- pure filesystem-walking logic + IO wrapper
+│   └── Db.hs           -- SQLite persistence
+├── FMS/Metadata/
+│   ├── Nfo.hs          -- local NFO parsing
+│   └── Providers.hs    -- TMDB/OMDb/MusicBrainz HTTP lookups
+├── FMS/Auth.hs         -- users, API keys, sessions, middleware
+├── FMS/Stream.hs       -- direct play, byte ranges, HLS, transcoding via ffmpeg
+└── FMS/Image.hs        -- poster/backdrop/thumbnail serving and resizing
+#+end_src
+
+* Key technology choices (to be confirmed in milestone 1)
+
+| Concern      | Candidate                                             |
+|--------------+-------------------------------------------------------|
+| HTTP server  | warp + servant (typed API)                            |
+| DB           | SQLite via direct-sqlite + esqueleto                  |
+| HTTP client  | http-conduit                                              |
+| JSON         | aeson                                                     |
+| Config       | env + yaml (aeson)                                    |
+| Logging      | co-log or katip                                       |
+| Transcoding  | ffmpeg via process (typed-process) + HLS              |
+| Auth         | API keys + session cookies; password hashing (bcrypt) |
+
+* Data flow
+
+#+begin_src text
+filesystem scan --> Library.Model --> SQLite --> REST API (/Items, /Library/...)
+                                                      |
+                                              metadata providers (TMDB/...)
+                                                      |
+                                              images, playback progress
+                                                      |
+client request --> auth middleware --> stream/transcode (ffmpeg) --> response
+#+end_src
+
+* Build / packaging
+
+- =flake.nix= exposes =packages.default= (the =fms= executable, built with
+  =haskellPackages.callCabal2nix=) and =devShells.default=.
+- After editing the .cabal file, nothing needs regenerating for the flake
+  (callCabal2nix re-reads it each evaluation). To get a static =default.nix=,
+  run =cabal2nix . > default.nix= inside the dev shell.
+- System dependencies (ffmpeg, imagemagick, sqlite) will be added to the
+  package's =extra-libraries=/buildInputs via =callCabal2nix ... { }= args or
+  a package override once milestone 5 starts.

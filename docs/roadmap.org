@@ -1,0 +1,58 @@
+#+TITLE: Roadmap — Jellyfin feature parity
+#+AUTHOR: stamnostomp
+#+TODO: TODO(t) NEXT(n) WAIT(w) | DONE(d) CANCELLED(c)
+#+STARTUP: overview
+
+Feature plan for matching https://github.com/jellyfin/jellyfin, broken into
+milestones. Track progress by flipping TODO states (DONE, CANCELLED, ...).
+
+* Milestone 0 — scaffolding
+** DONE git repo, nix flake, cabal2nix build pipeline
+:PROPERTIES:
+:CREATED: [2026-11-14]
+:END:
+** DONE docs/ org files for tracking
+** DONE cabal package skeleton (library + fms executable + test suite)
+
+* Milestone 1 — core HTTP server
+** TODO Choose HTTP stack (wai/warp vs servant) and wire a hello endpoint
+** TODO Config loading (env vars + config file, port, media roots)
+** TODO Logging (structured, e.g. katip or co-log)
+** TODO Graceful startup/shutdown
+** TODO Basic health endpoint (/System/Info/Public)
+
+* Milestone 2 — library model and scanning
+** TODO Media item model (movies, series, seasons, episodes, music, photos)
+** TODO Filesystem scanner walking configured library roots
+** TODO Persistence (SQLite via direct-sqlite/esqueleto)
+** TODO Library CRUD API (/Library/MediaFolders, /Items)
+** TODO Scan scheduling and progress reporting
+
+* Milestone 3 — metadata
+** TODO NFO / local metadata parsing
+** TODO Remote provider lookups (TMDB / OMDb / MusicBrainz)
+** TODO Images: posters, backdrops, thumbnails (/Items/{id}/Images)
+** TODO Metadata refresh and caching
+
+* Milestone 4 — users, auth, sessions
+** TODO User model + password hashing (bcrypt or similar)
+** TODO API keys and authentication middleware
+** TODO Sessions (/Sessions), device reporting
+** TODO Authorization / per-library permissions
+** TODO Playback progress, resume points, favorites, played state
+
+* Milestone 5 — playback and streaming
+** TODO Direct play of files (byte-range requests)
+** TODO HLS packaging (ffmpeg hls muxer)
+** TODO On-the-fly transcoding via ffmpeg subprocess
+** TODO Subtitle extraction and delivery (SRT/VTT/embedded)
+** TODO Audio stream selection and transcode profiles
+** TODO /Videos/{id}/stream endpoints
+
+* Milestone 6 — client and extras
+** TODO Static web client (or integration with a Jellyfin web client)
+** TODO Search across the library
+** TODO Collections, genres, persons, studios endpoints
+** TODO Live TV / tuners (low priority)
+** TODO DLNA (low priority)
+** TODO Image transcoding/resizing (ImageMagick or native)

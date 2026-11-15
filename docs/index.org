@@ -1,0 +1,26 @@
+#+TITLE: functional-media-server
+#+AUTHOR: stamnostomp
+#+DESCRIPTION: Project hub for the Haskell media server
+#+STARTUP: overview
+
+* functional-media-server
+
+A media server inspired by [[https://github.com/jellyfin/jellyfin][Jellyfin]], written in Haskell
+and built with Nix via cabal2nix.
+
+All project tracking lives in this =docs/= folder as org files.
+
+** Documents
+
+- [[file:roadmap.org][Roadmap]] — Jellyfin feature-parity plan, tracked as org TODO items
+- [[file:architecture.org][Architecture]] — design decisions and planned module layout
+- [[file:dev-setup.org][Dev setup]] — git / nix / cabal2nix workflow
+
+** Quick start
+
+#+begin_src sh
+nix develop          # dev shell: ghc, cabal, cabal2nix, haskell-language-server
+nix build            # build the fms executable through cabal2nix
+nix run .#default    # run it
+cabal test           # inside the dev shell, run the test suite
+#+end_src

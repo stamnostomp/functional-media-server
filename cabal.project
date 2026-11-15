@@ -1,0 +1,4 @@
+packages: .
+
+-- Keep build artifacts out of the source tree.
+build-dir: dist-newstyle

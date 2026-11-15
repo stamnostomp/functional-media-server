@@ -1,0 +1,142 @@
+#+TITLE: Module system — monadic, pluggable modules
+#+AUTHOR: stamnostomp
+#+STARTUP: overview
+
+The architecture adopted from the sibling repository
+(=../functional-media-server=, module root =MediaServer.*=, here mapped to
+our =FMS.*=). A *module* is a self-contained unit of functionality: a name,
+an init action, and a list of routes. The core never knows a module exists.
+
+* The application monad: AppM
+
+#+begin_src haskell
+newtype AppM a = AppM (ReaderT AppEnv (ExceptT AppError IO) a)
+#+end_src
+
+- Read-only environment ('AppEnv'), short-circuiting errors ('AppError'),
+  IO at the base. mtl-style: 'MonadReader', 'MonadError', 'MonadIO'.
+- =AppError = NotFound | BadRequest | InternalError= — the router turns
+  these into 404 / 400 / 500 responses.
+- =runApp env (AppM m)= runs a handler and catches any exception into
+  =InternalError=, so one bad request never kills the server.
+- A small =MonadLog= capability (=logInfo= / =logErr=) is provided for
+  modules.
+
+* AppEnv and the typed state registry
+
+#+begin_src haskell
+data AppEnv = AppEnv
+  { envConfig :: !Config
+  , envState  :: !(IORef (HashMap Text Dynamic))  -- module-contributed state
+  }
+
+putState :: Typeable a => Text -> a -> AppM ()   -- e.g. "library.index"
+getState :: Typeable a => Text -> AppM (Maybe a)
+#+end_src
+
+Modules stash whatever state they need (a =TVar=, a cache, a client handle)
+under a namespaced key from their =moduleInit= and read it back in their
+capability instance. The core never needs to know the module, or its state,
+exists. This is the plug-in point of the whole design.
+
+* Module, Route, Segment
+
+#+begin_src haskell
+data Segment = Lit Text | Capture Text
+
+data Route = Route
+  { routeMethod  :: !Method
+  , routePattern :: ![Segment]
+  , routeHandler :: [(Text, Text)] -> Request -> AppM Response
+  }
+
+data Module = Module
+  { moduleName   :: !Text
+  , moduleInit   :: AppM ()
+  , moduleRoutes :: [Route]
+  }
+
+get  :: [Segment] -> ([(Text, Text)] -> Request -> AppM Response) -> Route
+post :: [Segment] -> ([(Text, Text)] -> Request -> AppM Response) -> Route
+#+end_src
+
+* Router
+
+=buildApplication env modules= flattens every module's routes into one WAI
+=Application=:
+
+- =OPTIONS= requests get a 204 preflight response; every response carries
+  permissive CORS headers (the server is called from a UI on another origin).
+- Otherwise the first route matching method + path segments wins; the
+  handler runs inside =runApp env=, and =AppError= maps to 400/404/500.
+- Path captures bind as =(name, value)= pairs passed to the handler.
+
+* Capabilities as typeclasses (the monadic part)
+
+Modules extend the system without touching =AppEnv= by declaring an mtl-style
+capability class with an instance for =AppM=:
+
+#+begin_src haskell
+class Monad m => MonadLibrary m where
+  getLibraryIndex :: m LibraryIndex
+  rescanLibrary  :: m ()
+
+instance MonadLibrary AppM where
+  getLibraryIndex = ... -- getState "library.index" >>= readTVarIO
+  rescanLibrary  = ... -- scan, then putState / writeTVar
+#+end_src
+
+Any other module can then require =MonadLibrary m => ...= in its own
+handlers and read the library — exactly how the stream module does. Each
+module uses its own namespaced state key (=library.index=, =stats.items=,
+=metadata.cache=).
+
+* Anatomy of a module
+
+#+begin_src text
+src/FMS/Modules/X.hs        -- xModule :: Module, re-exports the capability class
+src/FMS/Modules/X/Monad.hs  -- class MonadX m, state key, instance MonadX AppM, init
+src/FMS/Modules/X/Routes.hs -- route handlers (AppM Response)
+src/FMS/Modules/X/...       -- domain files (Scan, Persistence, Api, ...)
+#+end_src
+
+Adding a module:
+
+1. Define the capability typeclass and an =AppM= instance for it.
+2. Write =moduleInit :: AppM ()= for startup work (e.g. =putState= a TVar).
+3. Write routes with =get= / =post=.
+4. Add the =Module= value to the list in =FMS.Server= — nothing else in the
+   core changes.
+
+* Active modules (as designed in the sibling repo)
+
+#+begin_src haskell
+modules = [libraryModule, streamModule, statsModule, metadataModule]
+#+end_src
+
+| Module   | State key       | Routes                                                        |
+|----------+-----------------+---------------------------------------------------------------|
+| library  | =library.index= | GET /library, GET /library/:id, POST /library/rescan          |
+| stream   | (uses library)  | GET /stream/:id — file bytes, honors =Range= (single range)   |
+| stats    | =stats.items=   | POST /progress, GET /continuewatching, /popular, /new         |
+| metadata | =metadata.cache=| NFO parsing + TMDB / TvMaze lookups + cache                  |
+
+* Core types
+
+- =Config= — library path, port, stats path, TMDB API key, cache path;
+  loaded from a CLI arg / env vars (=MEDIA_LIBRARY_PATH=,
+  =MEDIA_SERVER_PORT=, =MEDIA_SERVER_STATS_PATH=, =MEDIA_TMDB_API_KEY=,
+  =MEDIA_METADATA_CACHE_PATH=).
+- =MediaItem= — id, title, path, size, mime, addedAt (JSON via aeson).
+  Known v1 limitation: id is a hash of the file path — see
+  [[file:acid-state.org][acid-state.org]] for the stable-ID fix.
+- =Range= — single-range =bytes=start-end= / =bytes=start-= parser; malformed
+  headers mean "no range".
+- =Progress= / =ItemStats= — playback position and play counts.
+
+* Dependencies this implies
+
+base, mtl, transformers, text, bytestring, containers, unordered-containers,
+hashable, directory, filepath, time, stm, wai, warp, http-types, aeson,
+case-insensitive, http-conduit (metadata APIs), xml-conduit (NFO) — plus
+acid-state for [[file:acid-state.org][persistent IDs]].

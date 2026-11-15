@@ -2,63 +2,89 @@
 #+AUTHOR: stamnostomp
 #+STARTUP: overview
 
-Design decisions for the Haskell media server. Update this file as decisions
-are made; see [[file:roadmap.org][roadmap.org]] for what to build and when.
+Design decisions for the Haskell media server. The module system and
+persistence design are adopted from the sibling repository
+(=../functional-media-server=) and specified in detail in
+[[file:modules.org][modules.org]] and [[file:acid-state.org][acid-state.org]].
+Update this file as decisions change; [[file:roadmap.org][roadmap.org]] tracks
+what to build and when.
 
 * Principles
 
 - Pure core, effectful shell: domain logic (scanning, metadata merging,
-  transcoding decisions) is pure and testable; IO (HTTP, ffmpeg, DB) is
-  pushed to the edges.
-- One process, library-first: start with a single =fms= executable serving a
-  REST API; avoid premature microservices.
-- Nix is the source of truth for builds; cabal is used for local iteration
+  range parsing, transcoding decisions) is pure and testable; IO (HTTP,
+  ffmpeg, disk) is pushed to the edges.
+- Monadic module system: the app runs in =AppM = ReaderT AppEnv (ExceptT
+  AppError IO)=; modules plug in as a =Module= record (name, init, routes)
+  plus an mtl-style capability typeclass with an =AppM= instance. Adding a
+  module never changes the core.
+- Module state lives in a typed registry in =AppEnv= (=Map Text Dynamic=
+  via =putState=/=getState=) under namespaced keys — the core never knows a
+  module's state exists.
+- acid-state for persistent library state (stable IDs across restarts and
+  renames), replacing the earlier SQLite-first plan; SQLite remains the
+  fallback for very large libraries.
+- Nix is the source of truth for builds; cabal is for local iteration
   inside the dev shell. The flake translates the .cabal file with
-  =callCabal2nix=, so the .cabal file is the single package description.
+  =callCabal2nix=.
+- Docs-driven: every design lives in =docs/*.org= before code (see
+  [[file:methodology.org][methodology.org]]).
 
-* Planned module layout (library =FMS=)
+* Module layout (target, mirrors the sibling =MediaServer.*= tree)
 
 #+begin_src text
 src/
-├── FMS.hs              -- package info (name, version)
-├── FMS/Server.hs       -- executable entry point, warp/wai app wiring
-├── FMS/Config.hs       -- runtime configuration (port, media roots, db path)
-├── FMS/Api.hs          -- REST endpoint definitions (servant-style)
-├── FMS/Library/
-│   ├── Model.hs        -- MediaItem, Library, Episode, ...
-│   ├── Scan.hs         -- pure filesystem-walking logic + IO wrapper
-│   └── Db.hs           -- SQLite persistence
-├── FMS/Metadata/
-│   ├── Nfo.hs          -- local NFO parsing
-│   └── Providers.hs    -- TMDB/OMDb/MusicBrainz HTTP lookups
-├── FMS/Auth.hs         -- users, API keys, sessions, middleware
-├── FMS/Stream.hs       -- direct play, byte ranges, HLS, transcoding via ffmpeg
-└── FMS/Image.hs        -- poster/backdrop/thumbnail serving and resizing
+├── FMS.hs                    -- package info (name, version)
+├── FMS/Server.hs             -- modules list + warp startup
+├── FMS/Core/
+│   ├── Monad.hs              -- AppM, AppEnv, AppError, runApp, MonadLog, putState/getState
+│   ├── Module.hs             -- Module, Route, Segment, get/post
+│   ├── Router.hs             -- buildApplication: route matching, CORS, error->HTTP
+│   ├── Range.hs              -- single-range ByteRange parser
+│   └── Types/
+│       ├── Config.hs         -- library path, port, stats path, API keys (env/CLI)
+│       ├── MediaItem.hs      -- MediaItem, LibraryIndex (JSON)
+│       └── Progress.hs       -- Progress, ItemStats
+└── FMS/Modules/
+    ├── Library.hs            -- libraryModule + MonadLibrary
+    ├── Library/Monad.hs      -- MonadLibrary class + AppM instance (acid-state)
+    ├── Library/State.hs      -- acid-state LibraryState + events  --> acid-state.org
+    ├── Library/Scan.hs       -- directory walk, media filter, mime map
+    ├── Library/Routes.hs     -- /library, /library/:id, /library/rescan
+    ├── Stream.hs             -- streamModule: GET /stream/:id with Range support
+    ├── Stats.hs              -- statsModule + MonadStats
+    ├── Stats/{Monad,Persistence,Routes}.hs
+    └── Metadata/
+        ├── Module.hs         -- metadataModule, init
+        ├── Monad.hs          -- MonadMetadata class + AppM instance
+        ├── Types.hs, Cache.hs, Nfo.hs, Routes.hs
+        └── Api/{Tmdb,TvMaze,Types}.hs
 #+end_src
 
-* Key technology choices (to be confirmed in milestone 1)
+* Key technology choices
 
-| Concern      | Candidate                                             |
-|--------------+-------------------------------------------------------|
-| HTTP server  | warp + servant (typed API)                            |
-| DB           | SQLite via direct-sqlite + esqueleto                  |
-| HTTP client  | http-conduit                                              |
-| JSON         | aeson                                                     |
-| Config       | env + yaml (aeson)                                    |
-| Logging      | co-log or katip                                       |
-| Transcoding  | ffmpeg via process (typed-process) + HLS              |
-| Auth         | API keys + session cookies; password hashing (bcrypt) |
+| Concern      | Choice                                             |
+|--------------+----------------------------------------------------|
+| HTTP server  | warp + wai, custom Router over a [Module] list     |
+| App monad    | mtl: ReaderT AppEnv (ExceptT AppError IO)          |
+| Module state | typed registry: IORef (HashMap Text Dynamic)      |
+| Persistence  | acid-state (library IDs/state); JSON files for stats |
+| JSON         | aeson                                              |
+| HTTP client  | http-conduit (TMDB/TvMaze)                         |
+| NFO parsing  | xml-conduit                                        |
+| Transcoding  | ffmpeg subprocess + HLS                            |
+| Auth         | API keys / tokens; RBAC (milestone 5)             |
 
 * Data flow
 
 #+begin_src text
-filesystem scan --> Library.Model --> SQLite --> REST API (/Items, /Library/...)
-                                                      |
-                                              metadata providers (TMDB/...)
-                                                      |
-                                              images, playback progress
-                                                      |
-client request --> auth middleware --> stream/transcode (ffmpeg) --> response
+filesystem scan --> registerItem (acid-state) --> persistent LibraryState
+                                                        |
+client --> Router --> handler in AppM --> capability classes (MonadLibrary...)
+                                                        |
+                                              stream / transcode (ffmpeg)
+                                                        |
+                                              stats, metadata providers, images
 #+end_src
 
 * Build / packaging
@@ -66,8 +92,7 @@ client request --> auth middleware --> stream/transcode (ffmpeg) --> response
 - =flake.nix= exposes =packages.default= (the =fms= executable, built with
   =haskellPackages.callCabal2nix=) and =devShells.default=.
 - After editing the .cabal file, nothing needs regenerating for the flake
-  (callCabal2nix re-reads it each evaluation). To get a static =default.nix=,
+  (callCabal2nix re-reads it each evaluation). For a static =default.nix=,
   run =cabal2nix . > default.nix= inside the dev shell.
-- System dependencies (ffmpeg, imagemagick, sqlite) will be added to the
-  package's =extra-libraries=/buildInputs via =callCabal2nix ... { }= args or
-  a package override once milestone 5 starts.
+- System dependencies (ffmpeg, sqlite) will be added via =callCabal2nix ... { }=
+  args or a package override when milestone 3 starts.

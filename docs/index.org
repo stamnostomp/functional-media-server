@@ -8,12 +8,17 @@
 A media server inspired by [[https://github.com/jellyfin/jellyfin][Jellyfin]], written in Haskell
 and built with Nix via cabal2nix.
 
-All project tracking lives in this =docs/= folder as org files.
+All project tracking lives in this =docs/= folder as org files. The
+methodology (module system, acid-state, task tracking) is adopted from the
+sibling repository =../functional-media-server=.
 
 ** Documents
 
-- [[file:roadmap.org][Roadmap]] — Jellyfin feature-parity plan, tracked as org TODO items
-- [[file:architecture.org][Architecture]] — design decisions and planned module layout
+- [[file:roadmap.org][Roadmap]] — Jellyfin feature parity + backlog, as org TODO items
+- [[file:methodology.org][Methodology]] — how we track work in org (TODO states, sections, tags)
+- [[file:modules.org][Module system]] — monadic modules: AppM, Module/Route, capability classes
+- [[file:acid-state.org][acid-state]] — persistent, stable library IDs
+- [[file:architecture.org][Architecture]] — principles, module layout, tech choices, data flow
 - [[file:dev-setup.org][Dev setup]] — git / nix / cabal2nix workflow
 
 ** Quick start

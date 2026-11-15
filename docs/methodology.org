@@ -1,0 +1,69 @@
+#+TITLE: Methodology — how we track work in org
+#+AUTHOR: stamnostomp
+#+STARTUP: overview
+
+Our documentation and task-tracking system. Adopted from the sibling
+repository's =TODO.org= (in =../functional-media-server=) and kept in this
+folder as org files.
+
+* Rules
+
+- All project docs and tasks live in =docs/= as =.org= files.
+- Every task is an org headline with a TODO state; sub-steps are org
+  checkboxes (= - [ ] = / = - [X] =).
+- The roadmap ([[file:roadmap.org][roadmap.org]]) is updated in the same commit
+  as the work it describes.
+- Each doc file starts with =#+TITLE=, and task files add =#+TODO= and
+  =#+STARTUP: overview=.
+
+* TODO states and priorities
+
+#+begin_src org
+#+TODO: TODO(t) NEXT(n) WAIT(w) | DONE(d) CANCELLED(c)
+#+PRIORITIES: A B C
+#+end_src
+
+- =TODO= — not started
+- =NEXT= — actively being worked on
+- =WAIT= — blocked on something external
+- =DONE= — finished (kept in the file for history)
+- =CANCELLED= — dropped
+- Priorities =[#A]= (critical) … =[#C]= (nice to have)
+
+* Standard roadmap sections
+
+Tasks in [[file:roadmap.org][roadmap.org]] are grouped into these sections:
+
+| Section         | Meaning                                        |
+|-----------------+------------------------------------------------|
+| DONE            | Completed work (kept for the record)           |
+| FIXES           | Bugs and issues, Critical first, then per-module |
+| IMPROVEMENTS    | Enhancements: Core / Performance / API / Security |
+| NEXT STEPS      | New features: High / Medium / Low priority     |
+| TECHNICAL DEBT  | Code quality / Build & development             |
+
+* Tags
+
+Tag headlines with the nature of the task (from the original =TODO.org=
+legend):
+
+:fix:          Bug fixes and critical issues
+:improvement:  Enhancements to existing features
+:feature:      New functionality
+:refactor:     Code restructuring
+:techdebt:     Technical debt items
+
+Example:
+
+#+begin_src org
+** TODO [#A] Implement stable UUID-based library IDs with acid-state  :fix:feature:
+   - [ ] Define LibraryState with path->ID mappings
+   - [ ] Integrate with AppM
+#+end_src
+
+* Source documents
+
+- =../functional-media-server/TODO.org= — task-tracking format used here
+- =../functional-media-server/ACID_STATE_INTEGRATION.org= — design that
+  became [[file:acid-state.org][acid-state.org]]
+- The module system those docs describe became [[file:modules.org][modules.org]]

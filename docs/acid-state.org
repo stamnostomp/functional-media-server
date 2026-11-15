@@ -1,0 +1,108 @@
+#+TITLE: acid-state — persistent, stable library IDs
+#+AUTHOR: stamnostomp
+#+TODO: TODO(t) NEXT(n) | DONE(d) CANCELLED(c)
+#+STARTUP: overview
+
+Design adopted from the sibling repo's =ACID_STATE_INTEGRATION.org=.
+acid-state gives ACID transactions with automatic file-based persistence —
+pure Haskell, no external DB — and fixes the known v1 limitation that
+library item IDs are a hash of the file path (unstable across renames).
+
+* Why acid-state
+
+- Pure Haskell, no external DB dependencies
+- Automatic serialization to disk (event log + checkpoints)
+- Transactional updates, type-safe, simple API
+- Good for moderate libraries (thousands of items); for millions, consider
+  SQLite instead (see Alternatives)
+
+* Setup checklist
+
+- [ ] Add =acid-state= (+ =safecopy=; historically =cereal=) to the cabal file
+- [ ] Create =FMS/Modules/Library/State.hs= with the state type and events
+- [ ] Add =AcidState LibraryState= + state dir to =AppEnv=
+- [ ] Open the state in =main= (=openLocalStateFrom=), checkpoint on shutdown
+- [ ] Rewrite the =MonadLibrary= instance to use =query= / =update=
+- [ ] Update the scanner to call =registerItem=
+- [ ] Test persistence across restarts
+- [ ] Configure checkpoint frequency
+
+* Persistent state
+
+#+begin_src haskell
+data LibraryState = LibraryState
+  { pathToId :: Map FilePath MediaId
+  , idToItem :: Map MediaId MediaItem
+  , nextId   :: Int
+  }
+
+-- Events (made acidic with makeAcidic):
+newId         :: Update LibraryState MediaId
+registerItem  :: FilePath -> MediaItem -> Update LibraryState MediaId
+getItemById   :: MediaId -> Query LibraryState (Maybe MediaItem)
+getIdByPath   :: FilePath -> Query LibraryState (Maybe MediaId)
+removeItem    :: FilePath -> Update LibraryState ()
+updateItem    :: MediaId -> MediaItem -> Update LibraryState ()
+#+end_src
+
+=registerItem= is idempotent: if the path already has an ID it returns the
+existing one, otherwise it allocates =nextId= and stores both mappings.
+
+* Integration with the module system
+
+- =AppEnv= gains =appLibraryState :: AcidState LibraryState= and
+  =appStateDir :: FilePath= (core change, one field).
+- =main= creates the dir, opens the state:
+
+#+begin_src haskell
+acidState <- openLocalStateFrom (stateDir </> "library") initialLibraryState
+-- on shutdown: createCheckpointAndClose acidState
+#+end_src
+
+- The =MonadLibrary= instance in =FMS/Modules/Library/Monad.hs= switches from
+  the in-memory =TVar= to:
+
+#+begin_src haskell
+getMediaItem id   = asks appLibraryState >>= \s -> query s (GetItemById id)
+registerMediaItem = asks appLibraryState >>= \s -> update s . RegisterItem
+#+end_src
+
+- The scanner calls =registerItem= per file instead of hashing the path.
+
+* Storage layout
+
+=./var/acid-state/library/= contains:
+
+- =eventlog= — append-only log of all transactions
+- =checkpoint= — periodic snapshots for fast recovery
+- lock file — guards concurrent access
+
+Checkpoint frequency is configurable (default every ~100 transactions;
+e.g. =CheckpointEvery 50= with =archiveCheckpoints = True=).
+
+* Migration from path-hash IDs
+
+1. On first run with acid-state, scan as before; =registerItem= assigns a
+   stable ID per path and persists the mapping.
+2. IDs stay stable across server restarts; renames need a path update
+   event (or a migration script).
+3. Keep the old hash-based generation only as a fallback during migration.
+
+* Alternatives considered
+
+| Option            | Trade-off                                  |
+|-------------------+--------------------------------------------|
+| acid-state        | zero-config, transactional, in-memory state |
+| sqlite-simple     | scales to huge libraries, SQL boilerplate  |
+| store + file      | manual serialization, more control         |
+| postgresql-simple | distributed setups                         |
+
+* Test
+
+#+begin_src haskell
+st1 <- openLocalState initialLibraryState
+update st1 (RegisterItem "/path/to/file.mp4" testItem)
+closeAcidState st1
+st2 <- openLocalState initialLibraryState   -- reads back from disk
+query st2 (GetIdByPath "/path/to/file.mp4") -- must return the same ID
+#+end_src

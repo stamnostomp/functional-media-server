@@ -1,58 +1,91 @@
-#+TITLE: Roadmap — Jellyfin feature parity
+#+TITLE: Roadmap — Jellyfin feature parity + adopted backlog
 #+AUTHOR: stamnostomp
 #+TODO: TODO(t) NEXT(n) WAIT(w) | DONE(d) CANCELLED(c)
 #+STARTUP: overview
 
-Feature plan for matching https://github.com/jellyfin/jellyfin, broken into
-milestones. Track progress by flipping TODO states (DONE, CANCELLED, ...).
+Feature plan for matching https://github.com/jellyfin/jellyfin, merged with
+the task backlog from the sibling repo's =TODO.org=. Track progress by
+flipping TODO states; tag items with :fix: :improvement: :feature:
+:refactor: :techdebt: (see [[file:methodology.org][methodology.org]]).
 
 * Milestone 0 — scaffolding
 ** DONE git repo, nix flake, cabal2nix build pipeline
-:PROPERTIES:
-:CREATED: [2026-11-14]
-:END:
 ** DONE docs/ org files for tracking
 ** DONE cabal package skeleton (library + fms executable + test suite)
+** DONE adopt methodology from sibling repo: module system, acid-state, docs format
+   ([[file:modules.org][modules.org]], [[file:acid-state.org][acid-state.org]], [[file:methodology.org][methodology.org]])
 
-* Milestone 1 — core HTTP server
-** TODO Choose HTTP stack (wai/warp vs servant) and wire a hello endpoint
-** TODO Config loading (env vars + config file, port, media roots)
-** TODO Logging (structured, e.g. katip or co-log)
-** TODO Graceful startup/shutdown
-** TODO Basic health endpoint (/System/Info/Public)
+* Milestone 1 — core server and module system :feature:
+** TODO Adopt AppM / AppEnv / Router / Module core from the monadic module system
+   - [ ] FMS.Core.Monad (AppM, AppError, runApp, MonadLog, putState/getState)
+   - [ ] FMS.Core.Module (Module, Route, Segment, get/post)
+   - [ ] FMS.Core.Router (buildApplication, CORS, error mapping)
+   - [ ] FMS.Server with the modules list
+** TODO Configuration from CLI arg + env vars (MEDIA_LIBRARY_PATH, MEDIA_SERVER_PORT, ...)
+** TODO Structured error logging with request IDs :improvement:
+** TODO Request tracing/metrics (duration, error rates) + health endpoint :improvement:
+** TODO Graceful shutdown on SIGTERM; finish in-flight requests :improvement:
+** TODO Config files (JSON/YAML) + env validation + defaults :improvement:
 
-* Milestone 2 — library model and scanning
-** TODO Media item model (movies, series, seasons, episodes, music, photos)
-** TODO Filesystem scanner walking configured library roots
-** TODO Persistence (SQLite via direct-sqlite/esqueleto)
-** TODO Library CRUD API (/Library/MediaFolders, /Items)
-** TODO Scan scheduling and progress reporting
+* Milestone 2 — library scanning and stable IDs :feature:
+** TODO [#A] acid-state persistent library IDs (path-hash IDs are unstable) :fix:
+   - [ ] LibraryState + events + makeAcidic (see [[file:acid-state.org][acid-state.org]])
+   - [ ] AppEnv gains AcidState LibraryState; open in main, checkpoint on exit
+   - [ ] MonadLibrary instance uses query/update
+   - [ ] Scanner calls registerItem; migration from hash IDs
+   - [ ] Test persistence across restarts
+** TODO Filesystem scanner with media-extension filter and mime mapping
+** TODO Handle symbolic links: follow/ignore option, detect circular chains :fix:
+** TODO Fix race conditions during scan (file locking, files changing mid-scan) :fix:
+** TODO Parallel directory walking :improvement:
+** TODO Incremental scanning + filesystem event watching (inotify/FSEvents) :improvement:
+** TODO Library API: GET /library, GET /library/:id, POST /library/rescan
+** TODO Filtering (type, genre, year), sorting, pagination, search endpoint :improvement:
+** TODO Extra item fields: size, mtime, checksum :improvement:
 
-* Milestone 3 — metadata
-** TODO NFO / local metadata parsing
-** TODO Remote provider lookups (TMDB / OMDb / MusicBrainz)
-** TODO Images: posters, backdrops, thumbnails (/Items/{id}/Images)
-** TODO Metadata refresh and caching
+* Milestone 3 — streaming, transcoding, subtitles
+** TODO GET /stream/:id with byte-range support (single range, as designed)
+** TODO [#B] Fix Range header edge cases :fix:
+   - [ ] Multiple ranges (rarely used)
+   - [ ] Better errors for malformed ranges; handle empty range requests
+** TODO [#B] Fix file handle leaks; add timeout for stalled streams :fix:
+** TODO Transcoding via FFmpeg: on-the-fly for unsupported formats, quality/bitrate adaptation :feature:
+** TODO Thumbnail generation :feature:
+** TODO Subtitles: detection, streaming, format conversion (SRT/VTT) :feature:
+** TODO HLS packaging for adaptive streaming :feature:
+** TODO Stream large responses lazily; memory monitoring :improvement:
 
-* Milestone 4 — users, auth, sessions
-** TODO User model + password hashing (bcrypt or similar)
-** TODO API keys and authentication middleware
-** TODO Sessions (/Sessions), device reporting
-** TODO Authorization / per-library permissions
-** TODO Playback progress, resume points, favorites, played state
+* Milestone 4 — metadata
+** TODO NFO parser (handle malformed XML gracefully; Ember / Tiny Media Manager formats) :fix:
+** TODO TMDB / TvMaze API clients with rate limiting, exponential backoff, error caching :fix:
+** TODO Metadata cache (disk-backed, invalidation strategy) :improvement:
+** TODO Images: posters, backdrops, thumbnails endpoints
+** TODO OpenAPI/Swagger spec generated from code + docs endpoint :improvement:
 
-* Milestone 5 — playback and streaming
-** TODO Direct play of files (byte-range requests)
-** TODO HLS packaging (ffmpeg hls muxer)
-** TODO On-the-fly transcoding via ffmpeg subprocess
-** TODO Subtitle extraction and delivery (SRT/VTT/embedded)
-** TODO Audio stream selection and transcode profiles
-** TODO /Videos/{id}/stream endpoints
+* Milestone 5 — stats, users, security
+** TODO Stats module: play counts, progress, continue-watching, popular, new
+** TODO User management: profiles, watch history, resume points :feature:
+** TODO Authentication: basic auth, tokens (API keys), role-based access control :feature:
+** TODO Configurable CORS + preflight handling :improvement:
+** TODO Rate limiting: per-IP and per-endpoint :feature:
+** TODO Sanitize file paths; prevent directory traversal; validate input :fix:
 
-* Milestone 6 — client and extras
-** TODO Static web client (or integration with a Jellyfin web client)
-** TODO Search across the library
-** TODO Collections, genres, persons, studios endpoints
-** TODO Live TV / tuners (low priority)
-** TODO DLNA (low priority)
-** TODO Image transcoding/resizing (ImageMagick or native)
+* Milestone 6 — clients and extras :feature:
+** TODO Web UI for browsing + admin interface
+** TODO WebSocket support for real-time notifications (library updates)
+** TODO GraphQL API as an alternative to REST
+** TODO Plugin system (dynamic module loading, marketplace)
+** TODO Live TV / DLNA (low priority)
+
+* TECHNICAL DEBT :techdebt:
+** TODO Unit tests (Range edge cases, error conditions, concurrent access)
+** TODO Integration tests (end-to-end API, performance)
+** TODO Haddock comments on all exports + module-level docs
+** TODO IDE config, pre-commit hooks, CI/CD pipeline
+** TODO Dockerfile + docker-compose
+
+* OPEN QUESTIONS
+** TODO [#A] Fix project-name typo "functonal" -> "functional" :fix:
+   - [ ] Decide: rename this directory or merge into =../functional-media-server=
+     (the correctly-spelled sibling folder already exists, so a plain rename collides)
+   - [ ] Update cabal file name and all doc references if renamed

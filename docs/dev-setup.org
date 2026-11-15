@@ -57,4 +57,5 @@ nix develop --command cabal2nix . > default.nix
 - Commit messages: short imperative subject, details in the body.
 - Don't commit =dist-newstyle/= or =result= (see .gitignore).
 - Keep the roadmap in [[file:roadmap.org][docs/roadmap.org]] up to date in the same
-  commit as the work it describes.
+  commit as the work it describes; follow the conventions in
+  [[file:methodology.org][docs/methodology.org]] (TODO states, sections, tags).

@@ -48,6 +48,12 @@ library
                       FMS.Modules.Stats.Monad
                       FMS.Modules.Stats.Persistence
                       FMS.Modules.Stats.Routes
+                      FMS.Modules.Metadata
+                      FMS.Modules.Metadata.Types
+                      FMS.Modules.Metadata.Nfo
+                      FMS.Modules.Metadata.Persistence
+                      FMS.Modules.Metadata.Monad
+                      FMS.Modules.Metadata.Routes
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
                       FMS.Modules.Library.Routes
@@ -72,6 +78,7 @@ library
                     , warp
                     , http-types
                     , case-insensitive
+                    , xml-conduit
                     , process
                     , bcrypt
                     , random

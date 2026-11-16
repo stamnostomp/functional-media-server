@@ -51,6 +51,9 @@ import FMS.Modules.Library.State
   , RegisterItem(..)
   , initialLibraryState
   )
+import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
+import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata (..))
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -523,5 +526,71 @@ main = do
     True (all (`BSC.isInfixOf` uj1) ["\"id\":\"1\"", "\"name\":\"admin\"", "\"isAdmin\":true"])
   check "User FromJSON parses the internal full shape"
     (Just u1) (Aeson.decode (Aeson.encode (toInternalJSON u1)) :: Maybe User)
+
+  -- Metadata module (milestone 4b, docs/roadmap.org milestone 4,
+  -- docs/todo.org section 3): the pure NFO parser, nfoPathFor, and the
+  -- metadata.json persistence roundtrip.
+  let sampleNfo = BSC.pack (unlines
+        [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        , "<movie>"
+        , "  <title>Test Movie</title>"
+        , "  <originaltitle>Original Test Movie</originaltitle>"
+        , "  <year>2020</year>"
+        , "  <rating>7.5</rating>"
+        , "  <runtime>95</runtime>"
+        , "  <genre>Action</genre>"
+        , "  <genre>Sci-Fi</genre>"
+        , "  <overview>A test overview.</overview>"
+        , "  <tmdbid>42</tmdbid>"
+        , "  <imdbid>tt1234567</imdbid>"
+        , "</movie>"
+        ])
+      expectedMeta = MediaMetadata
+        { metaTitle          = Just "Test Movie"
+        , metaOverview       = Just "A test overview."
+        , metaGenres         = ["Action", "Sci-Fi"]
+        , metaYear           = Just 2020
+        , metaRating         = Just 7.5
+        , metaRuntimeMinutes = Just 95
+        , metaProviderIds    = HM.fromList [("tmdb", "42"), ("imdb", "tt1234567")]
+        , metaSource         = "nfo"
+        }
+      isLeftE' :: Either String MediaMetadata -> Bool
+      isLeftE' (Left _)  = True
+      isLeftE' (Right _) = False
+  check "parseMovieNfo parses a full <movie> NFO"
+    (Right expectedMeta) (parseMovieNfo sampleNfo)
+  check "parseMovieNfo on malformed XML is Left"
+    True (isLeftE' (parseMovieNfo (BSC.pack "<movie><title>oops")))
+  check "parseMovieNfo on non-movie XML is Left"
+    True (isLeftE' (parseMovieNfo (BSC.pack "<tvshow><title>x</title></tvshow>")))
+  let sparseMeta = MediaMetadata
+        (Just "Only Title") Nothing [] Nothing Nothing Nothing HM.empty "nfo"
+  check "parseMovieNfo with missing fields -> Nothing/empty fields"
+    (Right sparseMeta)
+    (parseMovieNfo (BSC.pack "<movie><title>Only Title</title></movie>"))
+  check "parseMovieNfo ignores unparseable numbers"
+    (Right (sparseMeta { metaTitle = Just "T", metaYear = Nothing }))
+    (parseMovieNfo (BSC.pack "<movie><title>T</title><year>abc</year></movie>"))
+  check "nfoPathFor replaces the extension"
+    "/media/clip.nfo" (nfoPathFor "/media/clip.mp4")
+  check "nfoPathFor keeps the directory"
+    "/a/b/song.nfo" (nfoPathFor "/a/b/song.mp3")
+
+  -- metadata.json persistence: saveMetadata/loadMetadata roundtrip in /tmp.
+  let metaFile = "/tmp/fms-test-metadata.json"
+      metaMap = HM.fromList [("1", expectedMeta), ("2", sparseMeta)]
+  saveMetadata metaFile metaMap
+  loadedMeta <- loadMetadata metaFile
+  check "saveMetadata/loadMetadata roundtrip" metaMap loadedMeta
+  rawMeta <- BSC.readFile metaFile
+  check "metadata.json is a bare map containing ids and providerIds"
+    True ("\"1\"" `isInfixOf` BSC.unpack rawMeta
+          && "\"tmdb\"" `isInfixOf` BSC.unpack rawMeta
+          && "\"providerIds\"" `isInfixOf` BSC.unpack rawMeta
+          && "\"source\":\"nfo\"" `isInfixOf` BSC.unpack rawMeta)
+  missingMeta <- loadMetadata "/tmp/fms-test-metadata-does-not-exist.json"
+  check "loadMetadata of a missing file is empty" HM.empty missingMeta
+  removeFile metaFile
 
   putStrLn "All tests passed."

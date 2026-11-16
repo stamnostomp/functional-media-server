@@ -68,7 +68,8 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO Stream large responses lazily; memory monitoring :improvement:
 
 * Milestone 4 — metadata
-** TODO NFO parser (handle malformed XML gracefully; Ember / Tiny Media Manager formats) :fix:
+** DONE NFO parser (movie NFO via xml-conduit; malformed XML -> Left) :fix:
+   - [ ] Ember / Tiny Media Manager formats, series/episode NFOs
 ** TODO TMDB / TvMaze API clients with rate limiting, exponential backoff, error caching :fix:
 ** TODO Metadata cache (disk-backed, invalidation strategy) :improvement:
 ** TODO Images: posters, backdrops, thumbnails endpoints

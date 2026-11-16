@@ -2,12 +2,13 @@ module FMS.Modules.System
   ( systemModule
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, forkIO, putMVar, threadDelay)
 import Control.Concurrent.STM (TVar, atomically, readTVarIO, writeTVar)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (eitherDecode, object, (.=))
+import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:?), (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -19,10 +20,14 @@ import FMS (version)
 import FMS.Core.Module (Module (..), Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, getState, putState)
 import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.User (User (..))
 import FMS.Core.Types.ServerConfig
-  ( ServerConfig (..), applyServerConfigPatch, saveServerConfig
-  , serverConfigFilePath
+  ( ServerConfig (..), ServerConfigPatch (..), applyServerConfigPatch
+  , saveServerConfig, serverConfigFilePath
   )
+-- FMS.Modules.Auth.Monad imports only Core/Auth/Library.Monad, so importing
+-- it here does not create a cycle (only FMS.Server imports this module).
+import FMS.Modules.Auth.Monad (MonadAuth (..))
 
 -- | The system module: server info, health check, configuration and
 -- shutdown/restart (docs/todo.org section 1, milestone 1b). Init only
@@ -41,6 +46,10 @@ systemModule = Module
       , post [Lit "System", Lit "Configuration"] updateConfigHandler
       , post [Lit "System", Lit "Shutdown"] (shutdownLikeHandler "shutdown" "shutting down")
       , post [Lit "System", Lit "Restart"]  (shutdownLikeHandler "restart" "restarting")
+      , post [Lit "System", Lit "Wizard", Lit "Startup"]   wizardStartupHandler
+      , post [Lit "System", Lit "Wizard", Lit "Completed"] wizardCompletedHandler
+      , get  [Lit "Branding", Lit "Configuration"] brandingGetHandler
+      , post [Lit "Branding", Lit "Configuration"] brandingPostHandler
       , get  [Lit "healthz"] healthz
       ]
   }
@@ -57,6 +66,7 @@ infoPublic _captures _req = do
     [ "ServerName" .= scServerName sc
     , "Version"    .= version
     , "Id"         .= serverId
+    , "StartupWizardCompleted" .= scStartupCompleted sc  -- milestone 10b
     ]))
 
 -- | @GET /System/Info@ — full server info (Jellyfin-shaped): id, name,
@@ -75,6 +85,7 @@ infoHandler _captures _req = do
     , "Port"        .= scPort sc
     , "RequireAuth" .= scRequireAuth sc
     , "Modules"     .= mods
+    , "StartupWizardCompleted" .= scStartupCompleted sc  -- milestone 10b
     ]))
 
 -- | @GET /System/Configuration@ — 200 the current 'ServerConfig' JSON.
@@ -106,6 +117,99 @@ updateConfigHandler _captures req = do
       logInfo ("system: configuration updated (ServerName=" <> scServerName sc'
                <> ", Port=" <> T.pack (show (scPort sc')) <> ")")
       pure (jsonResponse sc')
+
+-- | Body of @POST /System/Wizard/Startup@ (milestone 10b): the admin
+-- account name and password; @Name@ or @Username@ both accepted, both
+-- optional (defaults "admin" / "admin").
+data WizardStartupRequest = WizardStartupRequest
+  { wsrName :: Maybe Text
+  , wsrPw   :: Maybe Text
+  }
+
+instance FromJSON WizardStartupRequest where
+  parseJSON = withObject "WizardStartupRequest" $ \o ->
+    WizardStartupRequest
+      <$> (o .:? "Name" <|> o .:? "Username")
+      <*> o .:? "Password"
+
+-- | @POST /System/Wizard/Startup@ — first-run wizard (milestone 10b,
+-- open path so it works in strict mode before any user exists). When NO
+-- user exists yet, creates the admin user and marks the wizard completed;
+-- when users already exist -> 400. Bad JSON -> 400. 200
+-- @{"status":"ok","userId":"..."}@.
+wizardStartupHandler :: [(Text, Text)] -> Request -> AppM Response
+wizardStartupHandler _captures req = do
+  body <- liftIO (strictRequestBody req)
+  case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right wsr -> do
+      users <- listUsers
+      case users of
+        (_ : _) -> throwError (BadRequest "startup wizard already completed")
+        [] -> do
+          let name = fromMaybe "admin" (wsrName wsr)
+              pw   = fromMaybe "admin" (wsrPw wsr)
+          u <- createUser name pw True
+          sc <- currentServerConfig
+          let sc' = sc { scStartupCompleted = True }
+          persistServerConfig sc'
+          logInfo ("system: startup wizard completed, created admin user " <> userName u)
+          pure (jsonResponse (object
+            [ "status" .= ("ok" :: Text)
+            , "userId" .= userId u
+            ]))
+
+-- | @POST /System/Wizard/Completed@ — mark the startup wizard completed
+-- without creating a user (milestone 10b); 200 @{"status":"ok"}@.
+wizardCompletedHandler :: [(Text, Text)] -> Request -> AppM Response
+wizardCompletedHandler _captures _req = do
+  sc <- currentServerConfig
+  let sc' = sc { scStartupCompleted = True }
+  persistServerConfig sc'
+  pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
+
+-- | @GET /Branding/Configuration@ — 200 the branding fields of the server
+-- config (milestone 10b, open path like Jellyfin's public branding).
+brandingGetHandler :: [(Text, Text)] -> Request -> AppM Response
+brandingGetHandler _captures _req = do
+  sc <- currentServerConfig
+  pure (jsonResponse (brandingObject sc))
+
+-- | @POST /Branding/Configuration@ — partial patch over the branding
+-- fields (@LoginDisclaimer@?, @CustomCss@?), persisted to config.json and
+-- applied to the live TVar; 200 with the updated branding object.
+-- Reuses 'ServerConfigPatch' (its 10b fields are exactly the branding
+-- ones); 400 on bad JSON.
+brandingPostHandler :: [(Text, Text)] -> Request -> AppM Response
+brandingPostHandler _captures req = do
+  body <- liftIO (strictRequestBody req)
+  case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right patch -> do
+      sc <- currentServerConfig
+      let sc' = applyServerConfigPatch sc (patch :: ServerConfigPatch)
+      persistServerConfig sc'
+      pure (jsonResponse (brandingObject sc'))
+
+-- | The Jellyfin-shaped branding response object.
+brandingObject :: ServerConfig -> Value
+brandingObject sc = object
+  [ "LoginDisclaimer" .= scLoginDisclaimer sc
+  , "CustomCss"       .= scCustomCss sc
+  , "SplashscreenEnabled" .= False
+  ]
+
+-- | Persist a new server config to @stateDir/config.json@ AND update the
+-- live "system.serverConfig" TVar (milestone 10b helper, same steps as
+-- 'updateConfigHandler').
+persistServerConfig :: ServerConfig -> AppM ()
+persistServerConfig sc' = do
+  cfg <- asks envConfig
+  liftIO (saveServerConfig (serverConfigFilePath (configStateDir cfg)) sc')
+  mTv <- getState "system.serverConfig" :: AppM (Maybe (TVar ServerConfig))
+  case mTv of
+    Just tv -> liftIO (atomically (writeTVar tv sc'))
+    Nothing -> pure ()
 
 -- | @POST /System/Shutdown@ and @POST /System/Restart@ — answer 200
 -- @{"status": ...}@ first, then fire the shutdown 'MVar' with the tag
@@ -144,6 +248,9 @@ currentServerConfig = do
         , scRequireAuth = configRequireAuth cfg
         , scLibraryPath = configLibraryPath cfg
         , scPort        = configPort cfg
+        , scStartupCompleted = False
+        , scLoginDisclaimer  = ""
+        , scCustomCss        = ""
         }
 
 -- | A stable-ish server id derived from the config (library path + port),

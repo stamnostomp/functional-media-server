@@ -169,6 +169,11 @@ openPaths =
   , ["healthz"]
   , ["Users", "AuthenticateByName"]
   , ["Users", "Public"]
+  -- milestone 10b: the first-run wizard must be reachable before any user
+  -- exists (strict mode), and branding configuration is public like Jellyfin
+  , ["System", "Wizard", "Startup"]
+  , ["System", "Wizard", "Completed"]
+  , ["Branding", "Configuration"]
   ]
 
 -- | Is this concrete request path in the open list? Pure, exported for

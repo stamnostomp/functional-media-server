@@ -1208,12 +1208,12 @@ main = do
     (Just defaultServerConfig)
     (Aeson.decode (Aeson.encode defaultServerConfig) :: Maybe ServerConfig)
   check "ServerConfigPatch partial decode: only ServerName set"
-    (Just (ServerConfigPatch (Just "My Media") Nothing Nothing Nothing))
+    (Just (ServerConfigPatch (Just "My Media") Nothing Nothing Nothing Nothing Nothing Nothing))
     (Aeson.decode "{\"ServerName\":\"My Media\"}" :: Maybe ServerConfigPatch)
   check "ServerConfigPatch empty object decodes to all-Nothing"
-    (Just (ServerConfigPatch Nothing Nothing Nothing Nothing))
+    (Just (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
     (Aeson.decode "{}" :: Maybe ServerConfigPatch)
-  let patch = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing)
+  let patch = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
             (Aeson.decode "{\"ServerName\":\"My Media\",\"Port\":9999}" :: Maybe ServerConfigPatch)
       merged = applyServerConfigPatch defaultServerConfig patch
   check "applyServerConfigPatch overrides set fields, keeps the rest"
@@ -1236,6 +1236,52 @@ main = do
   check "loadServerConfig applies a partial file over the defaults"
     (4321, "functional-media-server") (scPort partialCfg, scServerName partialCfg)
   removeFile cfgFile
+
+  -- Milestone 10b (startup wizard + branding): ServerConfig with the new
+  -- fields, pre-10b config.json compatibility, patch set/clear semantics.
+  check "defaultServerConfig 10b defaults (wizard not completed, empty branding)"
+    (False, "", "")
+    ( scStartupCompleted defaultServerConfig, scLoginDisclaimer defaultServerConfig
+    , scCustomCss defaultServerConfig )
+  check "ServerConfig FromJSON of pre-10b JSON (no new keys) -> defaults"
+    (Just (False, "", ""))
+    ((\sc -> (scStartupCompleted sc, scLoginDisclaimer sc, scCustomCss sc)) <$>
+      (Aeson.decode "{\"ServerName\":\"Old\",\"RequireAuth\":true,\"LibraryPath\":\"/m\",\"Port\":1234}"
+        :: Maybe ServerConfig))
+  check "ServerConfig FromJSON of an empty object -> all defaults"
+    (Just defaultServerConfig) (Aeson.decode "{}" :: Maybe ServerConfig)
+  check "ServerConfig JSON roundtrip keeps the 10b keys"
+    (Just True)
+    (scStartupCompleted <$>
+      (Aeson.decode (Aeson.encode (defaultServerConfig { scStartupCompleted = True }))
+        :: Maybe ServerConfig))
+  let p10b = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+             (Aeson.decode "{\"StartupCompleted\":true,\"LoginDisclaimer\":\"hi\",\"CustomCss\":\"body{}\"}"
+               :: Maybe ServerConfigPatch)
+      m10b = applyServerConfigPatch defaultServerConfig p10b
+  check "applyServerConfigPatch sets the 10b fields"
+    (True, "hi", "body{}")
+    (scStartupCompleted m10b, scLoginDisclaimer m10b, scCustomCss m10b)
+  let p10bClear = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+                  (Aeson.decode "{\"LoginDisclaimer\":\"\"}" :: Maybe ServerConfigPatch)
+      m10bClear = applyServerConfigPatch m10b p10bClear
+  check "applyServerConfigPatch can clear a branding field to empty"
+    ("", True, "body{}")
+    (scLoginDisclaimer m10bClear, scStartupCompleted m10bClear, scCustomCss m10bClear)
+  check "ServerConfigPatch null decodes to Nothing (= keep current, patch convention)"
+    (Just Nothing)
+    (scpLoginDisclaimer <$>
+      (Aeson.decode "{\"LoginDisclaimer\":null}" :: Maybe ServerConfigPatch))
+  check "applyServerConfigPatch with a null field keeps the base value"
+    "hi"
+    (scLoginDisclaimer (applyServerConfigPatch m10b
+      (fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+        (Aeson.decode "{\"LoginDisclaimer\":null}" :: Maybe ServerConfigPatch))))
+  check "ServerConfigPatch ToJSON roundtrip with 10b keys"
+    (Just p10b) (Aeson.decode (Aeson.encode p10b) :: Maybe ServerConfigPatch)
+  check "isOpenPath: wizard + branding paths are open"
+    [True, True, True, False]
+    (map isOpenPath [["System","Wizard","Startup"], ["System","Wizard","Completed"], ["Branding","Configuration"], ["System","Configuration"]])
 
   -- Admin module (milestone 11a, docs/todo.org section 11): the activity
   -- ring buffer, the task-due predicate, and the JSON roundtrips.

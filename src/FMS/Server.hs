@@ -30,7 +30,7 @@ import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
 import FMS.Core.RateLimit (Bucket, rateLimitBucketsKey)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Types.ServerConfig (ServerConfig (..))
+import FMS.Core.Types.ServerConfig (ServerConfig (..), loadServerConfig, serverConfigFilePath)
 import FMS.Modules.Admin (adminModule, MonadAdmin (..))
 import FMS.Modules.ApiDocs (apiDocsModule)
 import FMS.Modules.Auth (authModule)
@@ -78,7 +78,11 @@ runServer :: Config -> IO ()
 runServer cfg = do
   createDirectoryIfMissing True (configStateDir cfg)
   appEnv <- newAppEnv cfg
-  let sc = ServerConfig
+  -- Milestone 10b: the TVar starts from the persisted config.json (so
+  -- StartupCompleted/LoginDisclaimer/CustomCss survive restarts), with the
+  -- env-driven fields (already merged in app/Main) winning.
+  fileSc <- loadServerConfig (serverConfigFilePath (configStateDir cfg))
+  let sc = fileSc
         { scServerName  = configServerName cfg
         , scRequireAuth = configRequireAuth cfg
         , scLibraryPath = configLibraryPath cfg

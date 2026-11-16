@@ -136,7 +136,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Per-library (per-folder) permissions: User.allowedFolders, GET/POST /Users/:id/Permissions, enforced (401) on all item routes, filtered from lists; persisted in users.json (admin flag DONE)
 ** DONE enabled/disabled users flag: =POST /Users/:id/Enable|Disable=, User.userEnabled; login -> 403 "user is disabled"; disable purges session tokens AND router gate requires enabled owner (stale token -> 401 in strict mode)
 ** DONE Parental controls (basic): =GET/POST /Users/:id/Policy= {MaxParentalRating, BlockedTags, AccessSchedules}; ratingRank ordering (G..NC-17, TV-*), tags block, same-day schedule windows; enforced in visibleItems/getItemWithAccess (403); NFO <mpaa> -> metaOfficialRating
-** TODO First-run startup wizard (admin creation) like Jellyfin's
+** DONE First-run startup wizard: =POST /System/Wizard/Startup= (creates admin when zero users, else 400), =POST /System/Wizard/Completed=, StartupWizardCompleted in /System/Info(+Public)
 
 * 9. User data and personalization :feature:
 ** DONE =/Users/{id}/Items/{id}/UserData= get/update (played, favorite, playbackPosition, playCount) - self-or-admin, persisted userdata.json
@@ -158,7 +158,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] =GET /System/ActivityLog= (ring buffer 500 + stateDir/activity.log JSON lines, newest first)
 ** DONE Scheduled tasks: =GET /ScheduledTasks=, =POST .../:id/Run=, =POST .../:id/Enable=; 10s scheduler thread; default tasks library-rescan 300s / metadata-refresh 3600s / acid-checkpoint 600s
 ** TODO Server logs endpoint + log levels config
-** TODO Branding (name, login disclaimer), startup wizard state
+** DONE Branding + startup wizard state: =GET/POST /Branding/Configuration= {LoginDisclaimer, CustomCss, SplashscreenEnabled}, persisted in config.json, reloaded at boot
 ** TODO Notifications and webhooks (=/Webhooks=) on item added/playback events
 ** TODO Plugin system architecture (install/list/enable plugins) — see [[file:modules.org][modules.org]]
 

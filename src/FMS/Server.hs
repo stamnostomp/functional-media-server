@@ -29,6 +29,7 @@ import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.ServerConfig (ServerConfig (..))
 import FMS.Modules.Admin (adminModule, MonadAdmin (..))
+import FMS.Modules.ApiDocs (apiDocsModule)
 import FMS.Modules.Auth (authModule)
 import FMS.Modules.Images (imagesModule)
 import FMS.Modules.Library (libraryModule)
@@ -55,7 +56,7 @@ modules =
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
-  , webModule
+  , webModule, apiDocsModule
   ]
 
 -- | Boot the server: build the environment, register the runtime state
@@ -87,6 +88,9 @@ runServer cfg = do
     -- (read by the router under "ratelimit.buckets").
     rlTv <- liftIO (newTVarIO (HM.empty :: HM.HashMap Text Bucket))
     putState rateLimitBucketsKey rlTv
+    -- Milestone 1c: the module list itself, so the api-docs module can
+    -- generate the OpenAPI spec from the actual route table.
+    putState "system.modules" modules
   forM_ modules $ \m -> do
     r <- runApp appEnv (moduleInit m)
     case r of

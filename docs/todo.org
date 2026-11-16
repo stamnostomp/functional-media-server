@@ -15,7 +15,8 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] =GET /System/Info= (Id, ServerName, Version, LibraryPath, Port, RequireAuth, Modules list)
    - [X] =GET /System/Configuration= and =POST /System/Configuration= (partial patch, persisted to stateDir/config.json, live-applied)
    - [X] =POST /System/Shutdown= (graceful: warp drain + acid checkpoint) and =POST /System/Restart= (re-exec same binary/env)
-** TODO OpenAPI/Swagger spec generated from code + =/api-docs= UI
+** DONE OpenAPI generated from the live route table: =GET /api-docs/openapi.json= (OpenAPI 3.0.3, all module paths, captures as required path params, module tags) + =GET /api-docs= HTML index
+** TODO interactive Swagger UI (external assets); per-route summaries via getDoc/postDoc
 ** TODO CORS handling
    - [X] OPTIONS preflight (204) + permissive CORS headers on every response
    - [ ] CORS configurable per config

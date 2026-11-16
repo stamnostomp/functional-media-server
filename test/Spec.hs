@@ -29,7 +29,7 @@ import System.Posix.Files (createSymbolicLink)
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
-import FMS.Core.Module (Segment(..))
+import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, filterByFolder, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
@@ -108,6 +108,7 @@ import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
 import FMS.Modules.Sessions.Types (PlaySession (..))
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
 import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..))
+import FMS.Modules.ApiDocs (methodText, routeToPath, routesToOpenApi, segmentToPathPiece)
 import FMS.Modules.Web (webPageHtml)
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
@@ -799,6 +800,32 @@ main = do
   check "requestIdHex 0 is 16 zero chars" "0000000000000000" (requestIdHex 0)
   check "requestIdHex 255 is zero-padded 16-char hex" "00000000000000ff" (requestIdHex 255)
   check "requestIdHex 65536 keeps 16 chars" 16 (T.length (requestIdHex 65536))
+
+  -- ApiDocs module (milestone 1c, docs/todo.org section 1): the pure
+  -- route -> OpenAPI path mapping and the spec generator.
+  check "segmentToPathPiece Lit" "items" (segmentToPathPiece (Lit "items"))
+  check "segmentToPathPiece Capture" "{id}" (segmentToPathPiece (Capture "id"))
+  check "methodText lowercases the method" "get" (methodText "GET")
+  let rDocs = get [Lit "items", Capture "id", Lit "metadata"] undefined
+  check "routeToPath mixed Lit/Capture pattern" "/items/{id}/metadata" (routeToPath rDocs)
+  check "routeToPath of the empty (root) pattern is /" "/" (routeToPath (get [] undefined))
+  let spec     = routesToOpenApi [("fake", [rDocs, post [Lit "items"] undefined])]
+      specTxt  = LBSC.unpack (Aeson.encode spec)
+  check "generated spec declares openapi 3.0.3"
+    True ("\"openapi\":\"3.0.3\"" `isInfixOf` specTxt)
+  check "spec info has the server title/version"
+    True ("\"title\":\"functional-media-server\"" `isInfixOf` specTxt
+          && "\"version\":\"0.1.0.0\"" `isInfixOf` specTxt)
+  check "spec paths contain /items/{id}/metadata"
+    True ("\"/items/{id}/metadata\"" `isInfixOf` specTxt)
+  check "spec path object has get (and /items has post)"
+    True ("\"get\"" `isInfixOf` specTxt && "\"/items\":" `isInfixOf` specTxt
+          && "\"post\"" `isInfixOf` specTxt)
+  check "capture id becomes a required path parameter"
+    True (all (`isInfixOf` specTxt)
+      ["\"name\":\"id\"", "\"in\":\"path\"", "\"required\":true", "\"type\":\"string\""])
+  check "operation has tags with the module name and a 200 response"
+    True ("\"tags\":[\"fake\"]" `isInfixOf` specTxt && "\"200\"" `isInfixOf` specTxt)
 
   -- Metadata module (milestone 4b, docs/roadmap.org milestone 4,
   -- docs/todo.org section 3): the pure NFO parser, nfoPathFor, and the

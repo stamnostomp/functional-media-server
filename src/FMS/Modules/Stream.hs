@@ -13,12 +13,13 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Network.HTTP.Types (Header, hRange, status200, status206)
-import Network.Wai (Request, Response, requestHeaders, responseStream)
+import Network.Wai (Request, Response, queryString, requestHeaders, responseStream)
 import System.Directory (getFileSize)
 import System.IO (IOMode(ReadMode), SeekMode(AbsoluteSeek), hClose, hSeek, openBinaryFile)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM)
+import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
@@ -55,9 +56,15 @@ streamHandler captures req =
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
-          size <- liftIO (getFileSize (itemPath item))
-          let path = itemPath item
-              baseHeaders =
+          -- milestone 4j: ?version=N picks a file from the item's version
+          -- list (default 0 = primary); invalid -> 400
+          path <- case versionParam (queryParams (queryString req)) of
+            Left msg -> throwError (BadRequest msg)
+            Right n  -> case versionPathFor item n of
+              Left msg   -> throwError (BadRequest msg)
+              Right path -> pure path
+          size <- liftIO (getFileSize path)
+          let baseHeaders =
                 [ ("Content-Type", encodeUtf8 (itemMime item))
                 , ("Accept-Ranges", "bytes")
                 ]

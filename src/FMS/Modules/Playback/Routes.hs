@@ -4,12 +4,14 @@ module FMS.Modules.Playback.Routes
   , mediaStreamsHandler
   ) where
 
+import Control.Monad (forM)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (object, (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.Wai (Request, Response)
+import System.Directory (getFileSize)
 import System.Random (newStdGen, randomRs)
 
 import FMS.Core.Module (Route, Segment(..), get, jsonResponse, post)
@@ -55,10 +57,27 @@ playbackInfoHandler captures req =
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
+          -- milestone 4j: one MediaSource per version path. Only the
+          -- primary is probed; the other versions get the container from
+          -- the extension and no streams (documented: probing every
+          -- version on every PlaybackInfo would be expensive).
+          let paths = if null (itemVersions item) then [itemPath item] else itemVersions item
           probed <- liftIO (probeFile (itemPath item))
-          source <- mediaSourceFor item probed
-          sid    <- liftIO newPlaySessionId
-          pure (jsonResponse (PlaybackResponse [source] sid))
+          source0 <- mediaSourceFor item probed
+          others <- forM (drop 1 paths) $ \p -> do
+            sz <- liftIO (getFileSize p)
+            pure MediaSource
+              { sourceId             = itemId item
+              , sourcePath           = p
+              , container            = containerFromExtension p
+              , sizeBytes            = sz
+              , mediaStreams         = []
+              , supportsDirectPlay   = False
+              , supportsDirectStream = False
+              , supportsTranscoding  = True
+              }
+          sid <- liftIO newPlaySessionId
+          pure (jsonResponse (PlaybackResponse (source0 : others) sid))
 
 -- | Build the 'MediaSource' for an item from the probe result: the
 -- decision flags come from the pure logic in

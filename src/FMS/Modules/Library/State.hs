@@ -14,6 +14,7 @@ module FMS.Modules.Library.State
   , RemovePaths(..)
   , ListPaths(..)
   , GetAllItems(..)
+  , RekeyItem(..)
   ) where
 
 import Control.Monad.Reader (ask)
@@ -135,6 +136,26 @@ listPaths = Map.keys . pathToId <$> ask
 getAllItems :: Query LibraryState [MediaItem]
 getAllItems = Map.elems . idToItem <$> ask
 
+-- | Milestone 4j (multi-version media): re-key the item registered at
+-- @oldPath@ to @newPath@ and set its version list. Used by the rescan when
+-- a group's primary path changed (promotion of the next version) or when
+-- the version list of a group changed. Returns 'False' when @oldPath@ is
+-- unknown.
+rekeyItem :: FilePath -> FilePath -> [FilePath] -> Update LibraryState Bool
+rekeyItem oldPath newPath versions = do
+  st <- get
+  case Map.lookup oldPath (pathToId st) of
+    Nothing -> pure False
+    Just i ->
+      case Map.lookup i (idToItem st) of
+        Nothing -> pure False
+        Just item -> do
+          put st
+            { pathToId = Map.insert newPath i (Map.delete oldPath (pathToId st))
+            , idToItem = Map.insert i item { itemPath = newPath, itemVersions = versions } (idToItem st)
+            }
+          pure True
+
 makeAcidic ''LibraryState
   [ 'newId
   , 'registerItem
@@ -146,4 +167,5 @@ makeAcidic ''LibraryState
   , 'removePaths
   , 'listPaths
   , 'getAllItems
+  , 'rekeyItem
   ]

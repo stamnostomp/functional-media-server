@@ -19,6 +19,7 @@ import FMS.Modules.Library.Routes
   , itemsCountsHandler
   , itemsHandler
   , libraryRoutes
+  , mediaSourcesHandler
   , searchHintsHandler
   , similarHandler
   , specialFeaturesHandler
@@ -58,6 +59,7 @@ libraryModule = Module
          , get [Lit "items", Capture "id", Lit "Ancestors"] ancestorsHandler
          , get [Lit "items", Capture "id", Lit "SpecialFeatures"] specialFeaturesHandler
          , get [Lit "items", Capture "id", Lit "Similar"] similarHandler
+         , get [Lit "items", Capture "id", Lit "MediaSources"] mediaSourcesHandler
          , get [Lit "Search", Lit "Hints"] searchHintsHandler
          ]
   }

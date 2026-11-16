@@ -35,13 +35,13 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
-import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2)
+import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3)
 import FMS.Core.Types.Policy (AccessSchedule (..), UserPolicy (..), emptyUserPolicy, itemAllowedByPolicy, ratingAllowed, ratingRank, scheduleAllowsNow, tagsAllowed)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Core.Types.ServerConfig
@@ -68,8 +68,11 @@ import FMS.Modules.Library.Scan
   , parseEpisodeFilename
   , itemFromPath
   , mimeFor
+  , groupVersions
+  , normalizeVersionTitle
   , planRescan
   , scanDirectory
+  , versionRank
   , walk
   , walkWithLoops
   )
@@ -291,6 +294,7 @@ main = do
         , itemSeason    = Nothing
         , itemEpisode   = Nothing
         , itemExtraType = Nothing
+        , itemVersions = []
         }
   st1 <- openLocalStateFrom acidDir initialLibraryState
   id1 <- update st1 (RegisterItem "/x.mp4" testItem)
@@ -588,6 +592,7 @@ main = do
         , itemSeason    = Nothing
         , itemEpisode   = Nothing
         , itemExtraType = Nothing
+        , itemVersions = []
         }
       items4 =
         [ mkItem 1 "alpha"      300 t3
@@ -1364,7 +1369,7 @@ main = do
         { itemId = fid, itemTitle = title, itemPath = "/" ++ T.unpack title ++ ".mp4"
         , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = fid
         , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
-        , itemExtraType = Nothing }
+        , itemExtraType = Nothing, itemVersions = [] }
       qItems = [qi "1" "b", qi "2" "m", qi "1" "a"]
       qSorted = [qi "1" "a", qi "1" "b", qi "2" "m"]
   check "applyItemQuery libraryId=2 keeps only folder-2 items"
@@ -1401,17 +1406,31 @@ main = do
     (Right v2) (runGet safeGet (runPut (safePut v2)))
   check "itemTypeFromMime audio -> Audio" "Audio" (itemTypeFromMime "audio/mpeg")
   check "itemTypeFromMime other -> Unknown" "Unknown" (itemTypeFromMime "application/octet-stream")
-  check "SafeCopy reads v1 bytes as v3 (type from mime)"
+  check "SafeCopy reads v1 bytes as v4 (type from mime)"
     (Right "Movie") (itemType <$> (runGet safeGet (runPut (safePut v1))
                                    :: Either String MediaItem))
-  check "SafeCopy reads v2 bytes as v3 (extraType defaults to Nothing)"
+  check "SafeCopy reads v2 bytes as v4 (extraType defaults to Nothing)"
     (Right Nothing) (itemExtraType <$> (runGet safeGet (runPut (safePut v2))
                                          :: Either String MediaItem))
   let v3 = migrateMediaItemV2 v2
-  check "migrateMediaItemV2 v2->v3 defaults itemExtraType to Nothing"
-    Nothing (itemExtraType v3)
+  check "migrateMediaItemV2 v2->v3 defaults v3ItemExtraType to Nothing"
+    Nothing (v3ItemExtraType v3)
   check "migrateMediaItemV2 keeps id/type/folder"
-    ("9", "Movie", "1") (itemId v3, itemType v3, itemFolder v3)
+    ("9", "Movie", "1") (v3ItemId v3, v3ItemType v3, v3ItemFolder v3)
+  check "MediaItemV3 SafeCopy v3 serialize/deserialize roundtrip"
+    (Right v3) (runGet safeGet (runPut (safePut v3)))
+  check "SafeCopy reads v3 bytes as v4 (versions default to [])"
+    (Right []) (itemVersions <$> (runGet safeGet (runPut (safePut v3))
+                                  :: Either String MediaItem))
+  let v4 = migrateMediaItemV3 v3
+  check "migrateMediaItemV3 v3->v4 defaults itemVersions to []"
+    [] (itemVersions v4)
+  check "migrateMediaItemV3 keeps id/type/folder/extraType"
+    ("9", "Movie", "1", Nothing) (itemId v4, itemType v4, itemFolder v4, itemExtraType v4)
+  check "MediaItem v4 SafeCopy roundtrip keeps versions"
+    (Right (v4 { itemVersions = ["/m/a.1080p.mkv", "/m/a.2160p.mkv"] }))
+    (runGet safeGet (runPut (safePut (v4 { itemVersions = ["/m/a.1080p.mkv", "/m/a.2160p.mkv"] })))
+      :: Either String MediaItem)
 
   -- Item types + TV shows (milestone 4d, docs/todo.org sections 2-4).
   check "parseEpisodeFilename S01E02" (Just (1, 2)) (parseEpisodeFilename "S01E02")
@@ -1673,13 +1692,13 @@ main = do
     (extraTypeFor "/m/movie.mp4" "movie")
   let mainItem = (qi "1" "movie") { itemPath = "/m/movie.mp4" }
       exSameDir = (qi "2" "aaa trailer") { itemPath = "/m/movie-trailer.mp4"
-                                          , itemType = "Extra", itemExtraType = Just "Trailer" }
+                                          , itemType = "Extra", itemExtraType = Just "Trailer", itemVersions = [] }
       exOneBelow = (qi "3" "behind") { itemPath = "/m/extras/behind.mp4"
-                                     , itemType = "Extra", itemExtraType = Just "BehindTheScenes" }
+                                     , itemType = "Extra", itemExtraType = Just "BehindTheScenes", itemVersions = [] }
       exDeep = (qi "4" "deep") { itemPath = "/m/extras/deep/x.mp4"
-                               , itemType = "Extra", itemExtraType = Just "Other" }
+                               , itemType = "Extra", itemExtraType = Just "Other", itemVersions = [] }
       exFar = (qi "5" "far") { itemPath = "/other/far.mp4"
-                             , itemType = "Extra", itemExtraType = Just "Other" }
+                             , itemType = "Extra", itemExtraType = Just "Other", itemVersions = [] }
       plainSameDir = (qi "6" "clip") { itemPath = "/m/clip.mp4" }
       sfItems = [mainItem, exSameDir, exOneBelow, exDeep, exFar, plainSameDir]
   check "specialFeaturesOf: same dir + one level below, Extras only, sorted by title"
@@ -1875,7 +1894,7 @@ main = do
         { itemId = i, itemTitle = t, itemPath = "/" ++ T.unpack t ++ ".mp4"
         , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = "1"
         , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
-        , itemExtraType = Nothing }
+        , itemExtraType = Nothing, itemVersions = [] }
       tA = UTCTime (fromGregorian 2024 1 1) 0
       tB = UTCTime (fromGregorian 2024 2 1) 0
       udMap5 = HM.fromList
@@ -2051,5 +2070,46 @@ main = do
   check "securityHeaders: nosniff/SAMEORIGIN/no-referrer, no CSP"
     ([("X-Content-Type-Options","nosniff"),("X-Frame-Options","SAMEORIGIN"),("Referrer-Policy","no-referrer")], False)
     (securityHeaders, any ((== "Content-Security-Policy") . fst) securityHeaders)
+
+  -- Milestone 4j (multi-version media): normalizeVersionTitle, versionRank,
+  -- groupVersions, versionParam/versionPathFor.
+  check "normalizeVersionTitle strips dot-separated quality tokens + release group"
+    "movie name 2019"
+    (normalizeVersionTitle "Movie.Name.2019.1080p.BluRay.x264-GRP")
+  check "normalizeVersionTitle strips bracketed tokens"
+    "movie name" (normalizeVersionTitle "Movie Name [2160p] [WEB-DL]")
+  check "normalizeVersionTitle handles 4k/underscore and collapses spaces"
+    "movie" (normalizeVersionTitle "Movie_4K__Remux ")
+  check "normalizeVersionTitle strips 5.1/2.0 audio tokens (year stays)"
+    "movie 2020" (normalizeVersionTitle "Movie.2020.1080p.5.1.AC3")
+  check "normalizeVersionTitle plain name unchanged (lowercased)"
+    "movie name" (normalizeVersionTitle "Movie Name")
+  check "versionRank ordering 8k>4k=2160p>1080p>720p>480p>none"
+    [5, 4, 4, 3, 2, 1, 0]
+    (map versionRank ["Movie.8k", "Movie.4K", "Movie.2160p", "Movie.1080p", "Movie.720p", "Movie.480p", "Movie"])
+  let gv = groupVersions
+        [ ("/m/Movie.1080p.mkv", 1000), ("/m/Movie.2160p.mkv", 4000)
+        , ("/m/Movie.720p.mkv", 500), ("/m/Other.mp4", 10) ]
+  check "groupVersions groups by (dir, normalized title), best first"
+    [[("/m/Movie.2160p.mkv", 4000), ("/m/Movie.1080p.mkv", 1000), ("/m/Movie.720p.mkv", 500)], [("/m/Other.mp4", 10)]]
+    gv
+  check "groupVersions tie on rank breaks by size desc then path asc"
+    [[("/m/Movie.1080p.BluRay.mkv", 900), ("/m/Movie.1080p.WEB-DL.mkv", 900), ("/m/Movie.1080p.mkv", 100)]]
+    (groupVersions [("/m/Movie.1080p.mkv",100),("/m/Movie.1080p.WEB-DL.mkv",900),("/m/Movie.1080p.BluRay.mkv",900)])
+  check "groupVersions separates directories"
+    2 (length (groupVersions [("/a/Movie.1080p.mkv",1),("/b/Movie.1080p.mkv",1)]))
+  let vpItem = v4 { itemVersions = ["/m/a.1080p.mkv", "/m/a.2160p.mkv"], itemPath = "/m/a.1080p.mkv" }
+  check "versionParam: absent -> 0, valid -> n, invalid -> Left"
+    [Right 0, Right 2, Left "invalid version parameter"]
+    [versionParam [], versionParam [("version","2")], versionParam [("version","x")]]
+  check "versionPathFor picks the right file, default primary"
+    [Right "/m/a.1080p.mkv", Right "/m/a.2160p.mkv"]
+    [versionPathFor vpItem 0, versionPathFor vpItem 1]
+  check "versionPathFor out of range -> Left"
+    [Left "no such version", Left "version must be >= 0"]
+    [versionPathFor vpItem 5, versionPathFor vpItem (-1)]
+  check "versionPathFor single-file item: only index 0"
+    [Right (itemPath v4), Left "no such version"]
+    [versionPathFor v4 0, versionPathFor v4 1]
 
   putStrLn "All tests passed."

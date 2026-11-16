@@ -7,12 +7,12 @@ import Control.Monad.Except (throwError)
 import Data.ByteString.Builder (Builder, byteString)
 import Data.Text (Text)
 import Network.HTTP.Types (status200)
-import Network.Wai (Request, Response, responseStream)
+import Network.Wai (Request, Response, queryString, responseStream)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Process (runProcessStreamBS)
-import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Modules.Auth.Monad (getItemWithAccess)
 
 -- | The transcode module (docs/roadmap.org milestone 3b, docs/todo.org
@@ -60,10 +60,16 @@ transcodeHandler captures req =
       mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
-        Just item ->
+        Just item -> do
+          -- milestone 4j: ?version=N selects the version file to transcode
+          path <- case versionParam (queryParams (queryString req)) of
+            Left msg -> throwError (BadRequest msg)
+            Right n  -> case versionPathFor item n of
+              Left msg   -> throwError (BadRequest msg)
+              Right path -> pure path
           pure (responseStream status200
                   [("Content-Type", "video/mp4")]
-                  (streamTranscode (itemPath item)))
+                  (streamTranscode path))
 
 -- | The 'Network.Wai.StreamingBody' used with 'responseStream': run
 -- ffmpeg on @path@ and write its stdout to the WAI sink in chunks of

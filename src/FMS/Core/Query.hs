@@ -16,6 +16,8 @@ module FMS.Core.Query
   , attachUserData
   , showsFromItems
   , similarItems
+  , versionParam
+  , versionPathFor
   , sortEpisodes
   , specialFeaturesOf
   , sortItems
@@ -294,6 +296,26 @@ similarItems lookupMeta limit base allItems =
           sorted = sortBy (\(a, ta, _) (b, tb, _) -> compare b a <> compare ta tb) scored
           lim = if limit <= 0 then 12 else limit
       in take lim (map (\(_, _, i) -> i) sorted)
+
+-- | Pure (milestone 4j): parse the @version=N@ query param (0-based index
+-- into the item's version list). Absent -> 'Right' 0 (the primary);
+-- unparseable -> 'Left' (the caller turns it into a 400).
+versionParam :: [(Text, Text)] -> Either Text Int
+versionParam qparams =
+  case lookup "version" qparams of
+    Nothing -> Right 0
+    Just v  -> maybe (Left "invalid version parameter") Right (readMaybe (T.unpack v))
+
+-- | Pure (milestone 4j): pick the file path for version index @n@ of an
+-- item. When the item has no version list, only index 0 (the primary
+-- 'itemPath') exists. Out-of-range -> 'Left' (400).
+versionPathFor :: MediaItem -> Int -> Either Text FilePath
+versionPathFor item n
+  | n < 0 = Left "version must be >= 0"
+  | null (itemVersions item) =
+      if n == 0 then Right (itemPath item) else Left "no such version"
+  | n < length (itemVersions item) = Right (itemVersions item !! n)
+  | otherwise = Left "no such version"
 
 -- | Sort by @sortBy@ ∈ {title, size, addedAt} — unknown or missing falls
 -- back to title — with direction @sortOrder@ ∈ {asc, desc} (default asc).

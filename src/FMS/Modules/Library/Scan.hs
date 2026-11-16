@@ -13,13 +13,17 @@ module FMS.Modules.Library.Scan
   , isMediaFile
   , mimeFor
   , mediaExtensions
+  , normalizeVersionTitle
+  , versionRank
+  , groupVersions
+  , itemFromGroup
   ) where
 
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM)
-import Data.Char (isDigit, toLower)
+import Data.Char (isAlpha, isDigit, isUpper, toLower)
 import Data.Either (partitionEithers)
-import Data.List (sort)
+import Data.List (sort, sortBy, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Set (Set)
@@ -141,6 +145,81 @@ classifyItem hasNfo path baseName
       in ("Episode", Just series, season, episode)
   | otherwise = (itemTypeFromMime (mimeFor path), Nothing, Nothing, Nothing)
 
+-- | Milestone 4j quality/codec tokens stripped by 'normalizeVersionTitle'
+-- (lowercase; matched as whole dot/underscore/space-separated words).
+versionTokens :: [Text]
+versionTokens =
+  [ "1080p", "2160p", "4k", "8k", "720p", "480p"
+  , "bluray", "bdrip", "brrip", "web-dl", "webdl", "webrip", "web"
+  , "hdtv", "hdtvrip", "dvdrip", "remux", "uncut", "extended", "proper"
+  , "repack", "imax", "x264", "x265", "h264", "hevc", "aac", "dts"
+  , "ac3", "51", "20", "hdr", "sdr"
+  ]
+
+-- | Pure (milestone 4j): normalize a file base name (WITHOUT extension) for
+-- multi-version grouping: bracketed groups @[1080p]@ and dots/underscores/
+-- dashes become spaces (after pre-replacing the dotted forms @5.1@, @2.0@,
+-- @web-dl@ so they survive as single tokens); every word in
+-- 'versionTokens' (case-insensitive) is dropped, as are ALL-UPPERCASE words
+-- of length >= 2 (release-group tags like @-GRP@); the rest is lowercased,
+-- joined with single spaces and trimmed. E.g.
+-- @\"Movie.Name.2019.1080p.BluRay.x264-GRP\"@ -> @\"movie name 2019\"@.
+normalizeVersionTitle :: Text -> Text
+normalizeVersionTitle base0 =
+  let dotted = T.replace "web-dl" "webdl"
+             (T.replace "5.1" " 51 " (T.replace "2.0" " 20 " base0))
+      spaced = T.concatMap (\c -> if c `elem` (". _[]()-" :: String) then " " else T.singleton c) dotted
+      keep w = let lw = T.toLower w
+               in lw `notElem` versionTokens
+                  && not (T.length w >= 2 && T.any isAlpha w
+                           && T.all (\c -> not (isAlpha c) || isUpper c) w)
+      words' = map T.toLower (filter keep (T.words spaced))
+  in T.unwords words'
+
+-- | Pure (milestone 4j): resolution rank of a file base name from its
+-- tokens: 8k=5, 2160p/4k=4, 1080p=3, 720p=2, 480p=1, default 0. The maximum
+-- over all tokens wins.
+versionRank :: Text -> Int
+versionRank base =
+  let lower  = T.toLower base
+      spaced = T.concatMap (\c -> if c `elem` (". _[]()-" :: String) then " " else T.singleton c) lower
+      ranks  = [ r | (tok, r) <- [("8k",5),("2160p",4),("4k",4),("1080p",3),("720p",2),("480p",1)]
+                   , tok `elem` T.words spaced ]
+  in if null ranks then 0 else maximum ranks
+
+-- | Pure (milestone 4j): group @(path, size)@ pairs by
+-- @(directory, 'normalizeVersionTitle' baseName)@. Every member list is
+-- sorted BEST FIRST: 'versionRank' desc, then size desc, then path asc.
+-- The groups themselves are sorted by their primary (head) path, so the
+-- output is deterministic. Callers pass only video files; non-video files
+-- must not be grouped (they are handled as singletons by the caller).
+groupVersions :: [(FilePath, Integer)] -> [[(FilePath, Integer)]]
+groupVersions files =
+  let keyed   = [ ((takeDirectory p, normalizeVersionTitle (T.pack (takeBaseName p))), [(p, s)])
+                | (p, s) <- files ]
+      grouped = Map.toList (Map.fromListWith (++) keyed)
+      sorted  = map (sortBy versionCmp . snd) grouped
+      groupPrimary g = case g of ((p, _) : _) -> p; [] -> ""  -- groups are non-empty
+  in sortOn groupPrimary sorted
+  where
+    versionCmp (p1, s1) (p2, s2) =
+      compare (versionRank (T.pack (takeBaseName p2))) (versionRank (T.pack (takeBaseName p1)))
+      <> compare s2 s1
+      <> compare p1 p2
+
+-- | Build a multi-version 'MediaItem' from a group of paths sorted BEST
+-- FIRST ('groupVersions' output): the head becomes the primary path, all
+-- paths go into 'itemVersions'. The id is left empty (acid-state assigns
+-- it). Singleton groups are built by 'itemFromPath' instead (itemVersions
+-- = []).
+itemFromGroup :: Text -> [FilePath] -> IO MediaItem
+itemFromGroup folder paths = case paths of
+  []        -> itemFromPath folder ""   -- never happens: groups are non-empty
+  [p]       -> itemFromPath folder p     -- singleton: no version list
+  (p : _) -> do
+    item <- itemFromPath folder p
+    pure item { itemVersions = paths }
+
 -- | Build a 'MediaItem' from a path: size + mtime from the filesystem,
 -- title = base name, mime from the extension, classification via
 -- 'classifyItem' (milestone 4d: tvshow.nfo -> Episode with series/season/
@@ -175,6 +254,7 @@ itemFromPath folder p = do
     , itemSeason    = finalSeason
     , itemEpisode   = finalEpisode
     , itemExtraType = extra
+    , itemVersions  = []   -- single-file item; multi-version groups use itemFromGroup (milestone 4j)
     }
 
 -- | Pure: is @canon@ already in the visited set? Used to detect circular

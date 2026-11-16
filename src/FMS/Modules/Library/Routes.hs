@@ -8,9 +8,12 @@ module FMS.Modules.Library.Routes
   , searchHintsHandler
   , specialFeaturesHandler
   , similarHandler
+  , mediaSourcesHandler
   ) where
 
 import Control.Concurrent.STM (TVar, readTVarIO)
+import Control.Exception (SomeException, try)
+import Control.Monad (forM)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
@@ -27,6 +30,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Types (status201, urlDecode)
 import Network.Wai (Request, Response, queryString, responseLBS, strictRequestBody)
+import System.Directory (getFileSize)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
@@ -424,6 +428,35 @@ specialFeaturesHandler captures req =
           mUser <- currentUserFromReq req
           items <- listItems >>= visibleItems mUser
           pure (jsonResponse (specialFeaturesOf item items))
+
+-- | @GET \/items\/:id\/MediaSources@ (milestone 4j, multi-version media) —
+-- 404 for an unknown item ('getItemWithAccess' enforces folder + parental
+-- policy), otherwise 200 with a JSON array of MediaSource-shaped objects,
+-- one per version path (best first; falls back to @[itemPath]@ for
+-- single-file items):
+-- @[{\"Id\": itemId, \"Path\": p, \"Size\": s, \"IsDefault\": bool,
+--    \"Name\": title}, ...]@.
+mediaSourcesHandler :: [(Text, Text)] -> Request -> AppM Response
+mediaSourcesHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          let paths = if null (itemVersions item) then [itemPath item] else itemVersions item
+          srcs <- forM (zip [0 :: Int ..] paths) $ \(n, p) -> do
+            esz <- liftIO (try (getFileSize p) :: IO (Either SomeException Integer))
+            let sz = either (const (itemSize item)) id esz
+            pure (object
+              [ "Id"        .= i
+              , "Path"      .= T.pack p
+              , "Size"      .= sz
+              , "IsDefault" .= (n == (0 :: Int))
+              , "Name"      .= itemTitle item
+              ])
+          pure (jsonResponse srcs)
 
 -- | @GET \/items\/:id\/Similar@ (milestone 4i, Jellyfin similar-items) —
 -- 404 for an unknown item ('getItemWithAccess' also enforces the

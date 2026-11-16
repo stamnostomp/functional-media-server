@@ -14,10 +14,12 @@ import Control.Monad (forM, forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
+import Data.Either (partitionEithers)
 import qualified Data.HashMap.Strict as HM
 import Data.HashMap.Strict (HashMap)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Acid (AcidState, query, update)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -39,7 +41,9 @@ import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Folders
   ( defaultFolders, foldersFilePath, loadFolders, nextFolderId, saveFolders )
 import FMS.Modules.Library.Scan
-  ( isMediaFile, itemFromPath, planRescan, walkWithLoops )
+  ( groupVersions, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
+  , walkWithLoops
+  )
 import FMS.Modules.Library.State
   ( LibraryState
   , GetAllItems(..)
@@ -47,6 +51,7 @@ import FMS.Modules.Library.State
   , GetItemById(..)
   , RegisterItem(..)
   , RemovePaths(..)
+  , RekeyItem(..)
   , UpdateItemMeta(..)
   )
 
@@ -141,11 +146,46 @@ instance MonadLibrary AppM where
       pure (scannedStats, folderOf, allLoops)
     forM_ loops $ \l ->
       logInfo ("library: skipping circular symlink " <> T.pack l)
-    existingItems <- withAcid (`query` GetAllItems)
+    -- Milestone 4j (multi-version media): video files are grouped by
+    -- (directory, normalizeVersionTitle basename); each group becomes ONE
+    -- item keyed by its best path (the group's primary). Non-video files
+    -- stay singletons. The diff below runs over group primaries, so a
+    -- version file appearing/disappearing does not create/remove an item —
+    -- only a disappearing PRIMARY does, and then the next surviving
+    -- version is promoted (same item id) when possible.
+    let isVideo p = "video" `T.isPrefixOf` mimeFor p
+        scannedMap  = Map.fromList [ (p, (s, t)) | (p, s, t) <- scannedStats ]
+        videoGroups = groupVersions [ (p, s) | (p, s, _) <- scannedStats, isVideo p ]
+        groupPaths  g = map fst g                       -- best first
+        primaryOf   g = case g of ((p, _) : _) -> p; [] -> ""  -- groups are non-empty
+        nonVideo    = [ (p, s, t) | (p, s, t) <- scannedStats, not (isVideo p) ]
+        primaryStats = [ (primaryOf g, s, t) | g <- videoGroups
+                       , let (s, t) = scannedMap Map.! primaryOf g ]
+        scanList    = primaryStats ++ nonVideo          -- diff keyed by primary
+        pathToGroup = Map.fromList [ (p, g) | g <- videoGroups, (p, _) <- g ]
+        primarySet  = Map.fromList [ (p, ()) | (p, _, _) <- scanList ]
+    existingItems0 <- withAcid (`query` GetAllItems)
+    -- promotion pass: a removed primary whose group still has surviving
+    -- files is re-keyed to the group's new primary (same item id)
+    promotedOrRemoved <- forM [ itemPath i | i <- existingItems0
+                               , not (Map.member (itemPath i) primarySet) ] $ \p -> do
+      mId <- withAcid (`query` GetIdByPath p)
+      mItem <- case mId of
+        Nothing -> pure Nothing
+        Just i  -> withAcid (`query` GetItemById i)
+      case mItem of
+        Just item
+          | Just g <- listToMaybe [ g | v <- itemVersions item, v /= p
+                                       , Just g <- [Map.lookup v pathToGroup] ] -> do
+              let vers = if length (groupPaths g) > 1 then groupPaths g else []
+              _ <- withAcid (`update` RekeyItem p (primaryOf g) vers)
+              pure (Left p)   -- promoted
+        _ -> pure (Right p) -- really gone
+    let (promoted, reallyRemoved) = partitionEithers promotedOrRemoved
+    removedCount <- withAcid (`update` RemovePaths reallyRemoved)
+    existingItems <- withAcid (`query` GetAllItems)   -- after promotion/removal
     let existingMeta = [ (itemPath i, Just (itemSize i, itemAddedAt i)) | i <- existingItems ]
-        scannedMap   = Map.fromList [ (p, (s, t)) | (p, s, t) <- scannedStats ]
-        (removed, changedOrNew, _unchanged) = planRescan scannedStats existingMeta
-    removedCount <- withAcid (`update` RemovePaths removed)
+        (_removed2, changedOrNew, _unchanged) = planRescan scanList existingMeta
     applied <- forM changedOrNew $ \p -> do
       let (s, t) = scannedMap Map.! p
       mId <- withAcid (`query` GetIdByPath p)
@@ -154,13 +194,33 @@ instance MonadLibrary AppM where
           changed <- withAcid (`update` UpdateItemMeta p s t)
           pure (if changed then (1 :: Int) else 0)
         Nothing -> do
-          item <- liftIO (itemFromPath (folderOf Map.! p) p)
-          _ <- withAcid (`update` RegisterItem p item)
-          pure 1
+          case Map.lookup p pathToGroup of
+            Just g -> do
+              item <- liftIO (itemFromGroup (folderOf Map.! p) (groupPaths g))
+              _ <- withAcid (`update` RegisterItem p item)
+              pure 1
+            Nothing -> do
+              item <- liftIO (itemFromPath (folderOf Map.! p) p)
+              _ <- withAcid (`update` RegisterItem p item)
+              pure 1
+    -- refresh the version list of every surviving group whose primary is
+    -- already registered (covers unchanged primaries whose membership
+    -- changed)
+    _ <- forM videoGroups $ \g -> do
+      let p = primaryOf g
+      mId <- withAcid (`query` GetIdByPath p)
+      case mId of
+        Just _  -> do
+          -- singleton groups carry no version list (itemVersions = [])
+          let vers = if length (groupPaths g) > 1 then groupPaths g else []
+          _ <- withAcid (`update` RekeyItem p p vers)
+          pure ()
+        Nothing -> pure ()
     logInfo (T.pack (unwords
       [ "library rescan:"
       , show (length applied), "added/changed,"
       , show removedCount, "removed,"
+      , show (length promoted), "version-promoted,"
       , show (length scannedStats), "media file(s) found in"
       , show (length folders), "folder(s)"
       ]))

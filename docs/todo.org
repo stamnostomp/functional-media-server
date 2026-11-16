@@ -45,7 +45,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Filesystem watching (inotify/FSEvents)
    - [X] incremental rescan: add/change/remove detected via planRescan + acid events, ids stable on modify
 ** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
-** TODO Multi-version media (multiple files for one movie, version selection)
+** DONE Multi-version media: files with same normalized title in one dir group into ONE MediaItem (MediaItem v4 itemVersions, SafeCopy v3->v4); primary = best rank/size, promoted on rescan when deleted; =GET /items/:id/MediaSources=; =?version=N= on /stream + /transcode (400 invalid); PlaybackInfo MediaSources array
 ** DONE Extras: trailers, behind-the-scenes, deleted scenes, featurettes, shorts, theme songs (MediaItem v3 itemExtraType; type=Extra; extra match wins over Episode for video files)
 ** DONE Playlists and box sets as first-class virtual items
    - [X] playlists: =/Playlists= CRUD + items (m10a)

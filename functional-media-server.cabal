@@ -45,6 +45,7 @@ library
                       FMS.Modules.Hls
                       FMS.Modules.Subtitles
                       FMS.Modules.Thumbs
+                      FMS.Modules.Images
                       FMS.Modules.Stats
                       FMS.Modules.Stats.Monad
                       FMS.Modules.Stats.Persistence

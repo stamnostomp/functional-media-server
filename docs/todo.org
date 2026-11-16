@@ -72,12 +72,11 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Search endpoint =/Search/Hints= + full-text search across titles/people
 
 * 5. Images API :feature:
-** TODO =GET /Items/{id}/Images/{type}= with =maxWidth=/=maxHeight=/=quality=
+** DONE =GET /Items/{id}/Images/{type}=
    - [X] =GET /items/:id/thumb= (ffmpeg frame at 5s -> cached JPEG in stateDir/thumbs)
-** TODO Image tags and cache-busting; =POST= image upload, =DELETE= image
-** TODO Backdrop fanart selection (=/Items/{id}/Images/Backdrop=, index)
-** TODO Image resizing/transcoding (native or ImageMagick); blurhash placeholders
-** TODO Serve artist/album/series images
+   - [X] =GET /items/:id/images= list, =GET/POST/DELETE /items/:id/images/:type= (upload, delete), =?maxWidth/maxHeight/quality== resize via ffmpeg (cached variants), Primary/Thumb fallback to thumb cache
+** TODO Image tags and cache-busting; blurhash placeholders
+** TODO Backdrop selection by index; artist/album/series images
 
 * 6. Playback and streaming :feature:
 ** TODO Direct play

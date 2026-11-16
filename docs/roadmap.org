@@ -75,7 +75,7 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    - [X] TMDB movie search via http-conduit (fallback after NFO, graceful errors)
    - [ ] TvMaze / OMDb; rate limiting + exponential backoff + error caching :fix:
 ** TODO Metadata cache (disk-backed, invalidation strategy) :improvement:
-** TODO Images: posters, backdrops, thumbnails endpoints
+** DONE Images: thumbnails + per-item image upload/list/serve/resize/delete endpoints (stateDir/images)
 ** TODO OpenAPI/Swagger spec generated from code + docs endpoint :improvement:
 
 * Milestone 5 — stats, users, security

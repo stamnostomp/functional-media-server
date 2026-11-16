@@ -40,6 +40,7 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
+import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
@@ -332,6 +333,72 @@ main = do
         [0xFF, 0xD8] (map fromEnum (LBS.unpack (LBS.take 2 out)))
       check "thumb output is > 1000 bytes" True (LBS.length out > 1000)
       removeFile mp4
+
+  -- Images module (milestone 6b, docs/todo.org section 5): the pure
+  -- helpers -- extension mapping, type validation, ffmpeg resize args,
+  -- path joining.
+  check "imageExtFor image/png -> .png"        ".png" (imageExtFor "image/png")
+  check "imageExtFor image/jpeg -> .jpg"       ".jpg" (imageExtFor "image/jpeg")
+  check "imageExtFor image/jpg -> .jpg"        ".jpg" (imageExtFor "image/jpg")
+  check "imageExtFor image/webp -> .webp"      ".webp" (imageExtFor "image/webp")
+  check "imageExtFor unknown type -> .jpg"     ".jpg" (imageExtFor "application/octet-stream")
+  check "imageExtFor empty header -> .jpg"     ".jpg" (imageExtFor "")
+  check "imageExtFor strips parameters (image/png; charset=binary)"
+    ".png" (imageExtFor "image/png; charset=binary")
+  check "imageExtFor is case-insensitive (IMAGE/PNG)" ".png" (imageExtFor "IMAGE/PNG")
+  check "isValidImageType Primary is True"   True  (isValidImageType "Primary")
+  check "isValidImageType Backdrop is True"  True  (isValidImageType "Backdrop")
+  check "isValidImageType empty is False"    False (isValidImageType "")
+  check "isValidImageType 1nvalid! is False" False (isValidImageType "1nvalid!")
+  check "isValidImageType with dash is False" False (isValidImageType "Primary-50")
+  check "isValidImageType with slash is False" False (isValidImageType "a/b")
+  check "isValidImageType with dotdot is False" False (isValidImageType "..")
+  let rargs  = resizeArgs "/in.png" (Just 50) Nothing 90 "/out.jpg"
+      rargs2 = resizeArgs "/in.png" (Just 50) (Just 40) 80 "/out2.jpg"
+      rargs3 = resizeArgs "/in.png" Nothing (Just 40) 80 "/out3.jpg"
+      hasPair x y = any (\(a, b) -> a == x && b == y) (zip rargs (drop 1 rargs))
+      hasPair2 x y = any (\(a, b) -> a == x && b == y) (zip rargs2 (drop 1 rargs2))
+      hasPair3 x y = any (\(a, b) -> a == x && b == y) (zip rargs3 (drop 1 rargs3))
+  check "resizeArgs has -i <input>" True (hasPair "-i" "/in.png")
+  check "resizeArgs ends with the output path" "/out.jpg" (last rargs)
+  check "resizeArgs width-only uses scale=50:-2" True (hasPair "-vf" "scale=50:-2")
+  check "resizeArgs has -q:v 90" True (hasPair "-q:v" "90")
+  check "resizeArgs both dims uses force_original_aspect_ratio=decrease"
+    True (hasPair2 "-vf" "scale=50:40:force_original_aspect_ratio=decrease")
+  check "resizeArgs height-only uses scale=-2:40" True (hasPair3 "-vf" "scale=-2:40")
+  check "imagePathFor joins stateDir/images/id/type.ext"
+    "/state/images/7/Primary.png" (imagePathFor "/state" "7" "Primary" ".png")
+
+  -- IO test of the actual resize, guarded by ffmpeg/ffprobe availability:
+  -- generate a 200x100 PNG, resize to 50 wide, assert success + output
+  -- exists + ffprobe reports width 50.
+  case mFFmpeg of
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH -- skipping images IO test"
+    Just _ -> do
+      let png = "/tmp/fms-test-img-src.png"
+          out = "/tmp/fms-test-img-out.jpg"
+      (ecGen, _, genErr2) <- runProcessBS "ffmpeg"
+        ["-f", "lavfi", "-i", "color=red:s=200x100", "-frames:v", "1", "-y", png]
+      check "generate 200x100 test png: exit Success" ExitSuccess ecGen
+      when (ecGen /= ExitSuccess)
+        (putStrLn ("ffmpeg png gen stderr: " ++ show (showBS (LBS.toStrict genErr2))))
+      (ec, _, rErr) <- runProcessBS "ffmpeg" (resizeArgs png (Just 50) Nothing 90 out)
+      check "resizeArgs run (50 wide) on png: exit Success" ExitSuccess ec
+      when (ec /= ExitSuccess)
+        (putStrLn ("ffmpeg resize stderr: " ++ show (showBS (LBS.toStrict rErr))))
+      outExists <- doesFileExist out
+      check "resized jpg exists after ffmpeg" True outExists
+      mFp <- findExecutable "ffprobe"
+      case mFp of
+        Nothing -> putStrLn "SKIP: ffprobe not found on PATH -- skipping width assertion"
+        Just _ -> do
+          (ecP, pOut, _) <- runProcessBS "ffprobe"
+            [ "-v", "error", "-select_streams", "v:0"
+            , "-show_entries", "stream=width", "-of", "csv=p=0", out ]
+          check "ffprobe on resized jpg: exit Success" ExitSuccess ecP
+          check "ffprobe reports resized width 50" ["50"] (lines (LBSC.unpack pOut))
+      removeFile png
+      removeFile out
 
   -- Items query helpers (milestone 4a, docs/todo.org section 4): the pure
   -- functions of FMS.Core.Query.

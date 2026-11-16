@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
-import Data.List (isPrefixOf, isSuffixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import System.Directory
@@ -30,6 +30,7 @@ import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Stream (resolveRange)
+import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
 import FMS.Modules.Transcode (transcodeArgs)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
@@ -220,5 +221,41 @@ main = do
       check "all referenced .ts segments exist on disk" True (and segsExist)
       removeDirectoryRecursive outDir
       removeFile mp4
+
+  -- Subtitles module (milestone 3d): pure pickSubtitles / subtitleToVttArgs.
+  check "subtitleExts" [".srt", ".vtt", ".ass", ".ssa", ".sub"] subtitleExts
+  let dirEnts = ["clip.srt", "clip.vtt", "other.ass", "notes.txt", "clip.mp4"]
+  check "pickSubtitles prefers basename matches, sorted"
+    ["/m/clip.srt", "/m/clip.vtt"]
+    (pickSubtitles "/m/clip.mp4" dirEnts)
+  check "pickSubtitles: no basename match -> all subtitle files sorted"
+    ["/m/a.ass", "/m/b.srt"]
+    (pickSubtitles "/m/clip.mp4" ["b.srt", "a.ass", "notes.txt", "clip.mp4"])
+  check "pickSubtitles: none -> []"
+    []
+    (pickSubtitles "/m/clip.mp4" ["notes.txt", "clip.mp4"])
+  check "pickSubtitles is case-insensitive on extensions"
+    ["/m/clip.SRT"]
+    (pickSubtitles "/m/clip.mp4" ["clip.SRT", "clip.MP4"])
+  let vttArgs = subtitleToVttArgs "/tmp/fms-sub-test.srt"
+      vttHasPair x y = any (\(a, b) -> a == x && b == y) (zip vttArgs (drop 1 vttArgs))
+  check "subtitleToVttArgs contains -f webvtt" True (vttHasPair "-f" "webvtt")
+  check "subtitleToVttArgs contains pipe:1"   True ("pipe:1" `elem` vttArgs)
+  check "subtitleToVttArgs contains the input path"
+    True ("/tmp/fms-sub-test.srt" `elem` vttArgs)
+
+  -- IO test of the actual SRT -> WebVTT conversion, guarded by ffmpeg
+  -- availability: skip gracefully when ffmpeg is not on PATH.
+  case mFFmpeg of
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping subtitle IO test"
+    Just _ -> do
+      let srt = "/tmp/fms-sub-test.srt"
+      writeFile srt "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+      (ec, out, subErr) <- readCreateProcessWithExitCode
+        (proc "ffmpeg" (subtitleToVttArgs srt)) ""
+      check "subtitleToVttArgs run on srt: exit Success" ExitSuccess ec
+      when (ec /= ExitSuccess) (putStrLn ("ffmpeg subtitle stderr: " ++ show subErr))
+      check "converted output contains WEBVTT" True ("WEBVTT" `isInfixOf` out)
+      removeFile srt
 
   putStrLn "All tests passed."

@@ -59,7 +59,8 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    - [X] GET /stream/:id/transcode: ffmpeg -> fragmented MP4 streamed via responseStream (ffmpeg nix-wrapped into the package)
    - [ ] Quality/bitrate adaptation (transcode profiles per client)
 ** TODO Thumbnail generation :feature:
-** TODO Subtitles: detection, streaming, format conversion (SRT/VTT) :feature:
+** DONE Subtitles: detection, sidecar streaming, SRT/ASS->VTT conversion :feature:
+   - [ ] Embedded subtitle extraction; burn-in during transcode
 ** DONE HLS packaging :feature:
    - [X] GET /videos/:id/main.m3u8 + /videos/:id/:seg (ffmpeg HLS vod, -c copy, cached under stateDir/hls/<id>/, segment names sanitized)
 ** TODO Stream large responses lazily; memory monitoring :improvement:

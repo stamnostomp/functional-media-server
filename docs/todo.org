@@ -91,10 +91,12 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Intro skipping via MediaSegments (intro start/end detection)
 
 * 7. Subtitles :feature:
-** TODO Detect external subtitle files (.srt/.vtt/.ass/.ssa/.sub) next to media
+** DONE Detect external subtitle files (.srt/.vtt/.ass/.ssa/.sub) next to media (basename-preferred, GET /items/:id/subtitles)
 ** TODO Embedded subtitle extraction via ffmpeg
-** TODO Subtitle delivery: burn-in during transcode, or sidecar =.vtt=/=.srt= endpoints
-** TODO Format conversion (ASS/SRT -> VTT), encoding handling
+** TODO Subtitle delivery
+   - [X] Sidecar endpoints: GET /stream/:id/subtitle/:index -> text/vtt
+   - [ ] Burn-in during transcode
+** DONE Format conversion: ffmpeg -> WebVTT for srt/ass/ssa/sub
 
 * 8. Users, auth, sessions :feature:
 ** TODO User CRUD (=/Users=), =POST /Users/AuthenticateByName=, token issuance

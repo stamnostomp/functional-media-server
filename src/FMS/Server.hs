@@ -16,6 +16,7 @@ import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Auth (authModule)
 import FMS.Modules.Library (libraryModule)
+import FMS.Modules.Playback (playbackModule)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Stats (statsModule)
@@ -30,7 +31,8 @@ import FMS.Modules.Transcode (transcodeModule)
 -- (docs/modules.org).
 modules :: [Module]
 modules =
-  [ systemModule, authModule, libraryModule, streamModule, transcodeModule
+  [ systemModule, authModule, libraryModule, playbackModule, streamModule
+  , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, statsModule, metadataModule
   , userDataModule
   ]

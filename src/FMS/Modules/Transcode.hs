@@ -3,26 +3,15 @@ module FMS.Modules.Transcode
   , transcodeArgs
   ) where
 
-import Control.Exception (SomeException, bracket, try)
 import Control.Monad.Except (throwError)
-import qualified Data.ByteString as BS
 import Data.ByteString.Builder (Builder, byteString)
 import Data.Text (Text)
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, responseStream)
-import System.Exit (ExitCode)
-import System.IO (Handle, hClose)
-import System.Process
-  ( CreateProcess(..)
-  , ProcessHandle
-  , StdStream(..)
-  , createProcess
-  , proc
-  , waitForProcess
-  )
 
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM)
+import FMS.Core.Process (runProcessStreamBS)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library (MonadLibrary(..))
 
@@ -78,46 +67,14 @@ transcodeHandler captures _req =
 
 -- | The 'Network.Wai.StreamingBody' used with 'responseStream': run
 -- ffmpeg on @path@ and write its stdout to the WAI sink in chunks of
--- 64 KiB, like 'FMS.Modules.Stream.streamFileRange'. The process is
--- bracketed so ffmpeg is always reaped and its pipe handles closed, even
--- if the client disconnects mid-stream. When stdout hits EOF, stderr is
--- closed and the process waited on; the bracket release then only has
--- to tolerate the already-done cleanup.
+-- 64 KiB, like 'FMS.Modules.Subtitles.streamToVtt'.
+-- 'runProcessStreamBS' streams stdout chunk-by-chunk and drains stderr as
+-- raw bytes concurrently (never locale-decoded), and it always closes
+-- the pipes and reaps ffmpeg — even if the client disconnects mid-stream
+-- and the sink throws.
 streamTranscode
   :: FilePath
   -> (Builder -> IO ()) -> IO () -> IO ()
-streamTranscode path send flush =
-  bracket startFFmpeg stopFFmpeg $ \(ph, out, err) -> do
-    let go = do
-          chunk <- BS.hGet out chunkSize
-          if BS.null chunk
-            then pure ()  -- EOF: ffmpeg finished (or died); stop cleanly
-            else do
-              send (byteString chunk)
-              go
-    go
-    hClose err
-    _ <- waitForProcess ph
-    flush
-  where
-    startFFmpeg = do
-      r <- createProcess (proc "ffmpeg" (transcodeArgs path))
-            { std_out = CreatePipe, std_err = CreatePipe }
-      case r of
-        -- createProcess returns (stdin, stdout, stderr, ph); only stdout
-        -- and stderr are pipes here.
-        (_, Just out, Just err, ph) -> pure (ph, out, err)
-        _ -> fail "ffmpeg pipes were not created"
-
-    -- Always reap ffmpeg and close the pipes; each step is tolerant of
-    -- the body having already closed/closed-and-waited them.
-    stopFFmpeg :: (ProcessHandle, Handle, Handle) -> IO ()
-    stopFFmpeg (ph, out, err) = do
-      _ <- try (hClose out) :: IO (Either SomeException ())
-      _ <- try (hClose err) :: IO (Either SomeException ())
-      _ <- try (waitForProcess ph) :: IO (Either SomeException ExitCode)
-      pure ()
-
--- | Streaming chunk size: 64 KiB.
-chunkSize :: Int
-chunkSize = 64 * 1024
+streamTranscode path send flush = do
+  _ <- runProcessStreamBS "ffmpeg" (transcodeArgs path) (send . byteString)
+  flush

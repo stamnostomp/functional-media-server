@@ -6,12 +6,10 @@ module FMS.Modules.Subtitles
   , subtitleList
   ) where
 
-import Control.Exception (SomeException, bracket, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (object, (.=))
 import Data.Char (toLower)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.ByteString.Builder (Builder, byteString)
 import Data.List (sort)
@@ -20,20 +18,11 @@ import qualified Data.Text as T
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, responseLBS, responseStream)
 import System.Directory (listDirectory)
-import System.Exit (ExitCode)
 import System.FilePath ((</>), takeBaseName, takeDirectory, takeExtension)
-import System.IO (Handle, hClose)
-import System.Process
-  ( CreateProcess(..)
-  , ProcessHandle
-  , StdStream(..)
-  , createProcess
-  , proc
-  , waitForProcess
-  )
 
 import FMS.Core.Module (Module(..), Segment(..), get, jsonResponse)
 import FMS.Core.Monad (AppError(..), AppM)
+import FMS.Core.Process (runProcessStreamBS)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library (MonadLibrary(..))
 
@@ -160,40 +149,14 @@ serveSubtitleHandler captures _req =
 
 -- | The 'Network.Wai.StreamingBody' used with 'responseStream': run
 -- ffmpeg converting @path@ to WebVTT and write its stdout to the WAI sink
--- in chunks of 64 KiB, like 'FMS.Modules.Transcode.streamTranscode'. The
--- process is bracketed so ffmpeg is always reaped and its pipe handles
--- closed, even if the client disconnects mid-stream.
+-- in chunks of 64 KiB, like 'FMS.Modules.Transcode.streamTranscode'.
+-- 'runProcessStreamBS' streams stdout chunk-by-chunk and drains stderr as
+-- raw bytes concurrently (never locale-decoded), and it always closes
+-- the pipes and reaps ffmpeg — even if the client disconnects mid-stream
+-- and the sink throws.
 streamToVtt
   :: FilePath
   -> (Builder -> IO ()) -> IO () -> IO ()
-streamToVtt path send flush =
-  bracket startFFmpeg stopFFmpeg $ \(ph, out, err) -> do
-    let go = do
-          chunk <- BS.hGet out chunkSize
-          if BS.null chunk
-            then pure ()  -- EOF: ffmpeg finished (or died); stop cleanly
-            else do
-              send (byteString chunk)
-              go
-    go
-    hClose err
-    _ <- waitForProcess ph
-    flush
-  where
-    startFFmpeg = do
-      r <- createProcess (proc "ffmpeg" (subtitleToVttArgs path))
-            { std_out = CreatePipe, std_err = CreatePipe }
-      case r of
-        (_, Just out, Just err, ph) -> pure (ph, out, err)
-        _ -> fail "ffmpeg pipes were not created"
-
-    stopFFmpeg :: (ProcessHandle, Handle, Handle) -> IO ()
-    stopFFmpeg (ph, out, err) = do
-      _ <- try (hClose out) :: IO (Either SomeException ())
-      _ <- try (hClose err) :: IO (Either SomeException ())
-      _ <- try (waitForProcess ph) :: IO (Either SomeException ExitCode)
-      pure ()
-
--- | Streaming chunk size: 64 KiB.
-chunkSize :: Int
-chunkSize = 64 * 1024
+streamToVtt path send flush = do
+  _ <- runProcessStreamBS "ffmpeg" (subtitleToVttArgs path) (send . byteString)
+  flush

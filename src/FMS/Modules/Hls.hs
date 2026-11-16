@@ -14,20 +14,15 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
--- ffmpeg writes arbitrary bytes to stderr; decode pipes as latin1 so the
--- String-based readCreateProcessWithExitCode below can never hit a
--- "cannot decode byte sequence" error regardless of locale (same trick as
--- test/Spec.hs). Done once in moduleInit.
-import GHC.IO.Encoding (latin1, setLocaleEncoding)
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, responseLBS)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), dropFileName)
-import System.Process (proc, readCreateProcessWithExitCode)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
+import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library (MonadLibrary(..))
@@ -40,11 +35,13 @@ import FMS.Modules.Library (MonadLibrary(..))
 -- stream module it only needs the 'MonadLibrary' capability — the core
 -- never learns about it (docs/modules.org). ffmpeg is found on PATH at
 -- runtime; the Nix package wraps the @fms@ binary with ffmpeg on its PATH
--- (flake.nix).
+-- (flake.nix). Subprocess output is captured as raw bytes via
+-- "FMS.Core.Process" — never locale-decoded — so a chatty ffmpeg can
+-- never crash the server through a String pipe read.
 hlsModule :: Module
 hlsModule = Module
   { moduleName   = "hls"
-  , moduleInit   = liftIO (setLocaleEncoding latin1)
+  , moduleInit   = pure ()
   , moduleRoutes =
       -- The playlist route must come first: otherwise "main.m3u8" would
       -- also bind as a segment name in the capture route below.
@@ -88,14 +85,13 @@ ensureHls cfg item = do
   unless exists $ do
     liftIO (createDirectoryIfMissing True dir)
     logInfo ("hls: packaging item " <> itemId item <> " into " <> T.pack dir)
-    (ec, _out, err) <- liftIO (readCreateProcessWithExitCode
-      (proc "ffmpeg" (hlsArgs (itemPath item) m3u8)) "")
+    (ec, _out, err) <- liftIO (runProcessBS "ffmpeg" (hlsArgs (itemPath item) m3u8))
     case ec of
       ExitSuccess -> pure ()
       ExitFailure n ->
         throwError (InternalError
           ("ffmpeg HLS packaging failed (exit " <> T.pack (show n) <> "): "
-           <> T.pack (take 2000 err)))
+           <> T.pack (take 2000 (showBS (LBS.toStrict err)))))
   pure m3u8
 
 -- | @GET \/videos\/:id\/main.m3u8@ — 404 for an unknown item, otherwise

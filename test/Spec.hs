@@ -4,10 +4,12 @@ import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Directory
@@ -20,14 +22,9 @@ import System.Directory
   )
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
-import System.Process (proc, readCreateProcessWithExitCode)
-
--- ffmpeg writes arbitrary bytes to stderr; decode pipes as latin1 so the
--- String-based readCreateProcessWithExitCode below can never hit a
--- "cannot decode byte sequence" error regardless of locale.
-import GHC.IO.Encoding (latin1, setLocaleEncoding)
 
 import FMS.Core.Module (Segment(..))
+import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -59,6 +56,16 @@ import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
+import FMS.Modules.Playback.Probe
+  ( containerFromExtension
+  , directPlayable
+  , directStreamable
+  , parseFfprobe
+  , probeArgs
+  , probeFile
+  , transcoding
+  )
+import FMS.Modules.Playback.Types (MediaStream(..))
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -67,7 +74,7 @@ check label expected actual
   | expected == actual = putStrLn ("PASS: " ++ label)
   | otherwise = do
       putStrLn ("FAIL: " ++ label
-        ++ " — expected " ++ show expected ++ ", got " ++ show actual)
+        ++ " -- expected " ++ show expected ++ ", got " ++ show actual)
       exitFailure
 
 -- | Remove a scratch dir under /tmp if it exists.
@@ -78,7 +85,6 @@ resetDir dir = do
 
 main :: IO ()
 main = do
-  setLocaleEncoding latin1
   -- Range header parsing (docs/modules.org: malformed means "no range").
   check "bytes=0-100"  (Just (ByteRange 0 (Just 100))) (parseRangeHeader "bytes=0-100")
   check "bytes=200-"   (Just (ByteRange 200 Nothing)) (parseRangeHeader "bytes=200-")
@@ -170,6 +176,15 @@ main = do
   closeAcidState st2
   removeDirectoryRecursive acidDir
 
+  -- FMS.Core.Process (milestone 6a encoding bugfix): subprocess pipes are
+  -- read as raw bytes and rendered with showBS, which maps one byte to
+  -- one char (per-byte latin1) and never throws -- not even for multi-byte
+  -- UTF-8 sequences such as the em-dash (0xE2 0x80 0x94).
+  check "showBS of UTF-8 em-dash bytes [0xE2,0x80,0x94] yields a 3-char String (no throw)"
+    3 (length (showBS (BS.pack [0xE2, 0x80, 0x94])))
+  check "showBS maps bytes 0xE2 0x80 0x94 to chars U+00E2 U+0080 U+0094"
+    "\xE2\x80\x94" (showBS (BS.pack [0xE2, 0x80, 0x94]))
+
   -- Transcode module (milestone 3b): the pure ffmpeg argument list.
   let targs = transcodeArgs "/tmp/fms-test-tc.wav"
   check "transcodeArgs contains -f mp4" True ("-f" `elem` targs && "mp4" `elem` targs)
@@ -180,22 +195,23 @@ main = do
   -- gracefully when ffmpeg is not on PATH.
   mFFmpeg <- findExecutable "ffmpeg"
   case mFFmpeg of
-    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping transcode IO test"
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH -- skipping transcode IO test"
     Just _ -> do
       let wav = "/tmp/fms-test-tc.wav"
-      (ecGen, _, genErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg" ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-y", wav]) ""
+      (ecGen, _, genErr) <- runProcessBS "ffmpeg"
+        ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-y", wav]
       check "generate 1s test wav: exit Success" ExitSuccess ecGen
-      when (ecGen /= ExitSuccess) (putStrLn ("ffmpeg wav gen stderr: " ++ show genErr))
-      (ec, out, tcErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg" (transcodeArgs wav)) ""
+      when (ecGen /= ExitSuccess)
+        (putStrLn ("ffmpeg wav gen stderr: " ++ show (showBS (LBS.toStrict genErr))))
+      (ec, out, tcErr) <- runProcessBS "ffmpeg" (transcodeArgs wav)
       check "transcodeArgs run on wav: exit Success" ExitSuccess ec
-      when (ec /= ExitSuccess) (putStrLn ("ffmpeg transcode stderr: " ++ show tcErr))
-      check "transcoded output is > 1000 bytes" True (length out > 1000)
+      when (ec /= ExitSuccess)
+        (putStrLn ("ffmpeg transcode stderr: " ++ show (showBS (LBS.toStrict tcErr))))
+      check "transcoded output is > 1000 bytes" True (LBS.length out > 1000)
       -- An MP4 starts with a size box whose type at offset 4 is "ftyp"
       -- (0x66 0x74 0x79 0x70 = [102,116,121,112]).
       check "output bytes 4..8 are the ftyp box type"
-        [0x66, 0x74, 0x79, 0x70] (map fromEnum (take 4 (drop 4 out)))
+        [0x66, 0x74, 0x79, 0x70] (map fromEnum (LBS.unpack (LBS.take 4 (LBS.drop 4 out))))
 
   -- HLS module (milestone 3c): the pure ffmpeg argument list + dir helper.
   let hlsIn  = "/tmp/fms-test-hls-src.mp4"
@@ -214,30 +230,30 @@ main = do
   -- IO test of the actual HLS packaging, guarded by ffmpeg availability:
   -- skip gracefully when ffmpeg is not on PATH.
   case mFFmpeg of
-    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping HLS IO test"
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH -- skipping HLS IO test"
     Just _ -> do
       let mp4    = "/tmp/fms-test-hls-src.mp4"
           outDir = "/tmp/fms-test-hls-out"
           m3u8   = outDir </> "main.m3u8"
       resetDir outDir
       createDirectoryIfMissing True outDir
-      (ecGen, _, genErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg"
-          [ "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10"
-          , "-c:v", "libx264", "-y", mp4 ]) ""
+      (ecGen, _, genErr) <- runProcessBS "ffmpeg"
+        [ "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10"
+        , "-c:v", "libx264", "-y", mp4 ]
       check "generate 4s test mp4: exit Success" ExitSuccess ecGen
-      when (ecGen /= ExitSuccess) (putStrLn ("ffmpeg mp4 gen stderr: " ++ show genErr))
-      (ec, _, hlsErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg" (hlsArgs mp4 m3u8)) ""
+      when (ecGen /= ExitSuccess)
+        (putStrLn ("ffmpeg mp4 gen stderr: " ++ show (showBS (LBS.toStrict genErr))))
+      (ec, _, hlsErr) <- runProcessBS "ffmpeg" (hlsArgs mp4 m3u8)
       check "hlsArgs run on 4s mp4: exit Success" ExitSuccess ec
-      when (ec /= ExitSuccess) (putStrLn ("ffmpeg hls stderr: " ++ show hlsErr))
+      when (ec /= ExitSuccess)
+        (putStrLn ("ffmpeg hls stderr: " ++ show (showBS (LBS.toStrict hlsErr))))
       m3u8Exists <- doesFileExist m3u8
       check "main.m3u8 exists after ffmpeg" True m3u8Exists
-      playlist <- readFile m3u8
-      check "playlist starts with #EXTM3U" True ("#EXTM3U" `isPrefixOf` playlist)
-      let segNames = filter (".ts" `isSuffixOf`) (lines playlist)
+      playlist <- LBS.readFile m3u8
+      check "playlist starts with #EXTM3U" True (LBSC.isPrefixOf "#EXTM3U" playlist)
+      let segNames = filter (LBSC.isSuffixOf ".ts") (LBSC.lines playlist)
       check "playlist references at least one .ts segment" True (not (null segNames))
-      segsExist <- mapM (\s -> doesFileExist (outDir </> s)) segNames
+      segsExist <- mapM (\s -> doesFileExist (outDir </> LBSC.unpack s)) segNames
       check "all referenced .ts segments exist on disk" True (and segsExist)
       removeDirectoryRecursive outDir
       removeFile mp4
@@ -267,15 +283,15 @@ main = do
   -- IO test of the actual SRT -> WebVTT conversion, guarded by ffmpeg
   -- availability: skip gracefully when ffmpeg is not on PATH.
   case mFFmpeg of
-    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping subtitle IO test"
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH -- skipping subtitle IO test"
     Just _ -> do
       let srt = "/tmp/fms-sub-test.srt"
       writeFile srt "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
-      (ec, out, subErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg" (subtitleToVttArgs srt)) ""
+      (ec, out, subErr) <- runProcessBS "ffmpeg" (subtitleToVttArgs srt)
       check "subtitleToVttArgs run on srt: exit Success" ExitSuccess ec
-      when (ec /= ExitSuccess) (putStrLn ("ffmpeg subtitle stderr: " ++ show subErr))
-      check "converted output contains WEBVTT" True ("WEBVTT" `isInfixOf` out)
+      when (ec /= ExitSuccess)
+        (putStrLn ("ffmpeg subtitle stderr: " ++ show (showBS (LBS.toStrict subErr))))
+      check "converted output contains WEBVTT" True (BS.isInfixOf "WEBVTT" (LBS.toStrict out))
       removeFile srt
 
   -- Thumbs module (milestone 3e): the pure ffmpeg argument list + cache
@@ -298,23 +314,23 @@ main = do
   -- on a 2s clip ffmpeg 9.0.2 exits 234 with empty output (verified
   -- empirically), hence the 6s lavfi source here.
   case mFFmpeg of
-    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping thumbs IO test"
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH -- skipping thumbs IO test"
     Just _ -> do
       let mp4 = "/tmp/fms-test-thumb-src.mp4"
-      (ecGen, _, genErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg"
-          [ "-f", "lavfi", "-i", "testsrc=duration=6:size=160x120:rate=10"
-          , "-c:v", "libx264", "-y", mp4 ]) ""
+      (ecGen, _, genErr) <- runProcessBS "ffmpeg"
+        [ "-f", "lavfi", "-i", "testsrc=duration=6:size=160x120:rate=10"
+        , "-c:v", "libx264", "-y", mp4 ]
       check "generate 6s test mp4: exit Success" ExitSuccess ecGen
-      when (ecGen /= ExitSuccess) (putStrLn ("ffmpeg mp4 gen stderr: " ++ show genErr))
-      (ec, out, thErr) <- readCreateProcessWithExitCode
-        (proc "ffmpeg" (thumbArgs mp4)) ""
+      when (ecGen /= ExitSuccess)
+        (putStrLn ("ffmpeg mp4 gen stderr: " ++ show (showBS (LBS.toStrict genErr))))
+      (ec, out, thErr) <- runProcessBS "ffmpeg" (thumbArgs mp4)
       check "thumbArgs run on 6s mp4: exit Success" ExitSuccess ec
-      when (ec /= ExitSuccess) (putStrLn ("ffmpeg thumb stderr: " ++ show thErr))
+      when (ec /= ExitSuccess)
+        (putStrLn ("ffmpeg thumb stderr: " ++ show (showBS (LBS.toStrict thErr))))
       -- A JPEG starts with the SOI marker 0xFF 0xD8.
       check "thumb output starts with JPEG SOI (FFD8)"
-        [0xFF, 0xD8] (map fromEnum (take 2 out))
-      check "thumb output is > 1000 bytes" True (length out > 1000)
+        [0xFF, 0xD8] (map fromEnum (LBS.unpack (LBS.take 2 out)))
+      check "thumb output is > 1000 bytes" True (LBS.length out > 1000)
       removeFile mp4
 
   -- Items query helpers (milestone 4a, docs/todo.org section 4): the pure
@@ -710,5 +726,119 @@ main = do
   missingUD <- loadUserData "/tmp/fms-test-userdata-does-not-exist.json"
   check "loadUserData of a missing file is empty" HM.empty missingUD
   removeFile udFile
+
+  -- Playback module (milestone 6a, docs/todo.org section 6): the pure
+  -- ffprobe argument list, the pure parseFfprobe parser on a fixture,
+  -- the container-from-extension fallback, and the direct-play /
+  -- direct-stream / transcode decision matrix.
+  check "probeArgs is the ffprobe json show_format/show_streams invocation"
+    ["-v","error","-print_format","json","-show_format","-show_streams","/x.mp4"]
+    (probeArgs "/x.mp4")
+
+  let ffprobeFixture = LBS.fromStrict (BSC.pack (unwords
+        [ "{"
+        , "\"streams\":["
+        , "{\"index\":0,\"codec_name\":\"h264\",\"codec_type\":\"video\",\"width\":1920,\"height\":1080,\"duration\":\"61.000000\",\"tags\":{\"language\":\"eng\"}},"
+        , "{\"index\":1,\"codec_name\":\"aac\",\"codec_type\":\"audio\",\"channels\":2,\"tags\":{\"language\":\"eng\"}},"
+        , "{\"index\":2,\"codec_name\":\"srt\",\"codec_type\":\"subtitle\",\"tags\":{\"language\":\"fre\",\"title\":\"Forced\"}}"
+        , "],"
+        , "\"format\":{\"format_name\":\"mov,mp4,m4a,3gp,3g2,mj2\",\"duration\":\"120.500000\"}"
+        , "}"
+        ]))
+      isRightE :: Either a b -> Bool
+      isRightE (Right _) = True
+      isRightE (Left _)  = False
+  case parseFfprobe ffprobeFixture of
+    Left err -> do
+      putStrLn ("FAIL: parseFfprobe fixture -- " ++ err)
+      exitFailure
+    Right (container, streams) -> do
+      check "parseFfprobe fixture container is mp4 (mov,mp4,... -> mp4)"
+        "mp4" (T.unpack container)
+      check "parseFfprobe fixture has 3 streams" 3 (length streams)
+      check "parseFfprobe stream types" ["Video","Audio","Subtitle"] (map msType streams)
+      check "parseFfprobe stream codecs" ["h264","aac","srt"] (map msCodec streams)
+      check "parseFfprobe stream indexes" [0,1,2] (map msIndex streams)
+      check "parseFfprobe video width/height"
+        (Just 1920, Just 1080) (msWidth (streams !! 0), msHeight (streams !! 0))
+      check "parseFfprobe audio channels + language"
+        (Just 2, Just "eng") (msChannels (streams !! 1), msLanguage (streams !! 1))
+      check "parseFfprobe subtitle language + title"
+        (Just "fre", Just "Forced") (msLanguage (streams !! 2), msTitle (streams !! 2))
+      check "parseFfprobe stream duration (stream's own)"
+        (Just 61.0) (msDurationSeconds (streams !! 0))
+      check "parseFfprobe falls back to format duration"
+        (Just 120.5) (msDurationSeconds (streams !! 1))
+  check "parseFfprobe on malformed JSON is Left"
+    True (isLeftE (parseFfprobe "this is not json at all"))
+  check "parseFfprobe on wrong-typed streams is Left"
+    True (isLeftE (parseFfprobe "{\"streams\": 42}"))
+  check "parseFfprobe on a non-object is Left"
+    True (isLeftE (parseFfprobe "[1,2,3]"))
+
+  check "containerFromExtension lowercases .MP4" "mp4" (T.unpack (containerFromExtension "/a/b/clip.MP4"))
+  check "containerFromExtension no extension -> unknown" "unknown" (T.unpack (containerFromExtension "/a/b/noext"))
+
+  -- The decision matrix (default client profile).
+  let vcodec c = MediaStream 0 "Video"   c Nothing Nothing Nothing Nothing Nothing Nothing
+      acodec c = MediaStream 1 "Audio"   c Nothing Nothing Nothing Nothing Nothing Nothing
+      sub    c = MediaStream 2 "Subtitle" c Nothing Nothing Nothing Nothing Nothing Nothing
+  check "directPlayable mp4 h264+aac is True"
+    True (directPlayable "mp4" [vcodec "h264", acodec "aac"])
+  check "directPlayable mp4 hevc+ac3 is False (ac3 not in the audio list)"
+    False (directPlayable "mp4" [vcodec "hevc", acodec "ac3"])
+  check "directPlayable mkv h264+aac is False (container not direct-play)"
+    False (directPlayable "mkv" [vcodec "h264", acodec "aac"])
+  check "directStreamable mkv is True (remux)"
+    True (directStreamable "mkv" [vcodec "h264", acodec "aac"])
+  check "transcoding mkv is True (not directPlayable)"
+    True (transcoding "mkv" [vcodec "h264", acodec "aac"])
+  check "directPlayable avi mpeg4+mp3 is False -> transcode"
+    False (directPlayable "avi" [vcodec "mpeg4", acodec "mp3"])
+  check "transcoding avi is True"
+    True (transcoding "avi" [vcodec "mpeg4", acodec "mp3"])
+  check "directPlayable mp3 audio-only is True"
+    True (directPlayable "mp3" [acodec "mp3"])
+  check "directStreamable mp4 is False"
+    False (directStreamable "mp4" [vcodec "h264"])
+  check "directPlayable ignores subtitle streams"
+    True (directPlayable "mp4" [vcodec "h264", acodec "aac", sub "srt"])
+  check "directPlayable webm vp9+opus is True"
+    True (directPlayable "webm" [vcodec "vp9", acodec "opus"])
+  check "directPlayable mp4 with unknown video codec is False"
+    False (directPlayable "mp4" [vcodec "wmv3", acodec "aac"])
+
+  -- IO test of the real ffprobe round trip, guarded by ffprobe/ffmpeg
+  -- availability: skip gracefully when they are not on PATH.
+  mFfprobe <- findExecutable "ffprobe"
+  case (mFfprobe, mFFmpeg) of
+    (Just _, Just _) -> do
+      let clip  = "/tmp/fms-test-probe-clip.mp4"
+          dummy = "/tmp/fms-test-probe-dummy.mp4"
+      (ecGen, _, genErr) <- runProcessBS "ffmpeg"
+        [ "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10"
+        , "-f", "lavfi", "-i", "sine=frequency=440:duration=2"
+        , "-c:v", "libx264", "-c:a", "aac", "-y", clip ]
+      check "generate 2s test clip (video+audio): exit Success" ExitSuccess ecGen
+      when (ecGen /= ExitSuccess)
+        (putStrLn ("ffmpeg clip gen stderr: " ++ show (showBS (LBS.toStrict genErr))))
+      writeFile dummy "not really an mp4, just bytes"
+      rClip <- probeFile clip
+      check "probeFile on a real clip is Right" True (isRightE rClip)
+      case rClip of
+        Left err -> do
+          putStrLn ("FAIL: probeFile clip -- " ++ err)
+          exitFailure
+        Right (c, streams) -> do
+          check "probeFile clip container is mp4" "mp4" (T.unpack c)
+          check "probeFile clip stream types" ["Video", "Audio"] (map msType streams)
+          check "probeFile clip codecs" ["h264", "aac"] (map msCodec streams)
+          check "probeFile clip is direct playable" True (directPlayable c streams)
+          check "probeFile clip is not direct streamable" False (directStreamable c streams)
+      rDummy <- probeFile dummy
+      check "probeFile on dummy bytes is Left" True (isLeftE rDummy)
+      removeFile clip
+      removeFile dummy
+    _ -> putStrLn "SKIP: ffprobe/ffmpeg not found on PATH -- skipping probe IO test"
 
   putStrLn "All tests passed."

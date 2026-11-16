@@ -23,6 +23,7 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    - [X] FMS.Server with the modules list
    - [X] systemModule: GET /System/Info/Public + GET /healthz
 ** DONE env-var configuration + defaults (MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR)
+** DONE Robust process/encoding handling: FMS.Core.Process (runProcessBS/runProcessStreamBS, byte-based output, showBS), no locale hacks, ASCII-only runtime logs (fixed a latin1/em-dash 500 bug)
 ** TODO Structured error logging with request IDs + JSON error body :improvement:
 ** DONE health endpoint (GET /healthz)
 ** TODO Request tracing/metrics (duration, error rates) :improvement:

@@ -66,7 +66,7 @@ loadOrBootstrapUsers cfg = do
       mPw <- lookupEnv "FMS_ADMIN_PASSWORD"
       let pw = T.pack (fromMaybe "admin" mPw)
       when (isNothing mPw) $
-        hPutStrLn stderr "[WARN] FMS_ADMIN_PASSWORD not set: bootstrap admin password is \"admin\" — set FMS_ADMIN_PASSWORD or change it via POST /Users/1/Password"
+        hPutStrLn stderr "[WARN] FMS_ADMIN_PASSWORD not set: bootstrap admin password is \"admin\" -- set FMS_ADMIN_PASSWORD or change it via POST /Users/1/Password"
       h   <- hashPassword pw
       key <- mintToken
       let admin = User "1" "admin" h True [key]

@@ -75,7 +75,7 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO OpenAPI/Swagger spec generated from code + docs endpoint :improvement:
 
 * Milestone 5 — stats, users, security
-** TODO Stats module: play counts, progress, continue-watching, popular, new
+** DONE Stats module: play counts, progress, continue-watching, popular, new (stats.json persisted; stream records plays)
 ** TODO User management: profiles, watch history, resume points :feature:
 ** TODO Authentication: basic auth, tokens (API keys), role-based access control :feature:
 ** TODO Configurable CORS + preflight handling :improvement:

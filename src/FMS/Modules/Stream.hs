@@ -4,6 +4,7 @@ module FMS.Modules.Stream
   ) where
 
 import Control.Exception (bracket)
+import Control.Monad (when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
@@ -21,6 +22,7 @@ import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Stats (MonadStats(..))
 
 -- | The stream module (docs/roadmap.org milestone 3, docs/todo.org
 -- section 6): @GET /stream/:id@ serves the file bytes of a library item,
@@ -61,15 +63,19 @@ streamHandler captures req =
                 ]
           -- docs/modules.org: a missing or malformed Range header means
           -- "no range requested" -> serve the full file with 200.
+          -- Milestone 5a: a full 200 response, or a range starting at
+          -- byte 0, counts as a play -> recordPlay (stats module).
           case lookup hRange (requestHeaders req) >>= parseRangeHeader of
-            Nothing ->
+            Nothing -> do
+              recordPlay (itemId item)
               pure (responseStream status200
                       (baseHeaders ++ [contentLength size])
                       (streamFileRange path 0 size))
             Just br ->
               case resolveRange size br of
                 Left msg -> throwError (BadRequest msg)
-                Right (start, end) ->
+                Right (start, end) -> do
+                  when (start == 0) (recordPlay (itemId item))
                   pure (responseStream status206
                           ( baseHeaders
                             ++ [ contentLength (end - start + 1)

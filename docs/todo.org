@@ -88,7 +88,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Audio/subtitle stream selection, codec profiles and levels
 ** TODO Hardware acceleration (VAAPI, NVENC, QSV, VideoToolbox) behind config
 ** TODO Bitrate limits per user/network; quality options
-** TODO Session reporting: =/Sessions=, playback start/progress/stop, =POST /Sessions/Playing=, =/Playing/Ping=, =/Playing/Stopped=
+** TODO Session reporting
+   - [X] play recording on stream (full 200 or range@0 -> recordPlay), POST /progress, GET /continuewatching, /popular, /new (stats.json persisted)
+   - [ ] =/Sessions=, =POST /Sessions/Playing=, =/Playing/Ping=, =/Playing/Stopped=
 ** TODO Playback progress, resume points (="/Users/{id}/Items/{id}/UserData=")
 ** TODO Mark played/unplayed, set favorite/like
 ** TODO Intro skipping via MediaSegments (intro start/end detection)
@@ -112,6 +114,7 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 9. User data and personalization :feature:
 ** TODO =/Users/{id}/Items/{id}/UserData= get/update (playback position, play count, played, favorite, likes)
+   - [X] per-item playback position + play count stored globally (stats.json)
 ** TODO =POST /Users/{id}/PlayedItems/{id}= (mark played/unplayed), batch delete
 ** TODO Continue watching / next up / recently added per user
 ** TODO Watch history

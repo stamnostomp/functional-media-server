@@ -4,6 +4,7 @@ import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
@@ -29,7 +30,10 @@ import FMS.Core.Query (applyItemQuery, paginate, queryParams, searchItems, sortI
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (matchSegments)
 import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
+import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popular)
+import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
@@ -393,5 +397,51 @@ main = do
     (titlesOf (applyItemQuery [("limit", "abc"), ("startIndex", "xyz")] items4))
   check "applyItemQuery startIndex beyond end -> empty page, total kept"
     (4, []) (titlesOf (applyItemQuery [("startIndex", "99")] items4))
+
+  -- Stats module (milestone 5a, docs/roadmap.org milestone 5): the pure
+  -- helpers of FMS.Modules.Stats.Monad on a sample map, the applyPlay /
+  -- applyProgress semantics behind recordPlay / recordProgress, and the
+  -- JSON persistence roundtrip.
+  let pA = Progress 30 120 t1   -- 25%  -> continue watching
+      pB = Progress 115 120 t2  -- 95.8% -> finished, excluded
+      pC = Progress 5 100 t3    -- 5%   -> continue watching
+      statsMap = HM.fromList
+        [ ("a", ItemStats 3 t4 (Just pA))
+        , ("b", ItemStats 1 t2 (Just pB))
+        , ("c", ItemStats 5 t3 (Just pC))
+        , ("d", ItemStats 2 t1 Nothing)
+        ]
+  check "continueWatching keeps unfinished progress, updatedAt desc"
+    [("c", pC), ("a", pA)] (continueWatching statsMap)
+  check "continueWatching excludes >=95% and progress-less items"
+    2 (length (continueWatching statsMap))
+  check "popular sorts by playCount desc"
+    ["c", "a", "d", "b"] (map fst (popular statsMap))
+  check "popular keeps the full ItemStats values"
+    [5, 3, 2, 1] (map (statsPlayCount . snd) (popular statsMap))
+
+  let s0 = ItemStats 0 t1 Nothing
+  check "applyPlay bumps playCount and stamps lastPlayedAt"
+    (ItemStats 1 t4 Nothing) (applyPlay t4 s0)
+  check "applyPlay twice bumps twice"
+    (ItemStats 2 t4 Nothing) (applyPlay t4 (applyPlay t4 s0))
+  check "applyProgress sets progress, keeps playCount"
+    (ItemStats 0 t1 (Just pA)) (applyProgress pA s0)
+  check "applyProgress overwrites existing progress"
+    (ItemStats 3 t4 (Just pC)) (applyProgress pC (ItemStats 3 t4 (Just pA)))
+
+  -- JSON persistence: saveStats/loadStats roundtrip in /tmp.
+  let statsFile = "/tmp/fms-test-stats.json"
+  saveStats statsFile statsMap
+  loadedStats <- loadStats statsFile
+  check "saveStats/loadStats roundtrip" statsMap loadedStats
+  rawStats <- BSC.readFile statsFile
+  check "stats.json is a bare map containing the item ids"
+    True ("\"a\"" `isInfixOf` BSC.unpack rawStats
+          && "\"c\"" `isInfixOf` BSC.unpack rawStats
+          && "\"playCount\"" `isInfixOf` BSC.unpack rawStats)
+  missingStats <- loadStats "/tmp/fms-test-stats-does-not-exist.json"
+  check "loadStats of a missing file is empty" HM.empty missingStats
+  removeFile statsFile
 
   putStrLn "All tests passed."

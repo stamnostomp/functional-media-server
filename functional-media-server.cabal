@@ -32,12 +32,17 @@ library
                       FMS.Core.Range
                       FMS.Core.Types.Config
                       FMS.Core.Types.MediaItem
+                      FMS.Core.Types.Progress
                       FMS.Modules.System
                       FMS.Modules.Stream
                       FMS.Modules.Transcode
                       FMS.Modules.Hls
                       FMS.Modules.Subtitles
                       FMS.Modules.Thumbs
+                      FMS.Modules.Stats
+                      FMS.Modules.Stats.Monad
+                      FMS.Modules.Stats.Persistence
+                      FMS.Modules.Stats.Routes
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
                       FMS.Modules.Library.Routes
@@ -72,6 +77,7 @@ test-suite fms-test
                     , bytestring
                     , text
                     , containers
+                    , unordered-containers
                     , directory
                     , filepath
                     , time

@@ -119,10 +119,11 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO First-run startup wizard (admin creation) like Jellyfin's
 
 * 9. User data and personalization :feature:
-** TODO =/Users/{id}/Items/{id}/UserData= get/update (playback position, play count, played, favorite, likes)
-   - [X] per-item playback position + play count stored globally (stats.json)
-** TODO =POST /Users/{id}/PlayedItems/{id}= (mark played/unplayed), batch delete
-** TODO Continue watching / next up / recently added per user
+** DONE =/Users/{id}/Items/{id}/UserData= get/update (played, favorite, playbackPosition, playCount) - self-or-admin, persisted userdata.json
+   - [X] per-item stats also stored globally (stats.json)
+   - [ ] likes
+** DONE =POST/DELETE /Users/{id}/PlayedItems/{id}= and =POST/DELETE /Users/{id}/FavoriteItems/{id}=
+** TODO batch delete played items; per-user continue watching / next up / watch history
 ** TODO Watch history
 
 * 10. Organization endpoints :feature:

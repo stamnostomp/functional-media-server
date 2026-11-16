@@ -48,6 +48,11 @@ library
                       FMS.Modules.Stats.Monad
                       FMS.Modules.Stats.Persistence
                       FMS.Modules.Stats.Routes
+                      FMS.Modules.UserData
+                      FMS.Modules.UserData.Types
+                      FMS.Modules.UserData.Persistence
+                      FMS.Modules.UserData.Monad
+                      FMS.Modules.UserData.Routes
                       FMS.Modules.Metadata
                       FMS.Modules.Metadata.Types
                       FMS.Modules.Metadata.Nfo

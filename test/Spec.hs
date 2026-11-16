@@ -39,6 +39,9 @@ import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
 import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popular)
 import FMS.Modules.Stats.Persistence (loadStats, saveStats)
+import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
+import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
+import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
@@ -592,5 +595,71 @@ main = do
   missingMeta <- loadMetadata "/tmp/fms-test-metadata-does-not-exist.json"
   check "loadMetadata of a missing file is empty" HM.empty missingMeta
   removeFile metaFile
+
+  -- UserData module (milestone 5c, docs/todo.org section 9): the pure
+  -- helpers of FMS.Modules.UserData.Monad, the UserData JSON roundtrip
+  -- (incl. partial decode), and the nested userdata.json persistence
+  -- roundtrip in /tmp.
+  let ud0 = emptyUserData
+  check "emptyUserData is all-empty"
+    (UserData False False Nothing 0 Nothing) ud0
+  check "markPlayed True sets played and bumps playCount"
+    (UserData True False Nothing 1 Nothing) (markPlayed True ud0)
+  check "markPlayed True twice bumps the play count twice"
+    (UserData True False Nothing 2 Nothing) (markPlayed True (markPlayed True ud0))
+  check "markPlayed False clears played, keeps playCount"
+    (UserData False False Nothing 2 Nothing) (markPlayed False (markPlayed True (markPlayed True ud0)))
+  check "setFavorite True sets favorite"
+    (ud0 { udFavorite = True }) (setFavorite True ud0)
+  check "setFavorite False clears favorite"
+    (ud0 { udFavorite = False }) (setFavorite False (setFavorite True ud0))
+  check "setPosition sets playbackPosition"
+    (ud0 { udPlaybackPosition = Just 42.5 }) (setPosition 42.5 ud0)
+  check "setPosition overwrites an existing position"
+    (Just 99.0) (udPlaybackPosition (setPosition 99.0 (setPosition 42.5 ud0)))
+
+  -- UserData JSON: roundtrip + Jellyfin-style keys + partial decode.
+  let udSample = UserData True True (Just 42.5) 3 (Just t4)
+      udJson   = LBS.toStrict (Aeson.encode udSample)
+  check "UserData JSON roundtrip" (Just udSample) (Aeson.decode (Aeson.encode udSample) :: Maybe UserData)
+  check "UserData ToJSON uses the Jellyfin-style keys"
+    True (all (`BSC.isInfixOf` udJson)
+      [ "\"played\":true", "\"favorite\":true", "\"playbackPosition\":42.5"
+      , "\"playCount\":3", "\"lastPlayedAt\":" ])
+  check "UserData empty encodes null position/lastPlayedAt and 0 playCount"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode ud0))
+      [ "\"played\":false", "\"favorite\":false", "\"playbackPosition\":null"
+      , "\"playCount\":0", "\"lastPlayedAt\":null" ])
+  check "UserData partial decode {\"played\":true} keeps the other defaults"
+    (Just (ud0 { udPlayed = True })) (Aeson.decode "{\"played\":true}" :: Maybe UserData)
+  check "UserData partial decode {} decodes to emptyUserData"
+    (Just ud0) (Aeson.decode "{}" :: Maybe UserData)
+  check "UserData partial decode {\"playbackPosition\":7.25}"
+    (Just (ud0 { udPlaybackPosition = Just 7.25 }))
+    (Aeson.decode "{\"playbackPosition\":7.25}" :: Maybe UserData)
+  check "UserData decode of a non-object is Nothing"
+    (Nothing :: Maybe UserData) (Aeson.decode "[1,2]")
+  check "UserData decode of a wrongly typed field is Nothing"
+    (Nothing :: Maybe UserData) (Aeson.decode "{\"played\":\"yes\"}")
+
+  -- userdata.json persistence: nested map userId -> itemId -> UserData.
+  let udFile = "/tmp/fms-test-userdata.json"
+      udMap = HM.fromList
+        [ ("1", HM.fromList [("10", udSample), ("11", ud0)])
+        , ("2", HM.fromList [("10", ud0 { udFavorite = True })])
+        ]
+  saveUserData udFile udMap
+  loadedUD <- loadUserData udFile
+  check "saveUserData/loadUserData nested roundtrip" udMap loadedUD
+  rawUD <- BSC.readFile udFile
+  check "userdata.json is a nested map (user -> item -> UserData)"
+    True ("\"1\"" `BSC.isInfixOf` rawUD
+          && "\"2\"" `BSC.isInfixOf` rawUD
+          && "\"10\"" `BSC.isInfixOf` rawUD
+          && "\"played\":true" `BSC.isInfixOf` rawUD
+          && "\"playbackPosition\":42.5" `BSC.isInfixOf` rawUD)
+  missingUD <- loadUserData "/tmp/fms-test-userdata-does-not-exist.json"
+  check "loadUserData of a missing file is empty" HM.empty missingUD
+  removeFile udFile
 
   putStrLn "All tests passed."

@@ -15,4 +15,5 @@ data Config = Config
   , configServerName  :: !Text      -- ^ display name (FMS_SERVER_NAME / config.json; milestone 1b)
   , configFollowSymlinks :: !Bool   -- ^ scanner symlink policy (env FMS_FOLLOW_SYMLINKS, default False; milestone 2b)
   , configTmdbApiKey  :: !Text      -- ^ TMDB API key for the remote metadata fallback (env MEDIA_TMDB_API_KEY, milestone 4c; empty disables it)
+  , configRateLimit   :: !(Maybe Int)  -- ^ max requests per minute per client IP (env FMS_RATE_LIMIT; Nothing/0 = disabled; milestone 14a)
   } deriving (Show, Eq)

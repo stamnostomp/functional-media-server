@@ -8,6 +8,7 @@ import Control.Concurrent
 import Control.Concurrent.STM (newTVarIO)
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
+import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Acid (AcidState)
@@ -23,6 +24,7 @@ import System.Process (CreateProcess (..), createProcess, proc)
 import FMS (name, version)
 import FMS.Core.Module (Module(..))
 import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
+import FMS.Core.RateLimit (Bucket, rateLimitBucketsKey)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.ServerConfig (ServerConfig (..))
@@ -81,6 +83,10 @@ runServer cfg = do
     putState "system.serverConfig" scTv
     putState "system.moduleNames" (map moduleName modules)
     putState "system.shutdown" shutdownMv
+    -- Milestone 14a: the per-IP token-bucket map for rate limiting
+    -- (read by the router under "ratelimit.buckets").
+    rlTv <- liftIO (newTVarIO (HM.empty :: HM.HashMap Text Bucket))
+    putState rateLimitBucketsKey rlTv
   forM_ modules $ \m -> do
     r <- runApp appEnv (moduleInit m)
     case r of

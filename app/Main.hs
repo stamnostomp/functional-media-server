@@ -34,6 +34,7 @@ main = do
   mAuth  <- lookupEnv "FMS_REQUIRE_AUTH"
   mName  <- lookupEnv "FMS_SERVER_NAME"
   mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
+  mRate  <- lookupEnv "FMS_RATE_LIMIT"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -52,5 +53,8 @@ main = do
         , configFollowSymlinks = maybe False
             (\v -> map toLower v `elem` ["true", "1", "yes"]) mFollow
         , configTmdbApiKey  = T.pack (fromMaybe "" mTmdb)
+        , configRateLimit   = case mRate >>= readMaybe of
+            Just n | n > 0 -> Just n
+            _              -> Nothing   -- missing/invalid/0 -> disabled (milestone 14a)
         }
   runServer cfg

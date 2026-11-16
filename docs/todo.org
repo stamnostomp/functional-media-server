@@ -22,7 +22,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO WebSocket endpoint (=Socket=) for server events
 ** TODO Error model
    - [X] AppError (NotFound/BadRequest/InternalError) -> 404/400/500 in the router; exceptions caught as 500
-   - [ ] request IDs + consistent JSON error body
+   - [X] request IDs: X-Request-Id on every response, mirrored as requestId in JSON error bodies
 ** DONE Graceful shutdown
    - [X] health endpoint (=GET /healthz=)
    - [X] =POST /System/Shutdown= -> drain + acid-state checkpoint + clean exit
@@ -164,7 +164,9 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 14. Security :fix:
 ** TODO Path sanitization everywhere (no directory traversal via ids/paths)
-** TODO Rate limiting per-IP and per-endpoint
+** TODO Rate limiting
+   - [X] per-IP token bucket (FMS_RATE_LIMIT req/min, 429 + JSON error), OPTIONS exempt, refills
+   - [ ] per-endpoint limits
 ** TODO HTTPS/TLS termination config; security headers
 ** TODO Validate all user input; safe Range parsing (see roadmap milestone 3)
 

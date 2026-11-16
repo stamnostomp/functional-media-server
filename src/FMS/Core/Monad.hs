@@ -30,6 +30,7 @@ data AppError
   = NotFound Text
   | BadRequest Text
   | Unauthorized Text
+  | TooManyRequests Text  -- ^ milestone 14a rate limiting; maps to HTTP 429
   | InternalError Text
   deriving (Show, Eq)
 

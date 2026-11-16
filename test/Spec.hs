@@ -33,6 +33,7 @@ import FMS.Core.Module (Segment(..))
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, filterByFolder, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
+import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), migrateMediaItem)
@@ -776,6 +777,29 @@ main = do
     (Just (PermissionsRequest Nothing))
     (Aeson.decode "{}" :: Maybe PermissionsRequest)
 
+  -- Rate limiting + request ids (milestone 14a, docs/todo.org section 14):
+  -- the pure token bucket math and the request-id format.
+  let r = 60.0 :: Double   -- 60 req/min = 1 token/s, cap 60
+      b0 = newBucket r tNow
+  check "newBucket starts full at cap = rate" 60 (bucketTokens b0)
+  let (ok1, tb1) = tryTake r tNow b0
+  check "tryTake on a full bucket succeeds" True ok1
+  check "tryTake consumes exactly one token" 59 (bucketTokens tb1)
+  let empty = Bucket 0 tNow
+      (ok2, tb2) = tryTake r tNow empty
+  check "tryTake on an empty bucket denies" False ok2
+  check "a denied tryTake does not go negative" 0 (bucketTokens tb2)
+  check "refill adds rate/60 * elapsed tokens"
+    10 (bucketTokens (refill r (addUTCTime 10 tNow) empty))
+  check "refill caps at rate (never exceeds cap)"
+    60 (bucketTokens (refill r (addUTCTime 3600 tNow) empty))
+  let (ok3, tb3) = tryTake r (addUTCTime 1 tNow) empty
+  check "tryTake refills first: 1s elapsed -> 1 token -> allowed"
+    (True, 0) (ok3, bucketTokens tb3)
+  check "requestIdHex 0 is 16 zero chars" "0000000000000000" (requestIdHex 0)
+  check "requestIdHex 255 is zero-padded 16-char hex" "00000000000000ff" (requestIdHex 255)
+  check "requestIdHex 65536 keeps 16 chars" 16 (T.length (requestIdHex 65536))
+
   -- Metadata module (milestone 4b, docs/roadmap.org milestone 4,
   -- docs/todo.org section 3): the pure NFO parser, nfoPathFor, and the
   -- metadata.json persistence roundtrip.
@@ -1164,9 +1188,9 @@ main = do
   -- ring buffer, the task-due predicate, and the JSON roundtrips.
   aNow <- getCurrentTime
   let mkEntry i = ActivityEntry i aNow "Test" ("msg " <> T.pack (show i))
-      (n1, b1) = pushActivity 1 [] (mkEntry 0)
+      (n1, ab1) = pushActivity 1 [] (mkEntry 0)
   check "pushActivity assigns the id and bumps the counter"
-    (2, [(mkEntry 0) { aeId = 1 }]) (n1, b1)
+    (2, [(mkEntry 0) { aeId = 1 }]) (n1, ab1)
   let (nBig, bBig) = foldl (\(n, b) _ -> pushActivity n b (mkEntry 0)) (1, [])
                      [1 .. 501 :: Int]
   check "pushActivity caps the ring buffer at activityLogCap"

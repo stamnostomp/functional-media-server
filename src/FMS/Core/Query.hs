@@ -9,6 +9,8 @@ module FMS.Core.Query
   , filterByYears
   , typeFilterIncludesBoxSet
   , applyUserDataFilters
+  , sortByUserDataField
+  , isUserDataSortKey
   , applyMetadataFilters
   , projectFields
   , attachUserData
@@ -229,6 +231,40 @@ specialFeaturesOf item allItems =
         , d == home || takeDirectory d == home
         ]
 
+-- | Milestone 5f: is this @sortBy@ value a user-data sort key (handled by
+-- 'sortByUserDataField' instead of 'sortItems')? Case-insensitive.
+isUserDataSortKey :: Text -> Bool
+isUserDataSortKey s = T.toCaseFold (T.strip s) `elem` ["lastplayeddate", "playcount"]
+
+-- | Pure (milestone 5f): sort items by a per-user 'UserData' field.
+-- @lastPlayedDate@ sorts by 'udLastPlayedAt' descending with missing
+-- records sorting LAST (regardless of direction); @playCount@ sorts by
+-- 'udPlayCount' descending (missing = 0). Both directions are descending
+-- (most-recent / highest first, the Jellyfin default); any other key is
+-- the identity. The sort is stable ('sortBy'): equal keys keep their
+-- relative order, so the caller can pre-sort this way before
+-- 'applyItemQuery' paginates (which skips its own sort for these keys).
+sortByUserDataField
+  :: Text                     -- ^ sortBy value
+  -> (Text -> Maybe UserData) -- ^ itemId -> 'UserData' lookup
+  -> [MediaItem]
+  -> [MediaItem]
+sortByUserDataField sortKey lookupItems items =
+  case T.toCaseFold (T.strip sortKey) of
+    "lastplayeddate" -> sortBy cmpLastPlayed items
+    "playcount"      -> sortBy cmpPlayCount items
+    _                -> items
+  where
+    cmpLastPlayed x y =
+      case (udLastPlayedAt =<< lookupItems (itemId x), udLastPlayedAt =<< lookupItems (itemId y)) of
+        (Nothing, Nothing) -> EQ
+        (Nothing, Just _)  -> GT   -- unplayed sorts last
+        (Just _, Nothing)  -> LT
+        (Just a, Just b)   -> compare b a   -- descending
+    cmpPlayCount x y =
+      compare (pc y) (pc x)                 -- descending
+      where pc i = maybe 0 udPlayCount (lookupItems (itemId i))
+
 -- | Sort by @sortBy@ ∈ {title, size, addedAt} — unknown or missing falls
 -- back to title — with direction @sortOrder@ ∈ {asc, desc} (default asc).
 -- 'sortBy' is stable: items with equal keys keep their relative order.
@@ -276,7 +312,12 @@ applyItemQuery params items =
       series   = filterBySeries (get "series") typed
       incTypes = filterByIncludeTypes (get "includeItemTypes") series
       years    = filterByYears (get "years") incTypes
-      sorted   = sortItems (get "sortBy") (get "sortOrder") years
+      -- Milestone 5f: user-data sort keys (lastPlayedDate/playCount) are
+      -- pre-sorted by the caller via 'sortByUserDataField'; skip the plain
+      -- sort here so the pre-sorted order survives into pagination.
+      sorted   = case get "sortBy" of
+        Just s | isUserDataSortKey s -> years
+        _                            -> sortItems (get "sortBy") (get "sortOrder") years
       total    = length sorted
       start    = get "startIndex" >>= readMaybe . T.unpack
       limit    = get "limit" >>= readMaybe . T.unpack

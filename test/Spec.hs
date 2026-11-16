@@ -35,7 +35,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -76,6 +76,7 @@ import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popu
 import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
+import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
@@ -1863,5 +1864,47 @@ main = do
     (Just (Just "PG-13"))
     (metaOfficialRating <$> either (const Nothing) Just
       (parseMovieNfo (BSC.pack "<movie><title>x</title><mpaa>PG-13</mpaa></movie>")))
+
+  -- Milestone 5f (watch history): sortByUserDataField + batch ids body.
+  let mi5 i t = MediaItem
+        { itemId = i, itemTitle = t, itemPath = "/" ++ T.unpack t ++ ".mp4"
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = "1"
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing }
+      tA = UTCTime (fromGregorian 2024 1 1) 0
+      tB = UTCTime (fromGregorian 2024 2 1) 0
+      udMap5 = HM.fromList
+        [ ("1", emptyUserData { udLastPlayedAt = Just tA, udPlayCount = 3 })
+        , ("2", emptyUserData { udLastPlayedAt = Just tB, udPlayCount = 1 })
+        , ("3", emptyUserData { udPlayCount = 5 })          -- never played
+        ]
+      lk5 = flip HM.lookup udMap5
+      i1 = mi5 "1" "a"; i2 = mi5 "2" "b"; i3 = mi5 "3" "c"
+  check "isUserDataSortKey: the two keys, case-insensitive; others not"
+    [True, True, False, False]
+    (map isUserDataSortKey ["LastPlayedDate", "PLAYCOUNT", "title", ""])
+  check "sortByUserDataField lastPlayedDate: desc, Nothing last"
+    ["2", "1", "3"]
+    (map itemId (sortByUserDataField "lastPlayedDate" lk5 [i1, i2, i3]))
+  check "sortByUserDataField LastPlayedDate case-insensitive"
+    ["2", "1", "3"]
+    (map itemId (sortByUserDataField "LastPlayedDate" lk5 [i3, i1, i2]))
+  check "sortByUserDataField playCount: desc, missing = 0"
+    ["3", "1", "2"]
+    (map itemId (sortByUserDataField "playcount" lk5 [i1, i2, i3]))
+  check "sortByUserDataField unknown key is identity"
+    [i3, i1, i2] (sortByUserDataField "title" lk5 [i3, i1, i2])
+  check "sortByUserDataField is stable for equal keys"
+    ["1", "2", "3"]
+    (map itemId (sortByUserDataField "playcount" (const Nothing) [i1, i2, i3]))
+  check "parseIdsBody: ItemIds"
+    (Right ["1", "2"]) (parseIdsBody (LBSC.pack "{\"ItemIds\":[\"1\",\"2\"]}"))
+  check "parseIdsBody: Ids alias"
+    (Right ["a"]) (parseIdsBody (LBSC.pack "{\"Ids\":[\"a\"]}"))
+  check "parseIdsBody: ItemIds wins over Ids"
+    (Right ["x"]) (parseIdsBody (LBSC.pack "{\"ItemIds\":[\"x\"],\"Ids\":[\"y\"]}"))
+  check "parseIdsBody: empty object -> []" (Right []) (parseIdsBody (LBSC.pack "{}"))
+  check "parseIdsBody: malformed JSON is Left"
+    True (either (const True) (const False) (parseIdsBody (LBSC.pack "{nope")))
 
   putStrLn "All tests passed."

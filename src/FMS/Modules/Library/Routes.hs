@@ -1,6 +1,7 @@
 module FMS.Modules.Library.Routes
   ( libraryRoutes
   , itemsHandler
+  , itemsQueryResponse
   , itemsCountsHandler
   , itemDetailHandler
   , ancestorsHandler
@@ -29,7 +30,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -83,8 +84,15 @@ listItemsHandler _captures req = do
 itemsHandler :: [(Text, Text)] -> Request -> AppM Response
 itemsHandler _captures req = do
   mUser <- currentUserFromReq req
+  itemsQueryResponse mUser (queryParams (queryString req))
+
+-- | Milestone 5f: the shared body of @GET /items@ and
+-- @GET /Users/:userId/Items@ — 'itemsHandler' passes the request's own
+-- user and query string, the watch-history route passes the path's user
+-- with @userId@ forced into the params.
+itemsQueryResponse :: Maybe User -> [(Text, Text)] -> AppM Response
+itemsQueryResponse mUser qparams = do
   items0 <- listItems >>= visibleItems mUser
-  let qparams = queryParams (queryString req)
   (mLookup, filterTokens, fields) <- resolveUserQuery qparams mUser
   -- Milestone 4h: the metadata cache map keyed by itemId. Read straight
   -- from the typed registry under "metadata.cache" (the same key as
@@ -101,9 +109,15 @@ itemsHandler _captures req = do
                else pure []
   let metaLookup = flip HM.lookup metaMap
       items1 = applyMetadataFilters qparams metaLookup items0
-      items = case mLookup of
+      itemsU = case mLookup of
         Just lk | not (null filterTokens) -> applyUserDataFilters filterTokens lk items1
         _                                 -> items1
+      -- Milestone 5f: when userId is present and sortBy is a user-data key
+      -- (lastPlayedDate/playCount), pre-sort by that field; applyItemQuery
+      -- then skips its own sort for these keys, so pagination sees it.
+      items = case (mLookup, lookup "sortBy" qparams) of
+        (Just lk, Just s) | isUserDataSortKey s -> sortByUserDataField s lk itemsU
+        _                                       -> itemsU
       (total, page) = applyItemQuery qparams items
       startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
       renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))

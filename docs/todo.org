@@ -143,8 +143,11 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] per-item stats also stored globally (stats.json)
    - [ ] likes
 ** DONE =POST/DELETE /Users/{id}/PlayedItems/{id}= and =POST/DELETE /Users/{id}/FavoriteItems/{id}=
-** TODO batch delete played items; per-user continue watching / next up / watch history
-** TODO Watch history
+** DONE per-user continue watching / next up / watch history
+   - [X] batch delete played items: =DELETE /Users/:uid/PlayedItems= and =/FavoriteItems= with {"ItemIds":[...]}|{"Ids":[...]}
+   - [X] watch history: =GET /Users/:uid/Items= (envelope + UserData, self-or-admin 403, unknown user 404) with filters=IsPlayed and sortBy=LastPlayedDate|PlayCount (desc, unplayed last)
+   - [X] continue watching: =/continuewatching= (m5a); next up: =/Shows/:name/NextUp= (m4d)
+** DONE Watch history (see above: /Users/:uid/Items?filters=IsPlayed&sortBy=LastPlayedDate)
 
 * 10. Organization endpoints :feature:
 ** DONE Studios, persons, tags endpoints: =GET /Studios=, =/Persons=, =/Tags= ({Name, ItemCount}; MediaMetadata metaStudios/metaPersons/metaTags parsed from NFO studio/actor/director/person/tag)

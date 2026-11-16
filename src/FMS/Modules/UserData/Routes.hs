@@ -1,26 +1,33 @@
 module FMS.Modules.UserData.Routes
   ( userDataRoutes
+  , parseIdsBody
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Aeson.Types (parseEither)
+import qualified Data.ByteString.Lazy as LBS
 import Data.CaseInsensitive (original)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import Network.Wai (Request, Response, requestHeaders, strictRequestBody)
+import Network.Wai (Request, Response, queryString, requestHeaders, strictRequestBody)
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Query (queryParams)
 import FMS.Core.Router (parseTokenHeader)
 import FMS.Core.Types.MediaItem (MediaItem)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (..))
 import FMS.Modules.Library (MonadLibrary (..))
+-- FMS.Modules.Library.Routes imports only UserData.Monad/Types (not this
+-- module), so importing it here does not create a cycle.
+import FMS.Modules.Library.Routes (itemsQueryResponse)
 import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.UserData.Monad
   ( MonadUserData (..)
@@ -37,7 +44,12 @@ import FMS.Modules.UserData.Types (UserData (..))
 -- @:itemId@ must exist in the library (404 otherwise).
 userDataRoutes :: [Route]
 userDataRoutes =
-  [ get    [Lit "Users", Capture "userId", Lit "Items", Capture "itemId", Lit "UserData"]
+  -- Milestone 5f: the 3-segment literal routes come first (first match
+  -- wins) so they are not shadowed by the 4/5-segment capture routes.
+  [ get    [Lit "Users", Capture "userId", Lit "Items"] usersItemsHandler
+  , delete [Lit "Users", Capture "userId", Lit "PlayedItems"]   batchUnplayedHandler
+  , delete [Lit "Users", Capture "userId", Lit "FavoriteItems"] batchUnfavoriteHandler
+  , get    [Lit "Users", Capture "userId", Lit "Items", Capture "itemId", Lit "UserData"]
            getUserDataHandler
   , post   [Lit "Users", Capture "userId", Lit "Items", Capture "itemId", Lit "UserData"]
            updateUserDataHandler
@@ -50,6 +62,19 @@ userDataRoutes =
   , delete [Lit "Users", Capture "userId", Lit "FavoriteItems", Capture "itemId"]
            unfavoriteHandler
   ]
+
+-- | Body of the milestone-5f batch deletes:
+-- @{\"ItemIds\": [...]}@ (Jellyfin) or @{\"Ids\": [...]}@.
+data IdsBody = IdsBody { idsBodyIds :: [Text] }
+
+instance FromJSON IdsBody where
+  parseJSON = withObject "IdsBody" $ \o ->
+    IdsBody <$> (o .: "ItemIds" <|> (o .:? "Ids" .!= []))
+
+-- | Pure batch-body parser (exported for tests): decode the JSON body and
+-- return the id list; 'Left' on malformed JSON.
+parseIdsBody :: LBS.ByteString -> Either String [Text]
+parseIdsBody bs = idsBodyIds <$> eitherDecode bs
 
 -- | Body of @POST /Users/:userId/PlayedItems/:itemId@ (Jellyfin field name).
 data PlayedRequest = PlayedRequest
@@ -141,7 +166,85 @@ unfavoriteHandler captures req = do
   _ <- requireExistingItem iid
   updateUserData uid iid (setFavorite False) >>= pure . jsonResponse
 
+-- | @GET /Users/:userId/Items@ (milestone 5f, docs/todo.org section 9) —
+-- the watch-history view: the same envelope as @/items?userId=:userId@
+-- (delegates to 'itemsQueryResponse' with @userId@ forced into the query
+-- params), so @sortBy=LastPlayedDate/PlayCount@, @filters=...@ and
+-- @fields=...@ all work. Self-or-admin guard on @:userId@.
+usersItemsHandler :: [(Text, Text)] -> Request -> AppM Response
+usersItemsHandler captures req = do
+  uid <- capture "userId" captures
+  _ <- requireExistingUserOr404 uid
+  -- self-or-admin, but 403 (not 401) for an authenticated non-admin
+  -- hitting another users id (milestone 9 convention)
+  u <- case parseTokenHeader [(original k, v) | (k, v) <- requestHeaders req] of
+    Nothing -> throwError (Unauthorized "authentication required")
+    Just tok -> do
+      mUser <- resolveToken tok
+      case mUser of
+        Nothing -> throwError (Unauthorized "invalid or expired token")
+        Just usr
+          | isAdmin usr || userId usr == uid -> pure usr
+          | otherwise -> throwError (Forbidden "self or admin required")
+  itemsQueryResponse (Just u) (("userId", uid) : queryParams (queryString req))
+
+-- | @DELETE /Users/:userId/PlayedItems@ with @{\"ItemIds\":[...]}@ (or
+-- @{\"Ids\":[...]}@) — batch mark unplayed (milestone 5f). 200
+-- @{\"status\":\"ok\",\"cleared\":n}@ where n is how many of the ids were
+-- actually marked played before; 400 bad JSON, 404 unknown user.
+batchUnplayedHandler :: [(Text, Text)] -> Request -> AppM Response
+batchUnplayedHandler captures req = do
+  uid <- capture "userId" captures
+  _ <- requireUserDataAccess req uid
+  _ <- requireExistingUserOr404 uid
+  ids <- parseIdsBodyReq req
+  n <- batchClear uid ids (markPlayed False) udPlayed
+  pure (jsonResponse (object ["status" .= ("ok" :: Text), "cleared" .= n]))
+
+-- | @DELETE /Users/:userId/FavoriteItems@ with @{\"ItemIds\":[...]}@ —
+-- batch clear favorites (milestone 5f); same response shape as the played
+-- batch delete.
+batchUnfavoriteHandler :: [(Text, Text)] -> Request -> AppM Response
+batchUnfavoriteHandler captures req = do
+  uid <- capture "userId" captures
+  _ <- requireUserDataAccess req uid
+  _ <- requireExistingUserOr404 uid
+  ids <- parseIdsBodyReq req
+  n <- batchClear uid ids (setFavorite False) udFavorite
+  pure (jsonResponse (object ["status" .= ("ok" :: Text), "cleared" .= n]))
+
 -- Helpers -------------------------------------------------------------------
+
+-- | Apply a setter to each of the ids and return how many of them matched
+-- the predicate before the update (i.e. how many were actually cleared).
+batchClear
+  :: Text                       -- ^ userId
+  -> [Text]                     -- ^ item ids
+  -> (UserData -> UserData)      -- ^ setter (markPlayed False / setFavorite False)
+  -> (UserData -> Bool)          -- ^ matcher (udPlayed / udFavorite)
+  -> AppM Int
+batchClear uid ids setter match = do
+  ud <- listUserData uid
+  let cleared = length [ i | i <- ids, maybe False match (HM.lookup i ud) ]
+  mapM_ (\i -> updateUserData uid i setter) ids
+  pure cleared
+
+-- | Read + parse the request body as an id list; 400 on malformed JSON.
+parseIdsBodyReq :: Request -> AppM [Text]
+parseIdsBodyReq req = do
+  body <- liftIO (strictRequestBody req)
+  case parseIdsBody body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right ids -> pure ids
+
+-- | The user must exist; 404 otherwise.
+requireExistingUserOr404 :: Text -> AppM User
+requireExistingUserOr404 uid = do
+  m <- getUser uid
+  case m of
+    Nothing -> throwError (NotFound ("no user with id " <> uid))
+    Just u  -> pure u
+
 
 -- | Merge a partial JSON patch (a decoded object) into an existing record:
 -- only the keys actually present in the patch override the stored values.

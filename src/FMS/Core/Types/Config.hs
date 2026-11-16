@@ -16,4 +16,5 @@ data Config = Config
   , configFollowSymlinks :: !Bool   -- ^ scanner symlink policy (env FMS_FOLLOW_SYMLINKS, default False; milestone 2b)
   , configTmdbApiKey  :: !Text      -- ^ TMDB API key for the remote metadata fallback (env MEDIA_TMDB_API_KEY, milestone 4c; empty disables it)
   , configRateLimit   :: !(Maybe Int)  -- ^ max requests per minute per client IP (env FMS_RATE_LIMIT; Nothing/0 = disabled; milestone 14a)
+  , configLogLevel    :: !Text          -- ^ minimum log level printed (env FMS_LOG_LEVEL, default \"info\"; env-only, milestone 11b)
   } deriving (Show, Eq)

@@ -34,6 +34,7 @@ library
                       FMS.Core.Process
                       FMS.Core.Types.Config
                       FMS.Core.Types.MediaFolder
+                      FMS.Core.Types.Log
                       FMS.Core.Types.MediaItem
                       FMS.Core.Types.Policy
                       FMS.Core.Types.Progress

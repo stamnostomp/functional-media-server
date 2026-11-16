@@ -40,6 +40,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
+import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2)
 import FMS.Core.Types.Policy (AccessSchedule (..), UserPolicy (..), emptyUserPolicy, itemAllowedByPolicy, ratingAllowed, ratingRank, scheduleAllowsNow, tagsAllowed)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
@@ -1962,5 +1963,39 @@ main = do
     ["5", "2"] (map itemId (similarItems (flip HM.lookup simLookup) 2 (si "1") simItems))
   check "similarItems: limit <= 0 means default 12"
     3 (length (similarItems (flip HM.lookup simLookup) 0 (si "1") simItems))
+
+  -- Milestone 11b (server logs endpoint + log level): pushLogEntry ring,
+  -- logLevelAllows matrix, LogEntry JSON keys.
+  let le :: Int -> LogEntry
+      le i = LogEntry aNow "info" ("msg " <> T.pack (show i))
+      buf3 = pushLogEntry 3 (pushLogEntry 3 (pushLogEntry 3 [] (le 1)) (le 2)) (le 3)
+  check "pushLogEntry appends newest-last and keeps order under cap"
+    [1, 2, 3] (map (\e -> read (T.unpack (T.drop 4 (leMessage e))) :: Int) buf3)
+  check "pushLogEntry drops the oldest when over cap"
+    [2, 3, 4]
+    (map (\e -> read (T.unpack (T.drop 4 (leMessage e))) :: Int)
+      (pushLogEntry 3 buf3 (le 4)))
+  check "pushLogEntry cap 0 keeps nothing"
+    ([] :: [LogEntry]) (pushLogEntry 0 [le 1] (le 2))
+  check "logRank order debug<info<warn<error, unknown entry = info"
+    [0, 1, 2, 3, 1] (map logRank ["debug", "info", "WARN", "error", "bogus"])
+  check "logLevelAllows: info config allows info/warn/error, suppresses debug"
+    [False, True, True, True] (map (logLevelAllows "info") ["debug", "info", "warn", "error"])
+  check "logLevelAllows: error config allows only error"
+    [False, False, False, True] (map (logLevelAllows "error") ["debug", "info", "warn", "error"])
+  check "logLevelAllows: debug config allows everything"
+    [True, True, True, True] (map (logLevelAllows "debug") ["debug", "info", "warn", "error"])
+  check "logLevelAllows: unknown config level allows all"
+    [True, True] (map (logLevelAllows "bogus") ["debug", "error"])
+  check "logLevelAllows: case-insensitive config"
+    True (logLevelAllows "Warn" "error")
+  check "LogEntry JSON keys Timestamp/Level/Message"
+    (Just (True, True, True))
+    ((\v -> case v of
+        Aeson.Object o -> ( KeyMap.member "Timestamp" o
+                           , KeyMap.member "Level" o
+                           , KeyMap.member "Message" o )
+        _ -> (False, False, False))
+      <$> (Aeson.decode (Aeson.encode (le 1)) :: Maybe Aeson.Value))
 
   putStrLn "All tests passed."

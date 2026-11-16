@@ -12,14 +12,20 @@ import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:?)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types (status200)
-import Network.Wai (Request, Response, responseLBS, strictRequestBody)
+import Network.Wai (Request, Response, queryString, responseLBS, strictRequestBody)
 import Numeric (showHex)
+import System.Directory (doesFileExist, getFileSize, getModificationTime)
+import System.FilePath ((</>))
+import Text.Read (readMaybe)
 
 import FMS (version)
 import FMS.Core.Module (Module (..), Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, getState, putState)
+import FMS.Core.Query (paginate, queryParams)
 import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.Log (LogEntry (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..), ServerConfigPatch (..), applyServerConfigPatch
@@ -50,6 +56,8 @@ systemModule = Module
       , post [Lit "System", Lit "Wizard", Lit "Completed"] wizardCompletedHandler
       , get  [Lit "Branding", Lit "Configuration"] brandingGetHandler
       , post [Lit "Branding", Lit "Configuration"] brandingPostHandler
+      , get  [Lit "System", Lit "Logs"] logsListHandler
+      , get  [Lit "System", Lit "Logs", Lit "Log"] logsLogHandler
       , get  [Lit "healthz"] healthz
       ]
   }
@@ -228,6 +236,48 @@ shutdownLikeHandler tag statusMsg _captures _req = do
       pure ()
     Nothing -> pure ()
   pure resp
+
+-- | @GET /System/Logs@ (milestone 11b) — 200 the Jellyfin-shaped log-file
+-- list. The server's log is reported as @server.log@; its size/mtime are
+-- taken from @stateDir/activity.log@ when present (0 / now otherwise).
+logsListHandler :: [(Text, Text)] -> Request -> AppM Response
+logsListHandler _captures _req = do
+  cfg <- asks envConfig
+  let logPath = configStateDir cfg </> "activity.log"
+  exists <- liftIO (doesFileExist logPath)
+  (sizeBytes, mtime) <- if exists
+    then do
+      sz  <- liftIO (getFileSize logPath)
+      mt  <- liftIO (getModificationTime logPath)
+      pure (sz, mt)
+    else do
+      now <- liftIO getCurrentTime
+      pure (0, now)
+  pure (jsonResponse [object
+    [ "Name"         .= ("server.log" :: Text)
+    , "SizeBytes"    .= sizeBytes
+    , "DateModified" .= mtime
+    ]])
+
+-- | @GET /System/Logs/Log?startIndex=&limit=@ (milestone 11b) — 200
+-- @{\"Items\": [LogEntry...], \"TotalRecordCount\": n}@, NEWEST FIRST,
+-- paginated. @startIndex@ defaults to 0, @limit@ to 100; invalid values
+-- fall back to the defaults. The entries come from the "system.logbuf"
+-- ring TVar kept by the 'MonadLog' instance.
+logsLogHandler :: [(Text, Text)] -> Request -> AppM Response
+logsLogHandler _captures req = do
+  mTv <- getState "system.logbuf" :: AppM (Maybe (TVar [LogEntry]))
+  buf <- maybe (pure []) (liftIO . readTVarIO) mTv
+  let qparams = queryParams (queryString req)
+      startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
+      limit      = fromMaybe (100 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
+      newestFirst = reverse buf
+      total = length newestFirst
+      page = paginate (Just (max 0 startIndex)) (Just limit) newestFirst
+  pure (jsonResponse (object
+    [ "Items" .= page
+    , "TotalRecordCount" .= total
+    ]))
 
 -- | @GET /healthz@ — liveness probe.
 healthz :: [(Text, Text)] -> Request -> AppM Response

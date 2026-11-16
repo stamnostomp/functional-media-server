@@ -30,6 +30,7 @@ import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
 import FMS.Core.RateLimit (Bucket, rateLimitBucketsKey)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
+import FMS.Core.Types.Log (LogEntry(..))
 import FMS.Core.Types.ServerConfig (ServerConfig (..), loadServerConfig, serverConfigFilePath)
 import FMS.Modules.Admin (adminModule, MonadAdmin (..))
 import FMS.Modules.ApiDocs (apiDocsModule)
@@ -96,6 +97,11 @@ runServer cfg = do
     putState "system.serverConfig" scTv
     putState "system.moduleNames" (map moduleName modules)
     putState "system.shutdown" shutdownMv
+    -- Milestone 11b: the server log ring buffer (read by
+    -- GET /System/Logs/Log under "system.logbuf"; also created lazily by
+    -- the MonadLog instance).
+    logTv <- liftIO (newTVarIO ([] :: [LogEntry]))
+    putState "system.logbuf" logTv
     -- Milestone 14a: the per-IP token-bucket map for rate limiting
     -- (read by the router under "ratelimit.buckets").
     rlTv <- liftIO (newTVarIO (HM.empty :: HM.HashMap Text Bucket))

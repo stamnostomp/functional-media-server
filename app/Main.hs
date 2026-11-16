@@ -35,6 +35,7 @@ main = do
   mName  <- lookupEnv "FMS_SERVER_NAME"
   mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
   mRate  <- lookupEnv "FMS_RATE_LIMIT"
+  mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -56,5 +57,6 @@ main = do
         , configRateLimit   = case mRate >>= readMaybe of
             Just n | n > 0 -> Just n
             _              -> Nothing   -- missing/invalid/0 -> disabled (milestone 14a)
+        , configLogLevel    = T.pack (fromMaybe "info" mLogLvl)  -- milestone 11b; env-only
         }
   runServer cfg

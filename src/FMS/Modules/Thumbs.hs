@@ -28,7 +28,7 @@ import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 
 -- | The thumbnails module (docs/roadmap.org milestone 3e, docs/todo.org
 -- section 5): @GET /items/:id/thumb@ serves a JPEG frame extracted from
@@ -73,11 +73,11 @@ thumbPathFor stateDir i = stateDir </> "thumbs" </> T.unpack i <.> ".jpg"
 -- as @image/jpeg@. A non-zero ffmpeg exit or empty output is an
 -- 'InternalError' (500).
 thumbHandler :: [(Text, Text)] -> Request -> AppM Response
-thumbHandler captures _req =
+thumbHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do

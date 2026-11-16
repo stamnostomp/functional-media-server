@@ -16,7 +16,7 @@ import Network.Wai (Request, Response)
 import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Modules.Library (MonadLibrary (..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..))
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
 
@@ -26,11 +26,11 @@ import FMS.Modules.Metadata.Types (MediaMetadata (..))
 -- 404 when the item is not in the library; @metadata@ is @null@ until a
 -- refresh has found something.
 metadataHandler :: [(Text, Text)] -> Request -> AppM Response
-metadataHandler captures _req =
+metadataHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
@@ -50,11 +50,11 @@ metadataHandler captures _req =
 -- cache it. 200 with the metadata JSON, 404 when the item is unknown or
 -- no metadata could be found ("no metadata found for item").
 refreshMetadataHandler :: [(Text, Text)] -> Request -> AppM Response
-refreshMetadataHandler captures _req =
+refreshMetadataHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just _ -> do

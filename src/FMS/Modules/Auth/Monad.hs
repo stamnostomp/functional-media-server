@@ -7,6 +7,12 @@ module FMS.Modules.Auth.Monad
   , hashPassword
   , verifyPassword
   , mintToken
+  , canAccessFolder
+  , allowedFoldersFor
+  , currentUserFromReq
+  , folderAccessOrThrow
+  , visibleItems
+  , getItemWithAccess
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
@@ -19,11 +25,14 @@ import Data.List (find, sortOn)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Network.Wai (Request)
 import System.Directory (createDirectoryIfMissing)
 import Text.Read (readMaybe)
 
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, getState, putState)
+import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.State
   ( hashPassword
@@ -33,6 +42,7 @@ import FMS.Modules.Auth.State
   , usersFilePath
   , verifyPassword
   )
+import FMS.Modules.Library.Monad (MonadLibrary (..))
 
 -- | Namespaced keys under which the auth module stashes its TVars in the
 -- typed registry (docs/modules.org: the core never knows module state).
@@ -55,6 +65,7 @@ class Monad m => MonadAuth m where
   authenticate :: Text -> Text -> m (Maybe (User, Text))  -- ^ name, password -> (user, session token)
   resolveToken :: Text -> m (Maybe User)           -- ^ session token OR api key -> user
   listSessions :: m [(Text, Text)]                 -- ^ (token, userName) for live session tokens
+  setAllowedFolders :: Text -> Maybe [Text] -> m Bool  -- ^ userId, folders (Nothing = all); False when unknown (milestone 5d)
 
 instance MonadAuth AppM where
   listUsers = do
@@ -67,7 +78,7 @@ instance MonadAuth AppM where
     users <- currentUsers
     let uid = nextUserId users
     h <- liftIO (hashPassword pw)
-    let u = User uid name h admin []
+    let u = User uid name h admin [] Nothing
     _ <- modifyAuthUsers (HM.insert uid u)
     logInfo ("auth: created user " <> name <> " (id " <> uid <> ")")
     pure u
@@ -114,6 +125,67 @@ instance MonadAuth AppM where
          | (tok, uid) <- HM.toList toks
          , Just u <- [HM.lookup uid usrs]
          ]
+
+  setAllowedFolders i mFolders = do
+    m <- getUser i
+    case m of
+      Nothing -> pure False
+      Just _  -> do
+        _ <- modifyAuthUsers (HM.adjust (\u -> u { userAllowedFolders = mFolders }) i)
+        pure True
+
+-- | Pure (milestone 5d): the folder restriction of a user
+-- ('Nothing' = all folders).
+allowedFoldersFor :: User -> Maybe [Text]
+allowedFoldersFor = userAllowedFolders
+
+-- | Pure (milestone 5d): may a user with this folder restriction access
+-- @folderId@? 'Nothing' = all folders allowed.
+canAccessFolder :: Maybe [Text] -> Text -> Bool
+canAccessFolder Nothing  _       = True
+canAccessFolder (Just ids) fid   = fid `elem` ids
+
+-- | The user behind the request's credential, if any (session token or
+-- API key). 'Nothing' means anonymous / open mode.
+currentUserFromReq :: Request -> AppM (Maybe User)
+currentUserFromReq req =
+  case tokenFromRequest req of
+    Nothing  -> pure Nothing
+    Just tok -> resolveToken tok
+
+-- | Milestone 5d enforcement: admins pass, users with 'Nothing'
+-- allowedFolders pass, users with a restriction pass only for their
+-- folders -- anything else is 401. Anonymous (no/invalid token) passes:
+-- in open mode there is no auth at all, in strict mode the router gate
+-- has already rejected the request.
+folderAccessOrThrow :: Maybe User -> Text -> AppM ()
+folderAccessOrThrow mUser folderId =
+  case mUser of
+    Just u
+      | isAdmin u -> pure ()
+      | canAccessFolder (userAllowedFolders u) folderId -> pure ()
+      | otherwise -> throwError (Unauthorized ("folder access denied: " <> folderId))
+    Nothing -> pure ()
+
+-- | Milestone 5d: the items visible to the request's user. Admins and
+-- anonymous (open mode) see everything; a restricted user sees only items
+-- in their allowed folders.
+visibleItems :: Maybe User -> [MediaItem] -> [MediaItem]
+visibleItems mUser = case mUser of
+  Just u | not (isAdmin u) -> filter (canAccessFolder (userAllowedFolders u) . itemFolder)
+  _                        -> id
+
+-- | 'getItem' plus the milestone-5d folder check: 404 when the item is
+-- unknown, 401 when the request's user may not access the item's folder.
+getItemWithAccess :: Request -> Text -> AppM (Maybe MediaItem)
+getItemWithAccess req i = do
+  mItem <- getItem i
+  case mItem of
+    Nothing   -> pure Nothing
+    Just item -> do
+      mUser <- currentUserFromReq req
+      folderAccessOrThrow mUser (itemFolder item)
+      pure (Just item)
 
 -- | Apply an update to the users TVar AND persist @users.json@ after every
 -- mutation (in-memory state for reads, JSON on disk for restarts — the same

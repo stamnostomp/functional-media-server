@@ -24,7 +24,7 @@ import FMS.Core.Module (Module(..), Segment(..), get, jsonResponse)
 import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Process (runProcessStreamBS)
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 
 -- | The subtitles module (docs/roadmap.org milestone 3d, docs/todo.org
 -- section 7): detect external subtitle files sitting next to a media
@@ -96,11 +96,11 @@ subtitleList media = do
 -- JSON array of @{\"index\",\"file\",\"format\"}@ entries for the external
 -- subtitle files found next to the item's media file.
 listSubtitlesHandler :: [(Text, Text)] -> Request -> AppM Response
-listSubtitlesHandler captures _req =
+listSubtitlesHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
@@ -119,7 +119,7 @@ listSubtitlesHandler captures _req =
 -- an integer or is out of range is 400. A @.vtt@ file is served raw;
 -- anything else is converted to WebVTT by ffmpeg and streamed.
 serveSubtitleHandler :: [(Text, Text)] -> Request -> AppM Response
-serveSubtitleHandler captures _req =
+serveSubtitleHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> case lookup "index" captures of
@@ -127,7 +127,7 @@ serveSubtitleHandler captures _req =
       Just idxTxt ->
         case reads (T.unpack idxTxt) :: [(Int, String)] of
           [(n, "")] | n >= 0 -> do
-            mItem <- getItem i
+            mItem <- getItemWithAccess req i
             case mItem of
               Nothing -> throwError (NotFound ("no library item with id " <> i))
               Just item -> do

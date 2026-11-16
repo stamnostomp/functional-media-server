@@ -15,7 +15,7 @@ import System.Random (newStdGen, randomRs)
 import FMS.Core.Module (Route, Segment(..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
   , directPlayable
@@ -47,11 +47,11 @@ playbackRoutes =
 -- SupportsTranscoding = True — graceful degradation instead of a 500,
 -- so clients can always fall back to transcoding.
 playbackInfoHandler :: [(Text, Text)] -> Request -> AppM Response
-playbackInfoHandler captures _req =
+playbackInfoHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
@@ -98,11 +98,11 @@ mediaSourceFor item probed =
 -- @{"MediaStreams": [...]}@. Unknown id -> 404; an unprobeable file
 -- answers 200 with an empty list (same graceful policy as above).
 mediaStreamsHandler :: [(Text, Text)] -> Request -> AppM Response
-mediaStreamsHandler captures _req =
+mediaStreamsHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do

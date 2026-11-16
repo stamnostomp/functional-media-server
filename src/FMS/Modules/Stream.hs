@@ -21,7 +21,7 @@ import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Stats (MonadStats(..))
 
 -- | The stream module (docs/roadmap.org milestone 3, docs/todo.org
@@ -51,7 +51,7 @@ streamHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do

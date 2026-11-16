@@ -37,7 +37,7 @@ import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Thumbs (thumbPathFor)
 
 -- | The images module (docs/roadmap.org milestone 6b, docs/todo.org
@@ -151,11 +151,11 @@ defaultQuality = 90
 -- filtered out by 'isValidImageType'), plus @Thumb@ and @Primary@ when
 -- the thumbs cache exists (they fall back to it, see below).
 listImagesHandler :: [(Text, Text)] -> Request -> AppM Response
-listImagesHandler captures _req =
+listImagesHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just _  -> do
@@ -196,7 +196,7 @@ getImageHandler captures req =
       | not (isValidImageType ty) ->
           throwError (BadRequest ("invalid image type: " <> ty))
       | otherwise -> do
-          mItem <- getItem i
+          mItem <- getItemWithAccess req i
           case mItem of
             Nothing -> throwError (NotFound ("no library item with id " <> i))
             Just _ -> do
@@ -256,7 +256,7 @@ uploadImageHandler captures req =
       | not (isValidImageType ty) ->
           throwError (BadRequest ("invalid image type: " <> ty))
       | otherwise -> do
-          mItem <- getItem i
+          mItem <- getItemWithAccess req i
           case mItem of
             Nothing -> throwError (NotFound ("no library item with id " <> i))
             Just _ -> do
@@ -279,7 +279,7 @@ uploadImageHandler captures req =
 -- when no such image exists, 400 for an invalid type, otherwise
 -- @{\"status\":\"ok\"}@.
 deleteImageHandler :: [(Text, Text)] -> Request -> AppM Response
-deleteImageHandler captures _req =
+deleteImageHandler captures req =
   case (lookup "id" captures, lookup "type" captures) of
     (Nothing, _) -> throwError (BadRequest "missing id capture")
     (_, Nothing) -> throwError (BadRequest "missing type capture")
@@ -287,7 +287,7 @@ deleteImageHandler captures _req =
       | not (isValidImageType ty) ->
           throwError (BadRequest ("invalid image type: " <> ty))
       | otherwise -> do
-          mItem <- getItem i
+          mItem <- getItemWithAccess req i
           case mItem of
             Nothing -> throwError (NotFound ("no library item with id " <> i))
             Just _ -> do

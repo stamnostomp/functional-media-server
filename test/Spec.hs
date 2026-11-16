@@ -47,7 +47,8 @@ import FMS.Core.Types.ServerConfig
   , saveServerConfig
   )
 import FMS.Core.Types.User (User(..), toInternalJSON)
-import FMS.Modules.Auth.Monad (hashPassword, verifyPassword)
+import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
+import FMS.Modules.Auth.Routes (PermissionsRequest (..))
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
@@ -716,8 +717,8 @@ main = do
 
   -- users.json persistence roundtrip (internal JSON keeps the hash).
   let ufile = "/tmp/fms-test-users.json"
-      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"]
-      u2 = User "2" "bob" "hash2" False []
+      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"] Nothing
+      u2 = User "2" "bob" "hash2" False [] (Just ["1"])
       usersMap = HM.fromList [("1", u1), ("2", u2)]
   saveUsers ufile usersMap
   loadedUsers <- loadUsers ufile
@@ -734,7 +735,7 @@ main = do
   -- User JSON shapes: ToJSON is the public one (no passwordHash, has
   -- hasPassword); FromJSON/toInternalJSON are the internal full shape.
   let uj1 = LBS.toStrict (Aeson.encode u1)
-      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False []))
+      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing))
   check "User ToJSON omits passwordHash" False ("passwordHash" `BSC.isInfixOf` uj1)
   check "User ToJSON has hasPassword:true when a hash is set"
     True ("\"hasPassword\":true" `BSC.isInfixOf` uj1)
@@ -744,6 +745,36 @@ main = do
     True (all (`BSC.isInfixOf` uj1) ["\"id\":\"1\"", "\"name\":\"admin\"", "\"isAdmin\":true"])
   check "User FromJSON parses the internal full shape"
     (Just u1) (Aeson.decode (Aeson.encode (toInternalJSON u1)) :: Maybe User)
+
+  -- Milestone 5d (per-folder permissions): canAccessFolder matrix, old
+  -- users.json compat (missing allowedFolders -> Nothing), and the
+  -- permissions request JSON roundtrip.
+  check "canAccessFolder Nothing allows everything" True (canAccessFolder Nothing "2")
+  check "canAccessFolder (Just ids) allows a listed folder" True (canAccessFolder (Just ["1", "3"]) "3")
+  check "canAccessFolder (Just ids) denies an unlisted folder" False (canAccessFolder (Just ["1"]) "2")
+  check "canAccessFolder (Just []) denies everything" False (canAccessFolder (Just []) "1")
+  let oldUserJson = "{\"userId\":\"1\",\"userName\":\"admin\",\"passwordHash\":\"h\",\"isAdmin\":true,\"apiKeys\":[]}"
+  check "User FromJSON without allowedFolders (pre-5d file) defaults to Nothing"
+    (Just Nothing) (userAllowedFolders <$> (Aeson.decode oldUserJson :: Maybe User))
+  check "User FromJSON with allowedFolders:[\"1\"] parses to Just"
+    (Just (Just ["1"]))
+    (userAllowedFolders <$> (Aeson.decode "{\"userId\":\"2\",\"userName\":\"b\",\"passwordHash\":\"h\",\"isAdmin\":false,\"apiKeys\":[],\"allowedFolders\":[\"1\"]}" :: Maybe User))
+  check "User FromJSON with allowedFolders:null decodes to Nothing"
+    (Just Nothing)
+    (userAllowedFolders <$> (Aeson.decode "{\"userId\":\"2\",\"userName\":\"b\",\"passwordHash\":\"h\",\"isAdmin\":false,\"apiKeys\":[],\"allowedFolders\":null}" :: Maybe User))
+  check "User public ToJSON carries AllowedFolders"
+    True ("\"AllowedFolders\":[\"1\"]" `BSC.isInfixOf` LBS.toStrict (Aeson.encode u2))
+  check "User internal JSON persists allowedFolders"
+    True ("\"allowedFolders\":[\"1\"]" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (toInternalJSON u2)))
+  let prq = PermissionsRequest (Just ["1", "2"])
+  check "PermissionsRequest JSON roundtrip"
+    (Just prq) (Aeson.decode (Aeson.encode prq) :: Maybe PermissionsRequest)
+  check "PermissionsRequest decodes null AllowedFolders as Nothing"
+    (Just (PermissionsRequest Nothing))
+    (Aeson.decode "{\"AllowedFolders\":null}" :: Maybe PermissionsRequest)
+  check "PermissionsRequest decodes a missing key as Nothing"
+    (Just (PermissionsRequest Nothing))
+    (Aeson.decode "{}" :: Maybe PermissionsRequest)
 
   -- Metadata module (milestone 4b, docs/roadmap.org milestone 4,
   -- docs/todo.org section 3): the pure NFO parser, nfoPathFor, and the

@@ -1,11 +1,13 @@
 module FMS.Modules.Auth.Routes
   ( authRoutes
+  , PermissionsRequest(..)
   ) where
 
+import Control.Monad (join)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Types (ResponseHeaders, status201, status204)
@@ -32,6 +34,8 @@ authRoutes =
   , delete [Lit "Users", Capture "id"]            deleteUserHandler
   , post   [Lit "Users", Capture "id", Lit "Password"] passwordHandler
   , post   [Lit "Users", Capture "id", Lit "ApiKey"]   apiKeyHandler
+  , get    [Lit "Users", Capture "id", Lit "Permissions"] getPermissionsHandler
+  , post   [Lit "Users", Capture "id", Lit "Permissions"] setPermissionsHandler
   ]
 
 -- Request bodies ------------------------------------------------------------
@@ -68,6 +72,28 @@ data PasswordRequest = PasswordRequest
 instance FromJSON PasswordRequest where
   parseJSON = withObject "PasswordRequest" $ \o ->
     PasswordRequest <$> o .: "NewPw"
+
+-- | Body of @POST /Users/:id/Permissions@ (milestone 5d):
+-- @{\"AllowedFolders\": [\"1\", ...] | null}@. A missing or null value
+-- means "all folders" ('Nothing').
+data PermissionsRequest = PermissionsRequest
+  { prAllowedFolders :: Maybe [Text]
+  } deriving (Eq, Show)
+
+instance FromJSON PermissionsRequest where
+  parseJSON = withObject "PermissionsRequest" $ \o ->
+    PermissionsRequest <$> (join <$> o .:? "AllowedFolders" .!= Nothing)
+
+instance ToJSON PermissionsRequest where
+  toJSON pr = object ["AllowedFolders" .= prAllowedFolders pr]
+
+-- | The permissions response shape (also used by GET):
+-- @{\"AllowedFolders\": [...]|null, \"IsAdmin\": bool}@.
+permissionsResponse :: User -> Value
+permissionsResponse u = object
+  [ "AllowedFolders" .= userAllowedFolders u
+  , "IsAdmin"        .= isAdmin u
+  ]
 
 -- Handlers ------------------------------------------------------------------
 
@@ -148,6 +174,28 @@ apiKeyHandler captures req = do
   _ <- requireExistingUser i
   tok <- addApiKey i
   pure (jsonResponse (object ["ApiKey" .= tok]))
+
+-- | @GET /Users/:id/Permissions@ — self or admin; 200
+-- @{\"AllowedFolders\": [...]|null, \"IsAdmin\": bool}@, 404 unknown user.
+getPermissionsHandler :: [(Text, Text)] -> Request -> AppM Response
+getPermissionsHandler captures req = do
+  i <- captureId captures
+  requireSelfOrAdmin req i
+  u <- requireExistingUser i
+  pure (jsonResponse (permissionsResponse u))
+
+-- | @POST /Users/:id/Permissions@ with @{\"AllowedFolders\": [...]|null}@ —
+-- self or admin (admin required for other users); persists to users.json,
+-- 200 with the updated permissions, 404 unknown user, 400 bad JSON.
+setPermissionsHandler :: [(Text, Text)] -> Request -> AppM Response
+setPermissionsHandler captures req = do
+  i <- captureId captures
+  requireSelfOrAdmin req i
+  _ <- requireExistingUser i
+  pr <- parseBody req
+  _ <- setAllowedFolders i (prAllowedFolders pr)
+  u' <- requireExistingUser i
+  pure (jsonResponse (permissionsResponse u'))
 
 -- NOTE: @GET /Sessions@ used to live here (listing live auth tokens);
 -- milestone 6c moves it to "FMS.Modules.Sessions", where it returns the

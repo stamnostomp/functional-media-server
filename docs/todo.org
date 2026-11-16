@@ -121,7 +121,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Password policy (min length etc.), forced reset
 ** DONE Sessions + router gate: GET /Sessions lists playback sessions (Sessions module); gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
 ** TODO =/Devices=, device capabilities
-** TODO Per-library permissions per user; enabled/disabled users (admin flag DONE)
+** DONE Per-library (per-folder) permissions: User.allowedFolders, GET/POST /Users/:id/Permissions, enforced (401) on all item routes, filtered from lists; persisted in users.json (admin flag DONE)
+** TODO enabled/disabled users flag
 ** TODO Parental controls: rating restrictions, allowed tags, access schedules (basic)
 ** TODO First-run startup wizard (admin creation) like Jellyfin's
 

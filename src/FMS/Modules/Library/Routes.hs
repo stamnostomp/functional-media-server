@@ -17,6 +17,7 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Query (applyItemQuery, queryParams)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
+import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 
 -- | The library API (docs/modules.org): list all items, fetch one by id,
@@ -32,10 +33,13 @@ libraryRoutes =
   , delete [Lit "Library", Lit "MediaFolders", Capture "id"] removeFolderHandler
   ]
 
--- | @GET \/library@ — JSON array of all items.
+-- | @GET \/library@ — JSON array of all items visible to the requester
+-- (milestone 5d: a valid non-admin token filters to the user's allowed
+-- folders; anonymous/open mode sees everything).
 listItemsHandler :: [(Text, Text)] -> Request -> AppM Response
-listItemsHandler _captures _req =
-  jsonResponse <$> listItems
+listItemsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  jsonResponse <$> (visibleItems mUser <$> listItems)
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
 -- query params @search@, @sortBy@, @sortOrder@, @startIndex@, @limit@ over
@@ -47,7 +51,8 @@ listItemsHandler _captures _req =
 -- JSON array, this is the paginated envelope Jellyfin clients expect.
 itemsHandler :: [(Text, Text)] -> Request -> AppM Response
 itemsHandler _captures req = do
-  items <- listItems
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
   let qparams = queryParams (queryString req)
       (total, page) = applyItemQuery qparams items
       startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
@@ -57,13 +62,15 @@ itemsHandler _captures req = do
     , "StartIndex" .= startIndex
     ]))
 
--- | @GET \/library\/:id@ — one item, or 404.
+-- | @GET \/library\/:id@ — one item, or 404. Milestone 5d: 401 when the
+-- requester's token belongs to a non-admin user without access to the
+-- item's folder.
 itemHandler :: [(Text, Text)] -> Request -> AppM Response
-itemHandler captures _req =
+itemHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> pure (jsonResponse item)

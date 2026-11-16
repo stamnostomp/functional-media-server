@@ -25,7 +25,7 @@ import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Library (MonadLibrary(..))
+import FMS.Modules.Auth.Monad (getItemWithAccess)
 
 -- | The HLS module (docs/roadmap.org milestone 3c, docs/todo.org section 6):
 -- Jellyfin-style HLS packaging, @GET /videos/:id/main.m3u8@ plus the
@@ -98,11 +98,11 @@ ensureHls cfg item = do
 -- ensure the HLS assets exist and serve the playlist file as
 -- @application\/vnd.apple.mpegurl@.
 playlistHandler :: [(Text, Text)] -> Request -> AppM Response
-playlistHandler captures _req =
+playlistHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> do
-      mItem <- getItem i
+      mItem <- getItemWithAccess req i
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
@@ -115,7 +115,7 @@ playlistHandler captures _req =
 -- segment is 404; a segment name outside @[A-Za-z0-9._-]+@ (or containing
 -- @..@) is rejected with 400 so it can never traverse out of the hls dir.
 segmentHandler :: [(Text, Text)] -> Request -> AppM Response
-segmentHandler captures _req =
+segmentHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i  -> case lookup "seg" captures of
@@ -124,7 +124,7 @@ segmentHandler captures _req =
         | not (isValidSegName seg) ->
             throwError (BadRequest ("invalid segment name: " <> seg))
         | otherwise -> do
-            mItem <- getItem i
+            mItem <- getItemWithAccess req i
             case mItem of
               Nothing -> throwError (NotFound ("no library item with id " <> i))
               Just _item -> do

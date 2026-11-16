@@ -69,7 +69,7 @@ loadOrBootstrapUsers cfg = do
         hPutStrLn stderr "[WARN] FMS_ADMIN_PASSWORD not set: bootstrap admin password is \"admin\" -- set FMS_ADMIN_PASSWORD or change it via POST /Users/1/Password"
       h   <- hashPassword pw
       key <- mintToken
-      let admin = User "1" "admin" h True [key]
+      let admin = User "1" "admin" h True [key] Nothing
           users = HM.singleton "1" admin
       saveUsers path users
       pure users

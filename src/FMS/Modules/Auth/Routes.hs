@@ -10,7 +10,8 @@ import Control.Monad (join)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value(..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -116,21 +117,35 @@ permissionsResponse u = object
   , "IsAdmin"        .= isAdmin u
   ]
 
--- | Body of @POST /Users/:id/Policy@ (milestone 9). All fields optional;
--- absent fields keep the current value, explicit null clears a scalar
--- (@MaxParentalRating@ -> 'Nothing').
+-- | Body of @POST /Users/:id/Policy@ (milestone 9; @MaxStreamingBitrate@
+-- added in milestone 6f). All fields optional; absent fields keep the
+-- current value, explicit null clears a scalar (@MaxParentalRating@ /
+-- @MaxStreamingBitrate@ -> 'Nothing').
 data PolicyPatch = PolicyPatch
   { ppMaxRating   :: Maybe (Maybe Text)   -- ^ Nothing = absent; Just Nothing = clear
   , ppBlockedTags :: Maybe [Text]
   , ppSchedules   :: Maybe [AccessSchedule]
+  , ppMaxBitrate  :: Maybe (Maybe Int)     -- ^ milestone 6f; Nothing = absent; Just Nothing = clear
   } deriving (Eq, Show)
 
 instance FromJSON PolicyPatch where
-  parseJSON = withObject "PolicyPatch" $ \o ->
+  parseJSON = withObject "PolicyPatch" $ \o -> do
+    -- aeson >= 2.2's .:? collapses an explicit null to "absent", so the
+    -- scalar fields are read via KeyMap.lookup to keep the three states
+    -- absent / null (clear) / value distinct.
+    mr <- case KeyMap.lookup "MaxParentalRating" o of
+      Nothing   -> pure Nothing
+      Just Null -> pure (Just Nothing)
+      Just v    -> Just . Just <$> parseJSON v
+    br <- case KeyMap.lookup "MaxStreamingBitrate" o of
+      Nothing   -> pure Nothing
+      Just Null -> pure (Just Nothing)
+      Just v    -> Just . Just <$> parseJSON v
     PolicyPatch
-      <$> o .:? "MaxParentalRating"
+      <$> pure mr
       <*> o .:? "BlockedTags"
       <*> o .:? "AccessSchedules"
+      <*> pure br
 
 -- | Merge a 'PolicyPatch' over an existing 'UserPolicy' (pure, exported for
 -- tests).
@@ -141,6 +156,9 @@ applyPolicyPatch p pp = UserPolicy
       Just mr  -> mr
   , policyBlockedTags = fromMaybe (policyBlockedTags p) (ppBlockedTags pp)
   , policySchedules   = fromMaybe (policySchedules p) (ppSchedules pp)
+  , policyMaxStreamingBitrate = case ppMaxBitrate pp of
+      Nothing  -> policyMaxStreamingBitrate p
+      Just mb  -> mb
   }
 
 -- Handlers ------------------------------------------------------------------

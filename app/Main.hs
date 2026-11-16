@@ -9,6 +9,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Router (parseCorsOrigins)
 import FMS.Core.Types.Config (Config(..))
+import FMS.Modules.Transcode (normalizeHwAccel)
 import FMS.Core.Types.ServerConfig
   ( ServerConfig(..), loadServerConfig, serverConfigFilePath )
 import FMS.Server (runServer)
@@ -40,6 +41,8 @@ main = do
   mCors  <- lookupEnv "FMS_CORS_ORIGINS"
   mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
   mPwMin <- lookupEnv "FMS_PASSWORD_MIN_LENGTH"
+  mMaxBr <- lookupEnv "FMS_MAX_BITRATE"
+  mHwAcc <- lookupEnv "FMS_HWACCEL"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -69,5 +72,9 @@ main = do
         , configPasswordMinLength = case mPwMin >>= readMaybe of
             Just n | n > 0 -> n
             _              -> 0   -- missing/invalid/negative -> disabled (milestone 8b)
+        , configMaxBitrate = case mMaxBr >>= readMaybe of
+            Just n | n > 0 -> n
+            _              -> 0   -- missing/invalid/0 -> unlimited (milestone 6f)
+        , configHwAccel = maybe "none" (normalizeHwAccel . T.pack) mHwAcc  -- milestone 6f
         }
   runServer cfg

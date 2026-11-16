@@ -107,8 +107,8 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] HLS: =/videos/:id/main.m3u8= + =/videos/:id/:seg= (ffmpeg vod playlist, cached in stateDir/hls)
    - [ ] remux vs transcode decisions, DASH
 ** TODO Audio/subtitle stream selection, codec profiles and levels
-** TODO Hardware acceleration (VAAPI, NVENC, QSV, VideoToolbox) behind config
-** TODO Bitrate limits per user/network; quality options
+** DONE Hardware acceleration behind config: =FMS_HWACCEL= (none|vaapi|nvenc|qsv|videotoolbox; unknown -> none) adds -hwaccel + matching h264_* encoder in transcodeArgsWith, libx264 fallback
+** DONE Bitrate limits: =FMS_MAX_BITRATE= server cap + per-user Policy MaxStreamingBitrate + client ?maxBitrate=/body MaxStreamingBitrate; effectiveBitrateCap = min of set caps; PlaybackInfo decides PlayMethod DirectPlay/Transcode + TranscodingUrl; /stream/:id/transcode?maxBitrate=N applies -b:v/-maxrate/-bufsize
 ** TODO Session reporting
    - [X] play recording on stream (full 200 or range@0 -> recordPlay), POST /progress, GET /continuewatching, /popular, /new (stats.json persisted)
    - [X] =GET /Sessions= (live playback sessions), =POST /Sessions/Playing=, =/Playing/Progress=, =/Playing/Ping=, =/Playing/Stopped= (90s stale expiry)

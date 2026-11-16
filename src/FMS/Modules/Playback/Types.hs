@@ -63,14 +63,27 @@ instance ToJSON MediaSource where
     ]
 
 -- | The body of @POST /Items/{id}/PlaybackInfo@: the candidate media
--- sources plus a fresh play session id.
+-- sources plus a fresh play session id, and (milestone 6f) the playback
+-- decision: @PlayMethod@ ("DirectPlay"|"Transcode"), the effective
+-- @MaxStreamingBitrate@ cap when one is set, a @TranscodingUrl@ when
+-- transcoding, and the echoed audio/subtitle stream indexes when the
+-- client sent them.
 data PlaybackResponse = PlaybackResponse
-  { mediaSources  :: ![MediaSource]
-  , playSessionId :: !Text
+  { mediaSources        :: ![MediaSource]
+  , playSessionId       :: !Text
+  , playMethod          :: !Text
+  , maxStreamingBitrate :: !(Maybe Int)
+  , transcodingUrl      :: !(Maybe Text)
+  , audioStreamIndex    :: !(Maybe Int)
+  , subtitleStreamIndex :: !(Maybe Int)
   } deriving (Show, Eq)
 
 instance ToJSON PlaybackResponse where
-  toJSON r = object
+  toJSON r = object $
     [ "MediaSources"  .= mediaSources r
     , "PlaySessionId" .= playSessionId r
-    ]
+    , "PlayMethod"    .= playMethod r
+    ] ++ [ "MaxStreamingBitrate" .= b | Just b <- [maxStreamingBitrate r] ]
+      ++ [ "TranscodingUrl" .= u | Just u <- [transcodingUrl r] ]
+      ++ [ "AudioStreamIndex" .= a | Just a <- [audioStreamIndex r] ]
+      ++ [ "SubtitleStreamIndex" .= s | Just s <- [subtitleStreamIndex r] ]

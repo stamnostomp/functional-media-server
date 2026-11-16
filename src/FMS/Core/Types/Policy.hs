@@ -37,10 +37,11 @@ data UserPolicy = UserPolicy
   { policyMaxRating   :: Maybe Text       -- ^ maximum allowed official rating (e.g. "PG-13")
   , policyBlockedTags :: [Text]           -- ^ tags the user may not see
   , policySchedules   :: [AccessSchedule] -- ^ access windows; empty = always allowed
+  , policyMaxStreamingBitrate :: Maybe Int -- ^ per-user transcode bitrate cap in bps (milestone 6f); Nothing = no user cap
   } deriving (Eq, Show)
 
 emptyUserPolicy :: UserPolicy
-emptyUserPolicy = UserPolicy Nothing [] []
+emptyUserPolicy = UserPolicy Nothing [] [] Nothing
 
 instance ToJSON AccessSchedule where
   toJSON (AccessSchedule d s e) =
@@ -53,16 +54,18 @@ instance FromJSON AccessSchedule where
     <*> (v .:? "EndHour" .!= 24)
 
 instance ToJSON UserPolicy where
-  toJSON (UserPolicy mr bt sc) =
+  toJSON (UserPolicy mr bt sc mb) =
     object [ "MaxParentalRating" .= mr
            , "BlockedTags" .= bt
-           , "AccessSchedules" .= sc ]
+           , "AccessSchedules" .= sc
+           , "MaxStreamingBitrate" .= mb ]
 
 instance FromJSON UserPolicy where
   parseJSON = withObject "UserPolicy" $ \v -> UserPolicy
     <$> (v .:? "MaxParentalRating")
     <*> (v .:? "BlockedTags" .!= [])
     <*> (v .:? "AccessSchedules" .!= [])
+    <*> (v .:? "MaxStreamingBitrate")
 
 -- | Rank of a parental rating; higher = more restrictive.  Unknown ratings
 -- map to 99 (most restrictive).  Comparison is case-insensitive and ignores

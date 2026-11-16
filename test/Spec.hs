@@ -90,7 +90,7 @@ import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
-import FMS.Modules.Transcode (transcodeArgs)
+import FMS.Modules.Transcode (effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, transcodeArgs, transcodeArgsWith)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
   , GetIdByPath(..)
@@ -118,10 +118,13 @@ import FMS.Modules.Devices.Types (Device (..), upsertDevice)
 import FMS.Modules.Socket (addConn, encodeMessage, parseApiKey, parseApiKeyFromPath, removeConn)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
+  , decidePlayMethod
   , directPlayable
   , directStreamable
   , parseFfprobe
+  , parseFormatBitRate
   , probeArgs
+  , probeBitrateArgs
   , probeFile
   , transcoding
   )
@@ -1867,7 +1870,7 @@ main = do
   -- Milestone 9: parental controls (ratingRank/ratingAllowed/tagsAllowed/
   -- scheduleAllowsNow/itemAllowedByPolicy) + enable/disable (User defaults,
   -- PolicyPatch merge, NFO <mpaa>).
-  let pol9 = UserPolicy (Just "PG-13") ["Horror"] [AccessSchedule 0 9 17]
+  let pol9 = UserPolicy (Just "PG-13") ["Horror"] [AccessSchedule 0 9 17] Nothing
   check "ratingRank movie ratings" [1,2,3,4,5] (map ratingRank ["G","PG","PG-13","R","NC-17"])
   check "ratingRank tv ratings" [1,2,2,3,4,5] (map ratingRank ["TV-Y","TV-Y7","TV-G","TV-PG","TV-14","TV-MA"])
   check "ratingRank is case-insensitive and strips whitespace" 3 (ratingRank " pg-13 ")
@@ -1903,13 +1906,13 @@ main = do
         :: Maybe User))
   check "UserPolicy JSON roundtrip" (Just pol9) (Aeson.decode (Aeson.encode pol9) :: Maybe UserPolicy)
   check "PolicyPatch partial decode + applyPolicyPatch merge (absent fields kept)"
-    (UserPolicy (Just "R") ["Horror","Scary"] [AccessSchedule 0 9 17])
-    (applyPolicyPatch (UserPolicy (Just "PG") ["Horror"] [AccessSchedule 0 9 17])
-      (either (const (PolicyPatch Nothing Nothing Nothing)) id
+    (UserPolicy (Just "R") ["Horror","Scary"] [AccessSchedule 0 9 17] Nothing)
+    (applyPolicyPatch (UserPolicy (Just "PG") ["Horror"] [AccessSchedule 0 9 17] Nothing)
+      (either (const (PolicyPatch Nothing Nothing Nothing Nothing)) id
         (Aeson.eitherDecode (LBSC.pack "{\"MaxParentalRating\":\"R\",\"BlockedTags\":[\"Horror\",\"Scary\"]}"))))
   check "PolicyPatch explicit null clears the max rating"
     Nothing
-    (policyMaxRating (applyPolicyPatch pol9 (PolicyPatch (Just Nothing) Nothing Nothing)))
+    (policyMaxRating (applyPolicyPatch pol9 (PolicyPatch (Just Nothing) Nothing Nothing Nothing)))
   check "parseMovieNfo reads <mpaa> into officialRating"
     (Just (Just "PG-13"))
     (metaOfficialRating <$> either (const Nothing) Just
@@ -2186,5 +2189,81 @@ main = do
   check "chapterImageArgs: -ss start before -i, single mjpeg frame to pipe"
     ["-ss", "30.5", "-i", "/m/a.mkv", "-frames:v", "1", "-q:v", "3", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"]
     (dropWhile (/= "-ss") (chapterImageArgs "/m/a.mkv" 30.5))
+
+  -- Milestone 6f (bitrate caps + hw accel): effectiveBitrateCap,
+  -- hwEncoderFor/normalizeHwAccel, transcodeArgsWith, parseFormatBitRate,
+  -- decidePlayMethod, policy MaxStreamingBitrate.
+  check "effectiveBitrateCap: nothing set -> Nothing"
+    Nothing (effectiveBitrateCap Nothing Nothing 0)
+  check "effectiveBitrateCap: server cap only"
+    (Just 5000000) (effectiveBitrateCap Nothing Nothing 5000000)
+  check "effectiveBitrateCap: min of the set caps (user < client < server)"
+    (Just 1000000)
+    (effectiveBitrateCap (Just 1000000) (Just 8000000) 5000000)
+  check "effectiveBitrateCap: zeros are treated as unset"
+    Nothing (effectiveBitrateCap (Just 0) Nothing 0)
+  check "effectiveBitrateCap: client cap only, 0 ignored"
+    (Just 8000000) (effectiveBitrateCap Nothing (Just 8000000) 0)
+  check "effectiveBitrateCap: negative server cap ignored"
+    (Just 2000000) (effectiveBitrateCap Nothing (Just 2000000) (-1))
+  check "normalizeHwAccel: known names kept (case-insensitive), unknown -> none"
+    ["vaapi", "nvenc", "qsv", "videotoolbox", "none", "none"]
+    (map normalizeHwAccel ["VAAPI", "Nvenc", "qsv", " VideoToolbox ", "cuda", ""])
+  check "hwEncoderFor maps accel names to h264 encoders, else Nothing"
+    [Just "h264_vaapi", Just "h264_nvenc", Just "h264_qsv", Just "h264_videotoolbox", Nothing]
+    (map hwEncoderFor ["vaapi", "nvenc", "qsv", "videotoolbox", "none"])
+  check "transcodeArgsWith: no accel, no cap == transcodeArgs"
+    (transcodeArgs "/m/a.mkv") (transcodeArgsWith "none" Nothing "/m/a.mkv")
+  check "transcodeArgsWith: hwaccel adds -hwaccel before -i and swaps encoder"
+    ["-hwaccel", "vaapi", "-i", "/m/a.mkv", "-c:v", "h264_vaapi"]
+    (take 6 (drop 2 (transcodeArgsWith "vaapi" Nothing "/m/a.mkv")))
+  check "transcodeArgsWith: libx264 keeps -preset veryfast"
+    True ("-preset" `elem` transcodeArgsWith "none" Nothing "/m/a.mkv")
+  check "transcodeArgsWith: hw encoder drops the x264-only -preset"
+    False ("-preset" `elem` transcodeArgsWith "nvenc" Nothing "/m/a.mkv")
+  check "transcodeArgsWith: bitrate cap adds -b:v/-maxrate/-bufsize(2x) before -c:a"
+    ["-b:v", "1000000", "-maxrate", "1000000", "-bufsize", "2000000", "-c:a", "aac", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]
+    (dropWhile (/= "-b:v") (transcodeArgsWith "none" (Just 1000000) "/m/a.mkv"))
+  check "transcodeArgsWith: no cap -> no -b:v"
+    False ("-b:v" `elem` transcodeArgsWith "none" Nothing "/m/a.mkv")
+  check "parseFormatBitRate: string bit_rate"
+    (Just 91767)
+    (parseFormatBitRate (LBSC.pack "{\"format\":{\"bit_rate\":\"91767\",\"duration\":\"20.0\"}}"))
+  check "parseFormatBitRate: numeric bit_rate, missing -> Nothing, bad JSON -> Nothing"
+    [Just 5000, Nothing, Nothing]
+    [ parseFormatBitRate (LBSC.pack "{\"format\":{\"bit_rate\":5000}}")
+    , parseFormatBitRate (LBSC.pack "{\"format\":{\"duration\":\"1\"}}")
+    , parseFormatBitRate (LBSC.pack "{nope") ]
+  check "probeBitrateArgs asks only for the format section"
+    (True, False) (elem "-show_format" (probeBitrateArgs "x"), elem "-show_streams" (probeBitrateArgs "x"))
+  check "decidePlayMethod: direct playable + no cap -> DirectPlay"
+    "DirectPlay" (decidePlayMethod True Nothing Nothing)
+  check "decidePlayMethod: bitrate under cap -> DirectPlay, over -> Transcode"
+    ["DirectPlay", "Transcode"]
+    [decidePlayMethod True (Just 4000000) (Just 5000000), decidePlayMethod True (Just 9000000) (Just 5000000)]
+  check "decidePlayMethod: unknown source bitrate passes the cap"
+    "DirectPlay" (decidePlayMethod True Nothing (Just 1000))
+  check "decidePlayMethod: not direct playable -> Transcode"
+    "Transcode" (decidePlayMethod False (Just 100) Nothing)
+  check "UserPolicy JSON roundtrip keeps MaxStreamingBitrate"
+    (Just (Just 2500000))
+    (policyMaxStreamingBitrate <$>
+      (Aeson.decode (LBSC.pack "{\"MaxParentalRating\":null,\"BlockedTags\":[],\"AccessSchedules\":[],\"MaxStreamingBitrate\":2500000}") :: Maybe UserPolicy))
+  check "UserPolicy FromJSON without MaxStreamingBitrate (pre-6f) defaults to Nothing"
+    (Just Nothing)
+    (policyMaxStreamingBitrate <$>
+      (Aeson.decode (LBSC.pack "{\"MaxParentalRating\":\"PG\",\"BlockedTags\":[],\"AccessSchedules\":[]}") :: Maybe UserPolicy))
+  check "PolicyPatch sets/clears MaxStreamingBitrate"
+    [Just 3000000, Nothing]
+    [ policyMaxStreamingBitrate (applyPolicyPatch emptyUserPolicy
+        (either (const (PolicyPatch Nothing Nothing Nothing Nothing)) id
+          (Aeson.eitherDecode (LBSC.pack "{\"MaxStreamingBitrate\":3000000}"))))
+    , policyMaxStreamingBitrate (applyPolicyPatch
+        (emptyUserPolicy { policyMaxStreamingBitrate = Just 1 })
+        (PolicyPatch Nothing Nothing Nothing (Just Nothing))) ]
+  check "PolicyPatch JSON null clears MaxStreamingBitrate (.:? would collapse null)"
+    (Just (Just Nothing))
+    (either (const Nothing) (Just . ppMaxBitrate)
+      (Aeson.eitherDecode (LBSC.pack "{\"MaxStreamingBitrate\":null}") :: Either String PolicyPatch))
 
   putStrLn "All tests passed."

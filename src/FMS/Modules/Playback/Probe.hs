@@ -2,6 +2,10 @@ module FMS.Modules.Playback.Probe
   ( probeArgs
   , parseFfprobe
   , probeFile
+  , probeBitrateArgs
+  , parseFormatBitRate
+  , probeBitrate
+  , decidePlayMethod
   , containerFromFormatName
   , containerFromExtension
   , directPlayable
@@ -68,6 +72,54 @@ parseFfprobe body = do
       streams   = map (toMediaStream fmtDur) (pdStreams doc)
   pure (container, streams)
 
+-- | The ffprobe argument list reading only the format section of
+-- @path@ (used to learn the file's bit_rate for the milestone 6f
+-- bitrate caps). Pure so it is unit-testable.
+probeBitrateArgs :: FilePath -> [String]
+probeBitrateArgs path =
+  [ "-v", "error"
+  , "-print_format", "json"
+  , "-show_format"
+  , path
+  ]
+
+-- | Pure parser for ffprobe's @-show_format@ JSON: the format
+-- @bit_rate@ in bps, when present and parseable.
+parseFormatBitRate :: LBS.ByteString -> Maybe Int
+parseFormatBitRate body =
+  case Aeson.eitherDecode body :: Either String ProbeFormatDoc of
+    Right doc -> pfBitRate (pfFormat doc)
+    Left _    -> Nothing
+
+-- | Run ffprobe with 'probeBitrateArgs' and return the format bit_rate
+-- (bps), or 'Nothing' on any failure (unreadable file, bad output).
+probeBitrate :: FilePath -> IO (Maybe Int)
+probeBitrate path = do
+  (exitCode, out, _err) <- runProcessBS "ffprobe" (probeBitrateArgs path)
+  case exitCode of
+    ExitSuccess -> pure (parseFormatBitRate out)
+    ExitFailure _ -> pure Nothing
+
+-- Internal shape for 'parseFormatBitRate'.
+data ProbeFormatDoc = ProbeFormatDoc { pfFormat :: ProbeFormat }
+
+instance FromJSON ProbeFormatDoc where
+  parseJSON = withObject "ffprobe format output" $ \o ->
+    ProbeFormatDoc <$> o .: "format"
+
+-- | The playback decision (milestone 6f): "DirectPlay" when the source
+-- is direct playable AND no effective bitrate cap excludes it — an
+-- unknown source bitrate passes (documented), a known one must be
+-- <= the cap. Otherwise "Transcode".
+decidePlayMethod :: Bool -> Maybe Int -> Maybe Int -> Text
+decidePlayMethod directPlayable' mSourceBitrate mCap
+  | directPlayable' && bitrateOk = "DirectPlay"
+  | otherwise                    = "Transcode"
+  where
+    bitrateOk = case mCap of
+      Nothing -> True
+      Just c  -> maybe True (<= c) mSourceBitrate
+
 -- | The container name from ffprobe's comma-separated @format_name@
 -- (e.g. @\"mov,mp4,m4a,3gp,3g2,mj2\"@). The mov/mp4 family shares one
 -- demuxer, so when "mp4" is among the tokens the canonical name "mp4"
@@ -107,13 +159,15 @@ instance FromJSON ProbeDoc where
 data ProbeFormat = ProbeFormat
   { pfName     :: Maybe Text
   , pfDuration :: Maybe Double
+  , pfBitRate  :: Maybe Int    -- ^ milestone 6f: format bit_rate in bps
   }
 
 instance FromJSON ProbeFormat where
   parseJSON = withObject "format" $ \o -> do
     name <- o .:? "format_name"
     dur  <- o .:? "duration"
-    pure (ProbeFormat name (dur >>= unFlexSeconds))
+    br   <- o .:? "bit_rate"
+    pure (ProbeFormat name (dur >>= unFlexSeconds) (br >>= unFlexInt))
 
 data ProbeStream = ProbeStream
   { psIndex     :: !Int
@@ -157,6 +211,17 @@ instance FromJSON FlexSeconds where
   parseJSON (String t) = pure (FlexSeconds (readMaybe (T.unpack t)))
   parseJSON (Number n) = pure (FlexSeconds (readMaybe (show n)))
   parseJSON _          = pure (FlexSeconds Nothing)
+
+-- | ffprobe emits bit_rate as a JSON string ("91767"); accept numbers too.
+newtype FlexInt = FlexInt (Maybe Int)
+
+unFlexInt :: FlexInt -> Maybe Int
+unFlexInt (FlexInt d) = d
+
+instance FromJSON FlexInt where
+  parseJSON (String t) = pure (FlexInt (readMaybe (T.unpack t)))
+  parseJSON (Number n) = pure (FlexInt (Just (floor (realToFrac n :: Double))))
+  parseJSON _          = pure (FlexInt Nothing)
 
 -- | Map one parsed ffprobe stream to a 'MediaStream'. The duration is
 -- the stream's own when present, otherwise the format's.

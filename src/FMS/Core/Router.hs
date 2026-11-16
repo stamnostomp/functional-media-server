@@ -6,6 +6,9 @@ module FMS.Core.Router
   , openPaths
   , parseTokenHeader
   , tokenFromRequest
+  , parseCorsOrigins
+  , allowedOriginsHeader
+  , securityHeaders
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
@@ -23,7 +26,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
-  ( Method, ResponseHeaders
+  ( Header, Method, ResponseHeaders
   , status204, status400, status401, status403, status404, status429, status500
   )
 import Network.Socket (SockAddr (..), hostAddressToTuple)
@@ -48,8 +51,10 @@ import FMS.Core.Types.User (User(..))
 --   additionally embed it in the JSON body as @requestId@, and handler
 --   errors are logged with it.
 -- * @OPTIONS@ requests get a 204 preflight response (not rate limited).
--- * Every response carries permissive CORS headers (the server is called
---   from a UI on another origin).
+-- * Every response carries CORS headers computed from
+--   'configCorsOrigins' + the request Origin (milestone 13b; @*@ = the old
+--   permissive behaviour), plus security headers when
+--   'configSecurityHeaders' is on.
 -- * Milestone 14a: when @configRateLimit@ is set, non-OPTIONS requests are
 --   rate limited per client IP with a token bucket BEFORE the auth gate;
 --   denied requests get 429 @{\"error\":\"rate limited\",\"requestId\":...}@.
@@ -62,10 +67,17 @@ import FMS.Core.Types.User (User(..))
 buildApplication :: AppEnv -> [Module] -> Application
 buildApplication env modules req respond0 = do
   ereqId <- runApp env nextRequestId
-  let reqId  = either (const (requestIdHex 0)) id ereqId
-      respond resp = respond0 (withRequestId reqId (cors resp))
+  let cfg     = envConfig env
+      reqId   = either (const (requestIdHex 0)) id ereqId
+      origin  = lookup "origin" (requestHeaders req)
+      -- milestone 13b: CORS allow-origin is computed from configCorsOrigins
+      -- + the request Origin; security headers when configSecurityHeaders
+      corsH   = allowedOriginsHeader (configCorsOrigins cfg) (TE.decodeUtf8 <$> origin)
+                ++ corsBaseHeaders
+      secH    = if configSecurityHeaders cfg then securityHeaders else []
+      respond resp = respond0 (withRequestId reqId (mapResponseHeaders ((secH ++ corsH) ++) resp))
   if requestMethod req == "OPTIONS"
-    then respond (responseLBS status204 [] "")
+    then respond (mapResponseHeaders (("Access-Control-Max-Age", "600") :) (responseLBS status204 [] ""))
     else do
       elim <- runApp env (rateLimitExceeded req)
       if elim == Right True
@@ -282,15 +294,48 @@ matchSegments (Capture name : rest) (s : segs) =
   ((name, s) :) <$> matchSegments rest segs
 matchSegments _ _ = Nothing
 
--- | Permissive CORS headers on every response.
-cors :: Response -> Response
-cors = mapResponseHeaders (corsHeaders ++)
-  where
-    corsHeaders =
-      [ ("Access-Control-Allow-Origin", "*")
-      , ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-      , ("Access-Control-Allow-Headers", "*")
-      ]
+-- | Milestone 13b, pure: parse the FMS_CORS_ORIGINS env value
+-- (comma-separated, whitespace trimmed, empties dropped). An empty/unset
+-- value yields @[\"*\"]@ (allow all, the pre-13b behaviour).
+parseCorsOrigins :: Text -> [Text]
+parseCorsOrigins raw =
+  let ts = [ T.strip t | t <- T.splitOn "," raw, not (T.null (T.strip t)) ]
+  in if null ts then ["*"] else ts
+
+-- | Milestone 13b, pure: the @Access-Control-Allow-Origin@ header(s) for a
+-- request with the given @Origin@. When @\"*\"@ is configured -> @*@@
+-- (regardless of whether the request carries Origin). Otherwise the origin
+-- is reflected (plus @Vary: Origin@) only when it matches the configured
+-- list case-insensitively; a restricted config with a non-matching (or
+-- absent) Origin yields NO ACAO header at all, so browsers block the
+-- cross-origin response.
+allowedOriginsHeader :: [Text] -> Maybe Text -> [Header]
+allowedOriginsHeader origins mOrigin
+  | "*" `elem` map T.toCaseFold origins = [("Access-Control-Allow-Origin", "*")]
+  | otherwise = case mOrigin of
+      Just o | any (\c -> T.toCaseFold c == T.toCaseFold o) origins ->
+        [ ("Access-Control-Allow-Origin", TE.encodeUtf8 o)
+        , ("Vary", "Origin")
+        ]
+      _ -> []
+
+-- | The always-on CORS base headers (methods/headers), as before 13b.
+corsBaseHeaders :: [Header]
+corsBaseHeaders =
+  [ ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+  , ("Access-Control-Allow-Headers", "*")
+  ]
+
+-- | Milestone 13b, pure: security headers added to every response when
+-- configSecurityHeaders is on. NOTE: no Content-Security-Policy on
+-- purpose — the built-in web client (FMS.Modules.Web) uses inline
+-- scripts/styles, and a restrictive CSP would break it.
+securityHeaders :: [Header]
+securityHeaders =
+  [ ("X-Content-Type-Options", "nosniff")
+  , ("X-Frame-Options", "SAMEORIGIN")
+  , ("Referrer-Policy", "no-referrer")
+  ]
 
 -- | Map an 'AppError' to its HTTP response. Milestone 14a: the body is
 -- JSON @{\"error\": msg, \"requestId\": id}@ so clients can correlate

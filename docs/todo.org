@@ -17,7 +17,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] =POST /System/Shutdown= (graceful: warp drain + acid checkpoint) and =POST /System/Restart= (re-exec same binary/env)
 ** DONE OpenAPI generated from the live route table: =GET /api-docs/openapi.json= (OpenAPI 3.0.3, all module paths, captures as required path params, module tags) + =GET /api-docs= HTML index
 ** TODO interactive Swagger UI (external assets); per-route summaries via getDoc/postDoc
-** TODO CORS handling
+** DONE CORS handling: configurable via =FMS_CORS_ORIGINS= (comma list, default "*"; restricted mode reflects only matching Origin case-insensitively + Vary: Origin, omits ACAO otherwise); OPTIONS preflight 204 + Max-Age 600
    - [X] OPTIONS preflight (204) + permissive CORS headers on every response
    - [ ] CORS configurable per config
 ** DONE WebSocket endpoint (=GET /Socket=, websockets/wai-websockets): api_key query auth (skipped when auth off), KeepAlive 10s, broadcasts PlaybackStart/Progress/Stop, LibraryChanged, UserDataSaved as {"MessageType","Data"}
@@ -182,7 +182,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Rate limiting
    - [X] per-IP token bucket (FMS_RATE_LIMIT req/min, 429 + JSON error), OPTIONS exempt, refills
    - [ ] per-endpoint limits
-** TODO HTTPS/TLS termination config; security headers
+** TODO HTTPS/TLS termination config
+   - [X] security headers (FMS_SECURITY_HEADERS, default on): X-Content-Type-Options nosniff, X-Frame-Options SAMEORIGIN, Referrer-Policy no-referrer (no CSP - inline web client)
 ** TODO Validate all user input; safe Range parsing (see roadmap milestone 3)
 
 * 15. Performance and robustness :improvement:

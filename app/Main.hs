@@ -7,6 +7,7 @@ import System.Environment (lookupEnv)
 import System.IO (BufferMode (..), hSetBuffering, stderr, stdout)
 import Text.Read (readMaybe)
 
+import FMS.Core.Router (parseCorsOrigins)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig(..), loadServerConfig, serverConfigFilePath )
@@ -36,6 +37,8 @@ main = do
   mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
   mRate  <- lookupEnv "FMS_RATE_LIMIT"
   mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
+  mCors  <- lookupEnv "FMS_CORS_ORIGINS"
+  mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -58,5 +61,9 @@ main = do
             Just n | n > 0 -> Just n
             _              -> Nothing   -- missing/invalid/0 -> disabled (milestone 14a)
         , configLogLevel    = T.pack (fromMaybe "info" mLogLvl)  -- milestone 11b; env-only
+        , configCorsOrigins = maybe ["*"] parseCorsOrigins (T.pack <$> mCors)  -- milestone 13b
+        , configSecurityHeaders = case mSecH of
+            Just v -> map toLower v `elem` ["true", "1", "yes"]
+            Nothing -> True   -- default on (milestone 13b)
         }
   runServer cfg

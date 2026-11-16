@@ -38,7 +38,7 @@ import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
-import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
+import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2)
@@ -2026,5 +2026,30 @@ main = do
   missingWh <- loadWebhooks "/tmp/fms-test-webhooks-does-not-exist.json"
   check "loadWebhooks of a missing file is empty" HM.empty missingWh
   removeFile whFile
+
+  -- Milestone 13b (configurable CORS + security headers).
+  let acao origins mo =
+        BSC.unpack <$> lookup "Access-Control-Allow-Origin" (allowedOriginsHeader origins mo)
+  check "parseCorsOrigins: empty -> [\"*\"]"
+    ["*"] (parseCorsOrigins "")
+  check "parseCorsOrigins: unset-ish whitespace -> [\"*\"]"
+    ["*"] (parseCorsOrigins "  , ,")
+  check "parseCorsOrigins: comma-separated, trimmed, empties dropped"
+    ["https://a.example", "http://b.example:8080"] (parseCorsOrigins " https://a.example , ,http://b.example:8080,")
+  check "allowedOriginsHeader: wildcard config -> * even without Origin"
+    (Just "*") (acao ["*"] Nothing)
+  check "allowedOriginsHeader: wildcard config -> * with Origin"
+    (Just "*") (acao ["*"] (Just "https://evil.example"))
+  check "allowedOriginsHeader: exact match reflects origin (case-insensitive) + Vary"
+    (Just "https://A.example", Just "Origin")
+    (acao ["https://a.example"] (Just "https://A.example"),
+     BSC.unpack <$> lookup "Vary" (allowedOriginsHeader ["https://a.example"] (Just "https://A.example")))
+  check "allowedOriginsHeader: restricted, non-matching origin -> no ACAO"
+    Nothing (acao ["https://a.example"] (Just "https://evil.example"))
+  check "allowedOriginsHeader: restricted, no Origin header -> no ACAO"
+    Nothing (acao ["https://a.example"] Nothing)
+  check "securityHeaders: nosniff/SAMEORIGIN/no-referrer, no CSP"
+    ([("X-Content-Type-Options","nosniff"),("X-Frame-Options","SAMEORIGIN"),("Referrer-Policy","no-referrer")], False)
+    (securityHeaders, any ((== "Content-Security-Policy") . fst) securityHeaders)
 
   putStrLn "All tests passed."

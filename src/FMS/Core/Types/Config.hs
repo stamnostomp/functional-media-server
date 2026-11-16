@@ -17,4 +17,6 @@ data Config = Config
   , configTmdbApiKey  :: !Text      -- ^ TMDB API key for the remote metadata fallback (env MEDIA_TMDB_API_KEY, milestone 4c; empty disables it)
   , configRateLimit   :: !(Maybe Int)  -- ^ max requests per minute per client IP (env FMS_RATE_LIMIT; Nothing/0 = disabled; milestone 14a)
   , configLogLevel    :: !Text          -- ^ minimum log level printed (env FMS_LOG_LEVEL, default \"info\"; env-only, milestone 11b)
+  , configCorsOrigins :: ![Text]        -- ^ allowed CORS origins (env FMS_CORS_ORIGINS, comma-separated; empty/unset or containing \"*\" = allow all; milestone 13b)
+  , configSecurityHeaders :: !Bool      -- ^ add X-Content-Type-Options/X-Frame-Options/Referrer-Policy to every response (env FMS_SECURITY_HEADERS, default True; milestone 13b)
   } deriving (Show, Eq)

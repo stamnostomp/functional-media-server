@@ -8,17 +8,20 @@ module FMS.Modules.Library.Scan
   , itemFromPath
   , classifyItem
   , parseEpisodeFilename
+  , extraTypeFor
   , hasTvShowNfo
   , isMediaFile
   , mimeFor
   , mediaExtensions
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM)
 import Data.Char (isDigit, toLower)
 import Data.Either (partitionEithers)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -84,6 +87,41 @@ parseEpisodeFilename t = go (T.unpack t)
 hasTvShowNfo :: FilePath -> IO Bool
 hasTvShowNfo path = doesFileExist (takeDirectory path </> "tvshow.nfo")
 
+-- | Pure (milestone 4g): classify a file as an Extra (trailer,
+-- behind-the-scenes, ...) or not. The second argument is the file's base
+-- name WITHOUT extension (matched case-insensitively); the first is the
+-- full path, whose parent directory names are also scanned. Token rules,
+-- checked in order, first match wins: the file base name is checked
+-- against every token first, then the parent directory names; a parent
+-- directory named exactly @extras@ or @specials@ yields @Just \"Other\"@.
+extraTypeFor :: FilePath -> Text -> Maybe Text
+extraTypeFor path baseName =
+  listToMaybe (mapMaybe (`matchToken` lowerBase) tokens)
+    <|> listToMaybe [ res | (needles, res) <- tokens, d <- dirNames
+                         , any (`T.isInfixOf` d) needles ]
+    <|> (if any (`elem` ["extras", "specials"]) dirNames then Just "Other" else Nothing)
+  where
+    tokens =
+      [ (["trailer"], "Trailer")
+      , (["behind the scenes", "behindthescenes", "bts"], "BehindTheScenes")
+      , (["deleted scene", "deletedscene"], "DeletedScene")
+      , (["featurette"], "Featurette")
+      , (["short"], "Short")
+      , (["theme"], "ThemeSong")
+      ]
+    matchToken (needles, res) txt = if any (`T.isInfixOf` txt) needles then Just res else Nothing
+    lowerBase = T.toLower baseName
+    dirNames = map (T.toLower . T.pack) (parentDirNames path)
+
+-- | Pure: the names of all parent directories of a path, innermost
+-- first (@/a/b/c.mp4@ -> [@\"b\",\"a\"]@).
+parentDirNames :: FilePath -> [FilePath]
+parentDirNames p = go (takeDirectory p)
+  where
+    go d
+      | null d || d == "/" || d == "." = []
+      | otherwise = takeFileName d : go (takeDirectory d)
+
 -- | Pure (milestone 4d): classify a scanned file into
 -- @(itemType, series, season, episode)@. When the parent directory has a
 -- @tvshow.nfo@ the file is an 'Episode' of the series named after the
@@ -107,27 +145,36 @@ classifyItem hasNfo path baseName
 -- title = base name, mime from the extension, classification via
 -- 'classifyItem' (milestone 4d: tvshow.nfo -> Episode with series/season/
 -- episode, else mime-based type), tagged with the id of the media folder
--- it was scanned from (milestone 2c). The id is left empty ("") -- the
--- acid-state 'RegisterItem' event assigns the stable id.
+-- it was scanned from (milestone 2c). Milestone 4g: for video files an
+-- 'extraTypeFor' match WINS over the Episode classification -- a trailer
+-- inside a show directory is an Extra, not an Episode -- and sets
+-- itemType = \"Extra\" with itemExtraType = the match. The id is left
+-- empty ("") -- the acid-state 'RegisterItem' event assigns the stable id.
 itemFromPath :: Text -> FilePath -> IO MediaItem
 itemFromPath folder p = do
   size  <- getFileSize p
   mtime <- getModificationTime p
   nfo   <- hasTvShowNfo p
-  let (itype, series, season, episode) =
-        classifyItem nfo p (T.pack (takeBaseName p))
+  let base  = T.pack (takeBaseName p)
+      mime  = mimeFor p
+      (itype, series, season, episode) = classifyItem nfo p base
+      (finalType, extra, finalSeries, finalSeason, finalEpisode) =
+        case extraTypeFor p base of
+          Just et | "video" `T.isPrefixOf` mime -> ("Extra", Just et, Nothing, Nothing, Nothing)
+          _                                      -> (itype, Nothing, series, season, episode)
   pure MediaItem
-    { itemId      = ""
-    , itemTitle   = T.pack (takeBaseName p)
-    , itemPath    = p
-    , itemSize    = size
-    , itemMime    = mimeFor p
-    , itemAddedAt = mtime
-    , itemFolder  = folder
-    , itemType    = itype
-    , itemSeries  = series
-    , itemSeason  = season
-    , itemEpisode = episode
+    { itemId        = ""
+    , itemTitle     = base
+    , itemPath      = p
+    , itemSize      = size
+    , itemMime      = mime
+    , itemAddedAt   = mtime
+    , itemFolder    = folder
+    , itemType      = finalType
+    , itemSeries    = finalSeries
+    , itemSeason    = finalSeason
+    , itemEpisode   = finalEpisode
+    , itemExtraType = extra
     }
 
 -- | Pure: is @canon@ already in the visited set? Used to detect circular

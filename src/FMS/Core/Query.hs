@@ -12,6 +12,7 @@ module FMS.Core.Query
   , attachUserData
   , showsFromItems
   , sortEpisodes
+  , specialFeaturesOf
   , sortItems
   , paginate
   , applyItemQuery
@@ -29,6 +30,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Types (urlDecode)
+import System.FilePath (takeDirectory)
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.MediaItem (MediaItem(..))
@@ -174,6 +176,19 @@ showsFromItems items =
 -- episodes without numbers sort before numbered ones (Nothing < Just).
 sortEpisodes :: [MediaItem] -> [MediaItem]
 sortEpisodes = sortBy (comparing (\i -> (itemSeason i, itemEpisode i, itemTitle i)))
+
+-- | Pure (milestone 4g): the special features (Extra items) belonging to
+-- @item@ — the visible Extra items whose file lives in the same directory
+-- as the item's file or one level below it, sorted by title.
+specialFeaturesOf :: MediaItem -> [MediaItem] -> [MediaItem]
+specialFeaturesOf item allItems =
+  sortBy (comparing itemTitle)
+    [ i | i <- allItems
+        , itemType i == "Extra"
+        , let d    = takeDirectory (itemPath i)
+              home = takeDirectory (itemPath item)
+        , d == home || takeDirectory d == home
+        ]
 
 -- | Sort by @sortBy@ ∈ {title, size, addedAt} — unknown or missing falls
 -- back to title — with direction @sortOrder@ ∈ {asc, desc} (default asc).

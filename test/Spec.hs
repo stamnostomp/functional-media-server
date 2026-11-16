@@ -33,12 +33,12 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
+import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
-import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1)
+import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..)
@@ -58,6 +58,7 @@ import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
 import FMS.Modules.Library.Scan
   ( classifyItem
   , diffScan
+  , extraTypeFor
   , isCircular
   , isMediaFile
   , parseEpisodeFilename
@@ -272,10 +273,11 @@ main = do
         , itemMime    = "video/mp4"
         , itemAddedAt = now
         , itemFolder  = "1"
-        , itemType    = "Movie"
-        , itemSeries  = Nothing
-        , itemSeason  = Nothing
-        , itemEpisode = Nothing
+        , itemType      = "Movie"
+        , itemSeries    = Nothing
+        , itemSeason    = Nothing
+        , itemEpisode   = Nothing
+        , itemExtraType = Nothing
         }
   st1 <- openLocalStateFrom acidDir initialLibraryState
   id1 <- update st1 (RegisterItem "/x.mp4" testItem)
@@ -568,10 +570,11 @@ main = do
         , itemMime    = "video/mp4"
         , itemAddedAt = t
         , itemFolder  = "1"
-        , itemType    = "Movie"
-        , itemSeries  = Nothing
-        , itemSeason  = Nothing
-        , itemEpisode = Nothing
+        , itemType      = "Movie"
+        , itemSeries    = Nothing
+        , itemSeason    = Nothing
+        , itemEpisode   = Nothing
+        , itemExtraType = Nothing
         }
       items4 =
         [ mkItem 1 "alpha"      300 t3
@@ -1297,7 +1300,8 @@ main = do
   let qi fid title = MediaItem
         { itemId = fid, itemTitle = title, itemPath = "/" ++ T.unpack title ++ ".mp4"
         , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = fid
-        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing }
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing }
       qItems = [qi "1" "b", qi "2" "m", qi "1" "a"]
       qSorted = [qi "1" "a", qi "1" "b", qi "2" "m"]
   check "applyItemQuery libraryId=2 keeps only folder-2 items"
@@ -1320,21 +1324,31 @@ main = do
     ("9", "/old.mp4", 10) (v1ItemId v1, v1ItemPath v1, v1ItemSize v1)
   check "MediaItemV1 SafeCopy v1 serialize/deserialize roundtrip"
     (Right v1) (runGet safeGet (runPut (safePut v1)))
-  check "SafeCopy reads v0 bytes as v2 via the chain v0->v1->v2 (folder \"1\")"
+  check "SafeCopy reads v0 bytes as v3 via the chain v0->v1->v2->v3 (folder \"1\")"
     (Right "1") (itemFolder <$> (runGet safeGet (runPut (safePut v0))
                                  :: Either String MediaItem))
   let v2 = migrateMediaItemV1 v1
   check "migrateMediaItemV1 v1->v2 derives type Movie from video mime"
-    "Movie" (itemType v2)
+    "Movie" (v2ItemType v2)
   check "migrateMediaItemV1 v1->v2 defaults series/season/episode to Nothing"
-    (Nothing, Nothing, Nothing) (itemSeries v2, itemSeason v2, itemEpisode v2)
+    (Nothing, Nothing, Nothing) (v2ItemSeries v2, v2ItemSeason v2, v2ItemEpisode v2)
   check "migrateMediaItemV1 keeps id/folder"
-    ("9", "1") (itemId v2, itemFolder v2)
+    ("9", "1") (v2ItemId v2, v2ItemFolder v2)
+  check "MediaItemV2 SafeCopy v2 serialize/deserialize roundtrip"
+    (Right v2) (runGet safeGet (runPut (safePut v2)))
   check "itemTypeFromMime audio -> Audio" "Audio" (itemTypeFromMime "audio/mpeg")
   check "itemTypeFromMime other -> Unknown" "Unknown" (itemTypeFromMime "application/octet-stream")
-  check "SafeCopy reads v1 bytes as v2 (type from mime)"
+  check "SafeCopy reads v1 bytes as v3 (type from mime)"
     (Right "Movie") (itemType <$> (runGet safeGet (runPut (safePut v1))
                                    :: Either String MediaItem))
+  check "SafeCopy reads v2 bytes as v3 (extraType defaults to Nothing)"
+    (Right Nothing) (itemExtraType <$> (runGet safeGet (runPut (safePut v2))
+                                         :: Either String MediaItem))
+  let v3 = migrateMediaItemV2 v2
+  check "migrateMediaItemV2 v2->v3 defaults itemExtraType to Nothing"
+    Nothing (itemExtraType v3)
+  check "migrateMediaItemV2 keeps id/type/folder"
+    ("9", "Movie", "1") (itemId v3, itemType v3, itemFolder v3)
 
   -- Item types + TV shows (milestone 4d, docs/todo.org sections 2-4).
   check "parseEpisodeFilename S01E02" (Just (1, 2)) (parseEpisodeFilename "S01E02")
@@ -1566,5 +1580,48 @@ main = do
           check "subtitleList on the muxed file still lists only the external file"
             [(0, subDir </> "withsubs.srt", "srt")] subsMkv
     _ -> putStrLn "SKIP: ffprobe/ffmpeg not found on PATH -- skipping embedded-subtitle IO test"
+
+  -- Extras / special features (milestone 4g, docs/todo.org sections 2-4).
+  check "extraTypeFor trailer" (Just "Trailer")
+    (extraTypeFor "/m/movie-trailer.mp4" "movie-trailer")
+  check "extraTypeFor case-insensitive TRAILER" (Just "Trailer")
+    (extraTypeFor "/m/MOVIE-TRAILER.mp4" "MOVIE-TRAILER")
+  check "extraTypeFor behind the scenes" (Just "BehindTheScenes")
+    (extraTypeFor "/m/movie behind the scenes.mp4" "movie behind the scenes")
+  check "extraTypeFor bts abbreviation" (Just "BehindTheScenes")
+    (extraTypeFor "/m/bts.mp4" "bts")
+  check "extraTypeFor deletedscene" (Just "DeletedScene")
+    (extraTypeFor "/m/deletedscene.mp4" "deletedscene")
+  check "extraTypeFor featurette" (Just "Featurette")
+    (extraTypeFor "/m/featurette.mp4" "featurette")
+  check "extraTypeFor short (substring)" (Just "Short")
+    (extraTypeFor "/m/my short film.mp4" "my short film")
+  check "extraTypeFor theme" (Just "ThemeSong")
+    (extraTypeFor "/m/theme song.mp4" "theme song")
+  check "extraTypeFor extras dir -> Other" (Just "Other")
+    (extraTypeFor "/m/extras/clip.mp4" "clip")
+  check "extraTypeFor specials dir -> Other" (Just "Other")
+    (extraTypeFor "/m/specials/clip.mp4" "clip")
+  check "extraTypeFor token in parent dir name (Trailers)" (Just "Trailer")
+    (extraTypeFor "/m/Trailers/clip.mp4" "clip")
+  check "extraTypeFor filename token wins over extras dir" (Just "Trailer")
+    (extraTypeFor "/m/extras/movie-trailer.mp4" "movie-trailer")
+  check "extraTypeFor no match -> Nothing" Nothing
+    (extraTypeFor "/m/movie.mp4" "movie")
+  let mainItem = (qi "1" "movie") { itemPath = "/m/movie.mp4" }
+      exSameDir = (qi "2" "aaa trailer") { itemPath = "/m/movie-trailer.mp4"
+                                          , itemType = "Extra", itemExtraType = Just "Trailer" }
+      exOneBelow = (qi "3" "behind") { itemPath = "/m/extras/behind.mp4"
+                                     , itemType = "Extra", itemExtraType = Just "BehindTheScenes" }
+      exDeep = (qi "4" "deep") { itemPath = "/m/extras/deep/x.mp4"
+                               , itemType = "Extra", itemExtraType = Just "Other" }
+      exFar = (qi "5" "far") { itemPath = "/other/far.mp4"
+                             , itemType = "Extra", itemExtraType = Just "Other" }
+      plainSameDir = (qi "6" "clip") { itemPath = "/m/clip.mp4" }
+      sfItems = [mainItem, exSameDir, exOneBelow, exDeep, exFar, plainSameDir]
+  check "specialFeaturesOf: same dir + one level below, Extras only, sorted by title"
+    [exSameDir, exOneBelow] (specialFeaturesOf mainItem sfItems)
+  check "specialFeaturesOf from another dir finds only extras there (itself)"
+    [exFar] (specialFeaturesOf exFar sfItems)
 
   putStrLn "All tests passed."

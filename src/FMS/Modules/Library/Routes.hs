@@ -5,6 +5,7 @@ module FMS.Modules.Library.Routes
   , itemDetailHandler
   , ancestorsHandler
   , searchHintsHandler
+  , specialFeaturesHandler
   ) where
 
 import Control.Monad.Except (throwError)
@@ -26,7 +27,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
-import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes)
+import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -314,3 +315,21 @@ searchHintsHandler _captures req = do
     [ object ([ "ItemId" .= itemId i, "Name" .= itemTitle i, "Type" .= itemType i ]
               ++ maybe [] (\s -> ["Series" .= s]) (itemSeries i))
     | i <- hits ])
+
+-- | @GET \/items\/:id\/SpecialFeatures@ — 404 for an unknown item
+-- (milestone 5d folder enforcement via 'getItemWithAccess'), otherwise a
+-- JSON array of the visible Extra items living in the same directory as
+-- the item's file or one level below it (pure 'specialFeaturesOf',
+-- milestone 4g).
+specialFeaturesHandler :: [(Text, Text)] -> Request -> AppM Response
+specialFeaturesHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          mUser <- currentUserFromReq req
+          items <- visibleItems mUser <$> listItems
+          pure (jsonResponse (specialFeaturesOf item items))

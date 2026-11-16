@@ -20,6 +20,7 @@ import FMS.Modules.Library.Routes
   , itemsHandler
   , libraryRoutes
   , searchHintsHandler
+  , specialFeaturesHandler
   )
 import FMS.Modules.Library.State (initialLibraryState)
 
@@ -54,6 +55,7 @@ libraryModule = Module
          , get [Lit "items", Lit "Counts"] itemsCountsHandler
          , get [Lit "items", Capture "id"] itemDetailHandler
          , get [Lit "items", Capture "id", Lit "Ancestors"] ancestorsHandler
+         , get [Lit "items", Capture "id", Lit "SpecialFeatures"] specialFeaturesHandler
          , get [Lit "Search", Lit "Hints"] searchHintsHandler
          ]
   }

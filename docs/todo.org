@@ -46,7 +46,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] incremental rescan: add/change/remove detected via planRescan + acid events, ids stable on modify
 ** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
 ** TODO Multi-version media (multiple files for one movie, version selection)
-** TODO Extras: trailers, behind-the-scenes, deleted scenes, theme songs/videos
+** DONE Extras: trailers, behind-the-scenes, deleted scenes, featurettes, shorts, theme songs (MediaItem v3 itemExtraType; type=Extra; extra match wins over Episode for video files)
 ** TODO Playlists and box sets as first-class virtual items
 
 * 3. Metadata :feature:
@@ -74,7 +74,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO =EnableImages=, image type selection
    - [X] =fields= projection on /items and /items/:id (case-insensitive, id always kept, UserData attachable)
 ** DONE User-scoped queries: =userId=, filters IsPlayed/Unplayed/IsFavorite/IsResumable/IsLiked (ANDed, case-insensitive; 403 for non-admin cross-user userId; UserData attached to items; TotalRecordCount after filters, before pagination)
-** TODO =GET /Items/{id}/Similar=, =GET /Items/{id}/SpecialFeatures=
+** TODO =GET /Items/{id}/Similar=
+   - [X] =GET /Items/{id}/SpecialFeatures= (extras in same dir + one level below)
    - [X] =GET /Items/{id}= item detail (alias of =/library/:id=, 404 on unknown)
 ** DONE Ancestors/breadcrumb endpoints (=/Items/{id}/Ancestors=)
    - [X] next-up for series: =GET /Shows/:name/NextUp=

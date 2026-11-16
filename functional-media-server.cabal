@@ -33,7 +33,12 @@ library
                       FMS.Core.Types.Config
                       FMS.Core.Types.MediaItem
                       FMS.Core.Types.Progress
+                      FMS.Core.Types.User
                       FMS.Modules.System
+                      FMS.Modules.Auth
+                      FMS.Modules.Auth.Monad
+                      FMS.Modules.Auth.State
+                      FMS.Modules.Auth.Routes
                       FMS.Modules.Stream
                       FMS.Modules.Transcode
                       FMS.Modules.Hls
@@ -66,7 +71,10 @@ library
                     , wai
                     , warp
                     , http-types
+                    , case-insensitive
                     , process
+                    , bcrypt
+                    , random
 
 test-suite fms-test
     import:           shared
@@ -84,6 +92,7 @@ test-suite fms-test
                     , acid-state
                     , safecopy
                     , process
+                    , aeson
                     , functional-media-server
 
 executable fms

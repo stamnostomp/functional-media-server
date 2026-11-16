@@ -104,11 +104,15 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Format conversion: ffmpeg -> WebVTT for srt/ass/ssa/sub
 
 * 8. Users, auth, sessions :feature:
-** TODO User CRUD (=/Users=), =POST /Users/AuthenticateByName=, token issuance
-** TODO API keys (=X-Emby-Token= / =X-MediaBrowser-Token= header auth)
-** TODO Password policy, reset, hashing (bcrypt-class)
-** TODO Sessions and devices (=/Sessions=, =/Devices=, device capabilities)
-** TODO Per-library permissions per user; enabled/disabled users; admin flag
+** DONE User CRUD (=/Users=, POST /Users, GET/DELETE /Users/:id, POST /Users/:id/Password)
+   - [X] =POST /Users/AuthenticateByName= -> {AccessToken, User} (401 on bad credentials)
+   - [X] admin bootstrap from FMS_ADMIN_PASSWORD (users.json), bcrypt hashes
+** DONE API keys (=X-Emby-Token= / =MediaBrowser Token= / =Bearer=), POST /Users/:id/ApiKey, persisted in users.json
+** DONE Password hashing (bcrypt); self/admin password change
+** TODO Password policy (min length etc.), forced reset
+** DONE Sessions: GET /Sessions lists live tokens; router gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
+** TODO =/Devices=, device capabilities
+** TODO Per-library permissions per user; enabled/disabled users (admin flag DONE)
 ** TODO Parental controls: rating restrictions, allowed tags, access schedules (basic)
 ** TODO First-run startup wizard (admin creation) like Jellyfin's
 

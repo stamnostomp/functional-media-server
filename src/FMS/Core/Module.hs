@@ -4,6 +4,7 @@ module FMS.Core.Module
   , Module(..)
   , get
   , post
+  , delete
   , jsonResponse
   ) where
 
@@ -39,6 +40,9 @@ get pat h = Route "GET" pat h
 
 post :: [Segment] -> ([(Text, Text)] -> Request -> AppM Response) -> Route
 post pat h = Route "POST" pat h
+
+delete :: [Segment] -> ([(Text, Text)] -> Request -> AppM Response) -> Route
+delete pat h = Route "DELETE" pat h
 
 -- | Convenience for JSON responses.
 jsonResponse :: ToJSON a => a -> Response

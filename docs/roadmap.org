@@ -77,7 +77,8 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 * Milestone 5 — stats, users, security
 ** DONE Stats module: play counts, progress, continue-watching, popular, new (stats.json persisted; stream records plays)
 ** TODO User management: profiles, watch history, resume points :feature:
-** TODO Authentication: basic auth, tokens (API keys), role-based access control :feature:
+** DONE Authentication: bcrypt passwords, session tokens, persistent API keys, admin gate, optional FMS_REQUIRE_AUTH router gate :feature:
+** TODO Role-based per-library access control (beyond admin flag) :feature:
 ** TODO Configurable CORS + preflight handling :improvement:
 ** TODO Rate limiting: per-IP and per-endpoint :feature:
 ** TODO Sanitize file paths; prevent directory traversal; validate input :fix:

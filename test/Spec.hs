@@ -3,7 +3,9 @@ module Main (main) where
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import qualified Data.Text as T
@@ -28,9 +30,12 @@ import GHC.IO.Encoding (latin1, setLocaleEncoding)
 import FMS.Core.Module (Segment(..))
 import FMS.Core.Query (applyItemQuery, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
-import FMS.Core.Router (matchSegments)
+import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
+import FMS.Core.Types.User (User(..), toInternalJSON)
+import FMS.Modules.Auth.Monad (hashPassword, verifyPassword)
+import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
 import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popular)
 import FMS.Modules.Stats.Persistence (loadStats, saveStats)
@@ -443,5 +448,80 @@ main = do
   missingStats <- loadStats "/tmp/fms-test-stats-does-not-exist.json"
   check "loadStats of a missing file is empty" HM.empty missingStats
   removeFile statsFile
+
+  -- Auth module (milestone 5b, docs/todo.org section 8): the router's pure
+  -- helpers (open paths + token header parsing), the bcrypt roundtrip, the
+  -- users.json persistence roundtrip, and the public User JSON shape.
+
+  -- isOpenPath: only the exact open paths are open.
+  check "isOpenPath System/Info/Public" True (isOpenPath ["System", "Info", "Public"])
+  check "isOpenPath healthz" True (isOpenPath ["healthz"])
+  check "isOpenPath Users/AuthenticateByName" True (isOpenPath ["Users", "AuthenticateByName"])
+  check "isOpenPath Users/Public" True (isOpenPath ["Users", "Public"])
+  check "isOpenPath Users is False" False (isOpenPath ["Users"])
+  check "isOpenPath Users/1 is False" False (isOpenPath ["Users", "1"])
+  check "isOpenPath System/Info is False" False (isOpenPath ["System", "Info"])
+  check "isOpenPath library is False" False (isOpenPath ["library"])
+  check "isOpenPath [] is False" False (isOpenPath [])
+
+  -- parseTokenHeader: X-Emby-Token, MediaBrowser Token="...", Bearer, and
+  -- the negative cases.
+  check "parseTokenHeader X-Emby-Token"
+    (Just "tok1") (parseTokenHeader [(BSC.pack "X-Emby-Token", BSC.pack "tok1")])
+  check "parseTokenHeader header name is case-insensitive"
+    (Just "tok1") (parseTokenHeader [(BSC.pack "x-emby-token", BSC.pack "tok1")])
+  check "parseTokenHeader MediaBrowser Token=\"...\""
+    (Just "abc123") (parseTokenHeader [(BSC.pack "Authorization", BSC.pack "MediaBrowser Token=\"abc123\"")])
+  check "parseTokenHeader MediaBrowser with other params first"
+    (Just "t9") (parseTokenHeader [(BSC.pack "Authorization", BSC.pack "MediaBrowser Client=\"Web\", Device=\"x\", Token=\"t9\"")])
+  check "parseTokenHeader Bearer"
+    (Just "bt") (parseTokenHeader [(BSC.pack "Authorization", BSC.pack "Bearer bt")])
+  check "parseTokenHeader bearer (lowercase scheme)"
+    (Just "bt") (parseTokenHeader [(BSC.pack "Authorization", BSC.pack "bearer bt")])
+  check "parseTokenHeader missing headers -> Nothing" Nothing (parseTokenHeader [])
+  check "parseTokenHeader Basic auth -> Nothing"
+    Nothing (parseTokenHeader [(BSC.pack "Authorization", BSC.pack "Basic dXNlcjpwYXNz")])
+  check "parseTokenHeader empty X-Emby-Token -> Nothing"
+    Nothing (parseTokenHeader [(BSC.pack "X-Emby-Token", BSC.pack "")])
+  check "parseTokenHeader unrelated headers -> Nothing"
+    Nothing (parseTokenHeader [(BSC.pack "Host", BSC.pack "localhost:8117")])
+
+  -- bcrypt roundtrip. Cost-14 hashing is slowish (~1s per op here), so keep
+  -- the op count at three: one hash + two verifies.
+  h <- hashPassword "s3cret-pw"
+  check "bcrypt hash has a $2y$ prefix" True ("$2y$" `T.isPrefixOf` h)
+  check "bcrypt verify accepts the right password" True (verifyPassword h "s3cret-pw")
+  check "bcrypt verify rejects a wrong password" False (verifyPassword h "nope")
+
+  -- users.json persistence roundtrip (internal JSON keeps the hash).
+  let ufile = "/tmp/fms-test-users.json"
+      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"]
+      u2 = User "2" "bob" "hash2" False []
+      usersMap = HM.fromList [("1", u1), ("2", u2)]
+  saveUsers ufile usersMap
+  loadedUsers <- loadUsers ufile
+  check "saveUsers/loadUsers roundtrip" usersMap loadedUsers
+  rawUsers <- BSC.readFile ufile
+  check "users.json is a bare map and keeps passwordHash internally"
+    True ("passwordHash" `BSC.isInfixOf` rawUsers
+          && "\"1\"" `BSC.isInfixOf` rawUsers
+          && "\"2\"" `BSC.isInfixOf` rawUsers)
+  missingUsers <- loadUsers "/tmp/fms-test-users-does-not-exist.json"
+  check "loadUsers of a missing file is empty" HM.empty missingUsers
+  removeFile ufile
+
+  -- User JSON shapes: ToJSON is the public one (no passwordHash, has
+  -- hasPassword); FromJSON/toInternalJSON are the internal full shape.
+  let uj1 = LBS.toStrict (Aeson.encode u1)
+      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False []))
+  check "User ToJSON omits passwordHash" False ("passwordHash" `BSC.isInfixOf` uj1)
+  check "User ToJSON has hasPassword:true when a hash is set"
+    True ("\"hasPassword\":true" `BSC.isInfixOf` uj1)
+  check "User ToJSON has hasPassword:false when the hash is empty"
+    True ("\"hasPassword\":false" `BSC.isInfixOf` uj3)
+  check "User ToJSON carries id/name/isAdmin"
+    True (all (`BSC.isInfixOf` uj1) ["\"id\":\"1\"", "\"name\":\"admin\"", "\"isAdmin\":true"])
+  check "User FromJSON parses the internal full shape"
+    (Just u1) (Aeson.decode (Aeson.encode (toInternalJSON u1)) :: Maybe User)
 
   putStrLn "All tests passed."

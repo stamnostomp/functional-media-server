@@ -79,6 +79,7 @@ class Monad m => MonadAuth m where
   setAllowedFolders :: Text -> Maybe [Text] -> m Bool  -- ^ userId, folders (Nothing = all); False when unknown (milestone 5d)
   setPolicy :: Text -> UserPolicy -> m Bool            -- ^ userId, parental policy; False when unknown (milestone 9)
   setEnabled :: Text -> Bool -> m Bool                 -- ^ userId, enabled flag; False when unknown (milestone 9)
+  setMustChangePassword :: Text -> Bool -> m Bool      -- ^ userId, forced-reset flag; False when unknown (milestone 8b)
 
 instance MonadAuth AppM where
   listUsers = do
@@ -91,7 +92,7 @@ instance MonadAuth AppM where
     users <- currentUsers
     let uid = nextUserId users
     h <- liftIO (hashPassword pw)
-    let u = User uid name h admin [] Nothing emptyUserPolicy True
+    let u = User uid name h admin [] Nothing emptyUserPolicy True False
     _ <- modifyAuthUsers (HM.insert uid u)
     logInfo ("auth: created user " <> name <> " (id " <> uid <> ")")
     pure u
@@ -169,6 +170,14 @@ instance MonadAuth AppM where
             tt <- tokensTVar
             liftIO (atomically (modifyTVar' tt (HM.filter (/= i))))
           else pure ()
+        pure True
+
+  setMustChangePassword i flag = do
+    m <- getUser i
+    case m of
+      Nothing -> pure False
+      Just _  -> do
+        _ <- modifyAuthUsers (HM.adjust (\u -> u { userMustChangePassword = flag }) i)
         pure True
 
 -- | Pure (milestone 5d): the folder restriction of a user

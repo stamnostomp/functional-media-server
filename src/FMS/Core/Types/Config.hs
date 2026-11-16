@@ -19,4 +19,5 @@ data Config = Config
   , configLogLevel    :: !Text          -- ^ minimum log level printed (env FMS_LOG_LEVEL, default \"info\"; env-only, milestone 11b)
   , configCorsOrigins :: ![Text]        -- ^ allowed CORS origins (env FMS_CORS_ORIGINS, comma-separated; empty/unset or containing \"*\" = allow all; milestone 13b)
   , configSecurityHeaders :: !Bool      -- ^ add X-Content-Type-Options/X-Frame-Options/Referrer-Policy to every response (env FMS_SECURITY_HEADERS, default True; milestone 13b)
+  , configPasswordMinLength :: !Int      -- ^ minimum password length (env FMS_PASSWORD_MIN_LENGTH, default 0 = disabled; milestone 8b)
   } deriving (Show, Eq)

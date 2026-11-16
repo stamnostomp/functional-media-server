@@ -39,6 +39,7 @@ main = do
   mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
   mCors  <- lookupEnv "FMS_CORS_ORIGINS"
   mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
+  mPwMin <- lookupEnv "FMS_PASSWORD_MIN_LENGTH"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -65,5 +66,8 @@ main = do
         , configSecurityHeaders = case mSecH of
             Just v -> map toLower v `elem` ["true", "1", "yes"]
             Nothing -> True   -- default on (milestone 13b)
+        , configPasswordMinLength = case mPwMin >>= readMaybe of
+            Just n | n > 0 -> n
+            _              -> 0   -- missing/invalid/negative -> disabled (milestone 8b)
         }
   runServer cfg

@@ -53,7 +53,7 @@ import FMS.Core.Types.ServerConfig
   , mergeServerConfig
   , saveServerConfig
   )
-import FMS.Core.Types.User (User(..), toInternalJSON)
+import FMS.Core.Types.User (User(..), checkPasswordPolicy, toInternalJSON)
 import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
 import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
@@ -753,8 +753,8 @@ main = do
 
   -- users.json persistence roundtrip (internal JSON keeps the hash).
   let ufile = "/tmp/fms-test-users.json"
-      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"] Nothing emptyUserPolicy True
-      u2 = User "2" "bob" "hash2" False [] (Just ["1"]) emptyUserPolicy True
+      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"] Nothing emptyUserPolicy True False
+      u2 = User "2" "bob" "hash2" False [] (Just ["1"]) emptyUserPolicy True False
       usersMap = HM.fromList [("1", u1), ("2", u2)]
   saveUsers ufile usersMap
   loadedUsers <- loadUsers ufile
@@ -771,7 +771,7 @@ main = do
   -- User JSON shapes: ToJSON is the public one (no passwordHash, has
   -- hasPassword); FromJSON/toInternalJSON are the internal full shape.
   let uj1 = LBS.toStrict (Aeson.encode u1)
-      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing emptyUserPolicy True))
+      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing emptyUserPolicy True False))
   check "User ToJSON omits passwordHash" False ("passwordHash" `BSC.isInfixOf` uj1)
   check "User ToJSON has hasPassword:true when a hash is set"
     True ("\"hasPassword\":true" `BSC.isInfixOf` uj1)
@@ -798,6 +798,31 @@ main = do
   check "User FromJSON with allowedFolders:null decodes to Nothing"
     (Just Nothing)
     (userAllowedFolders <$> (Aeson.decode "{\"userId\":\"2\",\"userName\":\"b\",\"passwordHash\":\"h\",\"isAdmin\":false,\"apiKeys\":[],\"allowedFolders\":null}" :: Maybe User))
+
+  -- Milestone 8b (password policy): checkPasswordPolicy matrix, old
+  -- users.json compat (missing mustChangePassword -> False), roundtrip,
+  -- public MustChangePassword key.
+  check "checkPasswordPolicy: 0 disables the policy"
+    [Right (), Right ()] [checkPasswordPolicy 0 "", checkPasswordPolicy 0 "x"]
+  check "checkPasswordPolicy: negative min length disables the policy"
+    (Right ()) (checkPasswordPolicy (-3) "")
+  check "checkPasswordPolicy: exact boundary passes"
+    (Right ()) (checkPasswordPolicy 8 "12345678")
+  check "checkPasswordPolicy: too short fails with the length in the message"
+    (Left "password must be at least 8 characters") (checkPasswordPolicy 8 "1234567")
+  check "checkPasswordPolicy: counts characters (unicode chars count once)"
+    (Right ()) (checkPasswordPolicy 3 "abc")
+  check "User FromJSON without mustChangePassword (pre-8b file) defaults to False"
+    (Just False)
+    (userMustChangePassword <$> (Aeson.decode "{\"userId\":\"1\",\"userName\":\"a\",\"passwordHash\":\"h\",\"isAdmin\":true,\"apiKeys\":[]}" :: Maybe User))
+  check "User internal JSON roundtrip keeps mustChangePassword"
+    (Just (User "9" "z" "h" False [] Nothing emptyUserPolicy True True))
+    (Aeson.decode (Aeson.encode (toInternalJSON (User "9" "z" "h" False [] Nothing emptyUserPolicy True True))) :: Maybe User)
+  check "User ToJSON exposes MustChangePassword and not mustChangePassword"
+    (True, False)
+    (let ej = LBS.toStrict (Aeson.encode u1)
+     in ("\"MustChangePassword\":false" `BSC.isInfixOf` ej,
+         "mustChangePassword" `BSC.isInfixOf` ej))
   check "User public ToJSON carries AllowedFolders"
     True ("\"AllowedFolders\":[\"1\"]" `BSC.isInfixOf` LBS.toStrict (Aeson.encode u2))
   check "User internal JSON persists allowedFolders"

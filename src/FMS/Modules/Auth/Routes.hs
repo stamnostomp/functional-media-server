@@ -5,6 +5,7 @@ module FMS.Modules.Auth.Routes
   , applyPolicyPatch
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (join)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -22,8 +23,8 @@ import FMS.Core.Monad (AppError (..), AppM, envConfig)
 import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.Policy (AccessSchedule, UserPolicy (..))
-import FMS.Core.Types.User (User (..))
-import FMS.Modules.Auth.Monad (MonadAuth (..))
+import FMS.Core.Types.User (User (..), checkPasswordPolicy)
+import FMS.Modules.Auth.Monad (MonadAuth (..), verifyPassword)
 
 -- | The users/auth/sessions API (docs/todo.org section 8,
 -- Jellyfin-shaped). Order matters: the literal routes ([Users, Public],
@@ -73,14 +74,25 @@ instance FromJSON CreateUserRequest where
       <*> o .: "Password"
       <*> o .:? "IsAdmin" .!= False
 
--- | Body of @POST /Users/:id/Password@.
+-- | Body of @POST /Users/:id/Password@ (milestone 8b): @NewPw@ (alias
+-- @NewPassword@) is required; @CurrentPw@ (alias @CurrentPassword@) is
+-- optional at the JSON level and enforced by the handler for non-admin
+-- self-changes.
 data PasswordRequest = PasswordRequest
-  { prNewPw :: Text
+  { prNewPw     :: Text
+  , prCurrentPw :: Maybe Text
   }
 
 instance FromJSON PasswordRequest where
-  parseJSON = withObject "PasswordRequest" $ \o ->
-    PasswordRequest <$> o .: "NewPw"
+  parseJSON = withObject "PasswordRequest" $ \o -> do
+    mNew  <- o .:? "NewPw"
+    mNew' <- o .:? "NewPassword"
+    newPw <- case mNew <|> mNew' of
+      Just p  -> pure p
+      Nothing -> fail "missing NewPw"
+    mCur  <- o .:? "CurrentPw"
+    mCur' <- o .:? "CurrentPassword"
+    pure (PasswordRequest newPw (mCur <|> mCur'))
 
 -- | Body of @POST /Users/:id/Permissions@ (milestone 5d):
 -- @{\"AllowedFolders\": [\"1\", ...] | null}@. A missing or null value
@@ -165,11 +177,16 @@ listUsersHandler _captures req = do
   jsonResponse <$> listUsers
 
 -- | @POST /Users@ with @{\"Name\":\"...\",\"Password\":\"...\",\"IsAdmin\"?:bool}@.
--- Admin only; 201 with the created user's public JSON.
+-- Admin only; 201 with the created user's public JSON. The password must
+-- satisfy the configured minimum length (milestone 8b) -> 400 otherwise.
 createUserHandler :: [(Text, Text)] -> Request -> AppM Response
 createUserHandler _captures req = do
   requireAdmin req
   cur <- parseBody req
+  cfg <- asks envConfig
+  case checkPasswordPolicy (configPasswordMinLength cfg) (curPassword cur) of
+    Left e  -> throwError (BadRequest e)
+    Right _ -> pure ()
   u <- createUser (curName cur) (curPassword cur) (curIsAdmin cur)
   pure (responseLBS status201 jsonCT (encode u))
 
@@ -195,15 +212,34 @@ deleteUserHandler captures req = do
       deleteUser i
       pure (responseLBS status204 [] "")
 
--- | @POST /Users/:id/Password@ with @{\"NewPw\":\"...\"}@ — self or admin;
--- responds @{\"status\":\"ok\"}@.
+-- | @POST /Users/:id/Password@ with @{\"NewPw\":\"...\",\"CurrentPw\"?:\"...\"}@
+-- (aliases @NewPassword@/@CurrentPassword@) — self or admin; responds
+-- @{\"status\":\"ok\"}@. Milestone 8b: the new password must satisfy the
+-- configured minimum length (400); a NON-ADMIN changing their OWN
+-- password must supply the correct @CurrentPw@ (403 otherwise); when an
+-- ADMIN changes ANOTHER user's password the target's @MustChangePassword@
+-- flag is set (forced reset), and cleared on a self-change.
 passwordHandler :: [(Text, Text)] -> Request -> AppM Response
 passwordHandler captures req = do
   i <- captureId captures
   requireSelfOrAdmin req i
-  _ <- requireExistingUser i
+  u <- requireExistingUser i
   pr <- parseBody req
+  cfg <- asks envConfig
+  case checkPasswordPolicy (configPasswordMinLength cfg) (prNewPw pr) of
+    Left e  -> throwError (BadRequest e)
+    Right _ -> pure ()
+  mCaller <- currentUser req
+  let callerIsSelf  = maybe False (\c -> userId c == i) mCaller
+      callerIsAdmin = maybe False isAdmin mCaller
+  -- non-admin self-change: verify the current password (403 on mismatch)
+  if callerIsSelf && not callerIsAdmin
+    then case prCurrentPw pr of
+      Just cur | verifyPassword (passwordHash u) cur -> pure ()
+      _ -> throwError (Forbidden "current password required or incorrect")
+    else pure ()
   setPassword i (prNewPw pr)
+  _ <- setMustChangePassword i (callerIsAdmin && not callerIsSelf)
   pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
 -- | @POST /Users/:id/ApiKey@ — self or admin; mints and persists a new API

@@ -1,6 +1,7 @@
 module FMS.Core.Types.User
   ( User(..)
   , toInternalJSON
+  , checkPasswordPolicy
   ) where
 
 import Control.Monad (join)
@@ -27,6 +28,10 @@ import FMS.Core.Types.Policy (UserPolicy, emptyUserPolicy)
 -- Milestone 9 (parental controls + enable/disable) added 'userPolicy'
 -- (defaults to 'emptyUserPolicy') and 'userEnabled' (defaults to 'True'),
 -- so pre-9 @users.json@ files keep loading.
+--
+-- Milestone 8b (password policy) added 'userMustChangePassword'
+-- (defaults to 'False'), set to 'True' when an admin resets another
+-- user's password, so the user is forced to pick a new one.
 data User = User
   { userId       :: !Text
   , userName     :: !Text
@@ -36,7 +41,19 @@ data User = User
   , userAllowedFolders :: !(Maybe [Text])  -- ^ milestone 5d; Nothing = all folders
   , userPolicy   :: !UserPolicy             -- ^ milestone 9; emptyUserPolicy = no restrictions
   , userEnabled  :: !Bool                   -- ^ milestone 9; False = login rejected with 403
+  , userMustChangePassword :: !Bool         -- ^ milestone 8b; True = forced reset
   } deriving (Eq, Show)
+
+-- | Pure password-policy check (milestone 8b): @minLen <= 0@ disables the
+-- policy (always 'Right'); otherwise the password must be at least
+-- @minLen@ characters long (character count, not bytes) or the result is
+-- a 'Left' with an ASCII error message the routes turn into a 400.
+checkPasswordPolicy :: Int -> Text -> Either Text ()
+checkPasswordPolicy minLen pw
+  | minLen <= 0 = Right ()
+  | length (T.unpack pw) >= minLen = Right ()
+  | otherwise = Left ("password must be at least " <> T.pack (show minLen)
+                      <> " characters")
 
 -- | Internal (persistence) JSON: all fields, including the password hash.
 -- The @allowedFolders@ key is optional and defaults to null/Nothing, so
@@ -53,6 +70,7 @@ instance FromJSON User where
       <*> (join <$> o .:? "allowedFolders" .!= Nothing)
       <*> ((join <$> o .:? "policy") .!= emptyUserPolicy)
       <*> (o .:? "enabled" .!= True)
+      <*> (o .:? "mustChangePassword" .!= False)
 
 -- | Public API JSON: no password hash, just whether one is set. Includes
 -- the per-folder access list (milestone 5d) as @AllowedFolders@.
@@ -65,6 +83,7 @@ instance ToJSON User where
     , "AllowedFolders" .= userAllowedFolders u
     , "enabled"       .= userEnabled u          -- milestone 9
     , "Policy"        .= userPolicy u           -- milestone 9
+    , "MustChangePassword" .= userMustChangePassword u  -- milestone 8b
     ]
 
 -- | Internal full JSON (all fields, incl. the password hash) — used by the
@@ -80,4 +99,5 @@ toInternalJSON u = object
   , "allowedFolders" .= userAllowedFolders u
   , "policy"         .= userPolicy u
   , "enabled"        .= userEnabled u
+  , "mustChangePassword" .= userMustChangePassword u
   ]

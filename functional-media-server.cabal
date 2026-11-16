@@ -81,6 +81,11 @@ library
                       FMS.Modules.Playlists.Persistence
                       FMS.Modules.Playlists.Monad
                       FMS.Modules.Playlists.Routes
+                      FMS.Modules.Collections
+                      FMS.Modules.Collections.Types
+                      FMS.Modules.Collections.Persistence
+                      FMS.Modules.Collections.Monad
+                      FMS.Modules.Collections.Routes
                       FMS.Modules.Sessions
                       FMS.Modules.Sessions.Types
                       FMS.Modules.Sessions.Monad

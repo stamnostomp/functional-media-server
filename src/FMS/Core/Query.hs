@@ -7,6 +7,7 @@ module FMS.Core.Query
   , filterByIncludeTypes
   , itemYear
   , filterByYears
+  , typeFilterIncludesBoxSet
   , applyUserDataFilters
   , applyMetadataFilters
   , projectFields
@@ -147,6 +148,16 @@ projectFields fields v = case v of
       wanted = [ T.toCaseFold (T.strip f) | f <- fields, not (T.null (T.strip f)) ]
       keep k = k == Key.fromText "id" || T.toCaseFold (Key.toText k) `elem` wanted
   _ -> v
+
+-- | Pure (milestone 7): does the effective type filter (@type@ or
+-- @includeItemTypes@) include BoxSet, case-insensitively? When it does,
+-- @\/items@ appends the synthesized BoxSet pseudo-items (collections).
+typeFilterIncludesBoxSet :: [(Text, Text)] -> Bool
+typeFilterIncludesBoxSet params =
+  maybe False (\t -> T.toCaseFold (T.strip t) == "boxset") (lookup "type" params)
+  || maybe False (\raw -> "boxset" `elem`
+                    [ T.toCaseFold (T.strip x) | x <- T.splitOn "," raw ])
+               (lookup "includeItemTypes" params)
 
 -- | Pure (milestone 4h): apply the metadata-backed query params @genres@,
 -- @studios@ and @persons@ (comma-separated, case-insensitive) using a

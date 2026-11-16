@@ -47,7 +47,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
 ** TODO Multi-version media (multiple files for one movie, version selection)
 ** DONE Extras: trailers, behind-the-scenes, deleted scenes, featurettes, shorts, theme songs (MediaItem v3 itemExtraType; type=Extra; extra match wins over Episode for video files)
-** TODO Playlists and box sets as first-class virtual items
+** DONE Playlists and box sets as first-class virtual items
+   - [X] playlists: =/Playlists= CRUD + items (m10a)
+   - [X] box sets: =/Collections= CRUD + items (collections.json) + BoxSet pseudo-items in =/items?type=BoxSet= and =/items/boxset-<id>=
 
 * 3. Metadata :feature:
 ** TODO Item model fields: overview, genres, tags, studios, persons, production year, premiere date, ratings (critics/community), community rating, official rating, run time, series linkage (series/season/episode), index numbers
@@ -147,7 +149,7 @@ flipped to DONE in the same commit as the code that implements it.
 * 10. Organization endpoints :feature:
 ** DONE Studios, persons, tags endpoints: =GET /Studios=, =/Persons=, =/Tags= ({Name, ItemCount}; MediaMetadata metaStudios/metaPersons/metaTags parsed from NFO studio/actor/director/person/tag)
    - [X] =GET /Genres= (derived from stored metadata: Name + ItemCount, sorted)
-** TODO Box sets (=/Collections=) create/manage
+** DONE Box sets (=/Collections=) create/manage + =/Collections/:id/Items= (batch {"Ids":[...]} and single-item forms)
 ** DONE Playlists: =/Playlists= CRUD + =/Playlists/:id/Items= add/remove/list (persisted playlists.json)
 ** TODO Custom metadata fields / tags on items
 

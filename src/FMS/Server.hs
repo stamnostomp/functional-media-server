@@ -31,6 +31,7 @@ import FMS.Core.Types.ServerConfig (ServerConfig (..))
 import FMS.Modules.Admin (adminModule, MonadAdmin (..))
 import FMS.Modules.ApiDocs (apiDocsModule)
 import FMS.Modules.Auth (authModule)
+import FMS.Modules.Collections (collectionsModule)
 import FMS.Modules.Images (imagesModule)
 import FMS.Modules.Library (libraryModule)
 import FMS.Modules.Library.State (LibraryState)
@@ -56,6 +57,7 @@ modules =
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
+  , collectionsModule
   , webModule, apiDocsModule
   ]
 

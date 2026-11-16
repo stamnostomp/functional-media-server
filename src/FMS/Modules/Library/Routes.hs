@@ -11,7 +11,7 @@ module FMS.Modules.Library.Routes
 import Control.Concurrent.STM (TVar, readTVarIO)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.HashMap.Strict as HM
 import Data.HashMap.Strict (HashMap)
@@ -29,11 +29,12 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
+import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
 import FMS.Modules.UserData.Monad (MonadUserData (..))
@@ -91,6 +92,12 @@ itemsHandler _captures req = do
   -- (Metadata.Monad -> Library -> Library.Routes).
   mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
   metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+  -- Milestone 7: when the effective type filter includes BoxSet, the
+  -- synthesized BoxSet pseudo-items (collections visible to the
+  -- requester) are appended after the page and counted in the total.
+  boxVals <- if typeFilterIncludesBoxSet qparams
+               then boxSetValuesFor mUser items0
+               else pure []
   let metaLookup = flip HM.lookup metaMap
       items1 = applyMetadataFilters qparams metaLookup items0
       items = case mLookup of
@@ -100,8 +107,8 @@ itemsHandler _captures req = do
       startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
       renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))
   pure (jsonResponse (object
-    [ "Items" .= map renderItem page
-    , "TotalRecordCount" .= total
+    [ "Items" .= (map renderItem page ++ map (projectFields fields) boxVals)
+    , "TotalRecordCount" .= (total + length boxVals)
     , "StartIndex" .= startIndex
     ]))
 
@@ -265,15 +272,35 @@ itemDetailHandler :: [(Text, Text)] -> Request -> AppM Response
 itemDetailHandler captures req =
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
-    Just i  -> do
-      mItem <- getItemWithAccess req i
-      case mItem of
-        Nothing -> throwError (NotFound ("no library item with id " <> i))
-        Just item -> do
-          mUser <- currentUserFromReq req
-          let qparams = queryParams (queryString req)
-          (mLookup, _filterTokens, fields) <- resolveUserQuery qparams mUser
-          pure (jsonResponse (projectFields fields (attachUserData mLookup item (toJSON item))))
+    Just i
+      -- Milestone 7: a "boxset-<colId>" id resolves to the collection's
+      -- pseudo-item; normal ids go through 'getItemWithAccess' unchanged.
+      | isBoxSetId i -> boxSetDetailHandler i req
+      | otherwise -> do
+          mItem <- getItemWithAccess req i
+          case mItem of
+            Nothing -> throwError (NotFound ("no library item with id " <> i))
+            Just item -> do
+              mUser <- currentUserFromReq req
+              let qparams = queryParams (queryString req)
+              (mLookup, _filterTokens, fields) <- resolveUserQuery qparams mUser
+              pure (jsonResponse (projectFields fields (attachUserData mLookup item (toJSON item))))
+
+-- | Milestone 7: @GET \/items\/boxset-<colId>@ — the collection's BoxSet
+-- pseudo-item JSON; 404 when the collection does not exist or is not
+-- visible to the requester (all its items are in denied folders).
+boxSetDetailHandler :: Text -> Request -> AppM Response
+boxSetDetailHandler i req = do
+  cm <- collectionsMap
+  let cid = T.drop (T.length boxSetIdPrefix) i
+  case HM.lookup cid cm of
+    Nothing -> throwError (NotFound ("no library item with id " <> i))
+    Just c  -> do
+      mUser <- currentUserFromReq req
+      visible <- visibleItems mUser <$> listItems
+      if collectionVisibleTo mUser visible c
+        then pure (jsonResponse (boxSetItemValue c))
+        else throwError (NotFound ("no library item with id " <> i))
 
 -- | @GET \/items\/Counts@ — JSON object mapping item Type -> count over
 -- the requester-visible items, e.g. @{\"Movie\":2,\"Episode\":5}@.
@@ -307,6 +334,36 @@ ancestorsHandler captures req =
                   Just (object [ "Name" .= s, "Type" .= ("Series" :: Text) ])
                 _ -> Nothing
           pure (jsonResponse (catMaybes [folderCrumb, seriesCrumb] ++ [toJSON item]))
+
+-- Milestone 7: BoxSet pseudo-items (collections) ------------------------------
+
+-- | The collections map from the typed registry under "collections.map"
+-- (the same key as
+-- FMS.Modules.Collections.Monad.collectionsStateKey; a literal here
+-- because importing Collections.Monad would create a module cycle,
+-- Collections.Monad -> Library -> Library.Routes).
+collectionsMap :: AppM (HashMap Text Collection)
+collectionsMap = do
+  mTv <- getState "collections.map" :: AppM (Maybe (TVar (HashMap Text Collection)))
+  maybe (pure HM.empty) (liftIO . readTVarIO) mTv
+
+-- | Milestone 7: is the collection (box set) visible to the requester?
+-- Admins and anonymous (open mode) see all collections; a restricted
+-- non-admin user sees a box set only when at least one of its item ids is
+-- visible to them.
+collectionVisibleTo :: Maybe User -> [MediaItem] -> Collection -> Bool
+collectionVisibleTo mUser visItems c = case mUser of
+  Just u | not (isAdmin u) ->
+    let visIds = HM.fromList [(itemId i, ()) | i <- visItems]
+    in any (`HM.member` visIds) (colItemIds c)
+  _ -> True
+
+-- | The BoxSet pseudo-item JSON values of all collections visible to the
+-- requester (used by 'itemsHandler' when the type filter includes BoxSet).
+boxSetValuesFor :: Maybe User -> [MediaItem] -> AppM [Value]
+boxSetValuesFor mUser visible = do
+  cm <- collectionsMap
+  pure [ boxSetItemValue c | c <- HM.elems cm, collectionVisibleTo mUser visible c ]
 
 -- | @GET \/Search\/Hints@ — query params @searchTerm@ (alias @term@) and
 -- @limit@ (default 20): an array of @{\"ItemId\",\"Name\",\"Type\"@ plus

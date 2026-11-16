@@ -33,7 +33,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -99,6 +99,9 @@ import FMS.Modules.Metadata.Types (MediaMetadata (..))
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
 import FMS.Modules.Playlists.Types (Playlist (..))
+import qualified FMS.Modules.Collections.Monad as CM
+import FMS.Modules.Collections.Persistence (loadCollections, saveCollections)
+import FMS.Modules.Collections.Types (Collection (..), boxSetIdFor, boxSetItemValue, isBoxSetId)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
   , directPlayable
@@ -1690,5 +1693,41 @@ main = do
     fItems (applyMetadataFilters [("genres", " , ")] mLookup4h fItems)
   check "applyMetadataFilters unknown param is ignored"
     fItems (applyMetadataFilters [("year", "2020")] mLookup4h fItems)
+
+  -- Collections / BoxSets (milestone 7): pure helpers, JSON, boxset
+  -- pseudo-item synthesis, persistence roundtrip.
+  check "collections addItem appends, dedupes, keeps order"
+    ["1", "2", "3"] (CM.addItem "3" (CM.addItem "2" (CM.addItem "1" [])))
+  check "collections addItem of an existing id is identity"
+    ["1", "2"] (CM.addItem "1" ["1", "2"])
+  check "collections removeItem removes all occurrences"
+    ["2"] (CM.removeItem "1" ["1", "2", "1"])
+  let col = Collection "abc" "Favs" ["1", "2"] aNow
+  check "Collection JSON roundtrip" (Just col) (Aeson.decode (Aeson.encode col) :: Maybe Collection)
+  check "Collection JSON keys are PascalCase like Playlist"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode col))
+      [ "\"Id\":", "\"Name\":", "\"ItemIds\":", "\"AddedAt\":" ])
+  check "boxSetIdFor prefixes the collection id" "boxset-abc" (boxSetIdFor "abc")
+  check "isBoxSetId recognises pseudo-item ids" (True, False) (isBoxSetId "boxset-abc", isBoxSetId "1")
+  let bvJson = LBSC.unpack (Aeson.encode (boxSetItemValue col))
+  check "boxSetItemValue has id/title/type/itemCount keys"
+    True (  "\"id\":\"boxset-abc\"" `isInfixOf` bvJson
+         && "\"title\":\"Favs\"" `isInfixOf` bvJson
+         && "\"type\":\"BoxSet\"" `isInfixOf` bvJson
+         && "\"itemCount\":2" `isInfixOf` bvJson )
+  check "typeFilterIncludesBoxSet type=BoxSet" True (typeFilterIncludesBoxSet [("type", "BoxSet")])
+  check "typeFilterIncludesBoxSet is case-insensitive" True (typeFilterIncludesBoxSet [("type", "boxset")])
+  check "typeFilterIncludesBoxSet includeItemTypes=Movie,BoxSet" True
+    (typeFilterIncludesBoxSet [("includeItemTypes", "Movie,BoxSet")])
+  check "typeFilterIncludesBoxSet type=Movie is False" False (typeFilterIncludesBoxSet [("type", "Movie")])
+  check "typeFilterIncludesBoxSet with no params is False" False (typeFilterIncludesBoxSet [])
+  let colFile = "/tmp/fms-test-collections.json"
+      colMap = HM.fromList [("abc", col), ("def", Collection "def" "Other" [] aNow)]
+  saveCollections colFile colMap
+  loadedCols <- loadCollections colFile
+  check "saveCollections/loadCollections roundtrip" colMap loadedCols
+  removeFile colFile
+  check "loadCollections of a missing file is empty"
+    HM.empty =<< loadCollections "/tmp/fms-test-collections-gone.json"
 
   putStrLn "All tests passed."

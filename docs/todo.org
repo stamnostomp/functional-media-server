@@ -65,7 +65,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Download images on scan: primary, backdrop, logo, thumb, banner, art, disc, menu
 ** DONE Chapter images: =GET /items/:id/Chapters= (ffprobe -show_chapters with named chapters, else 10 evenly spaced fallback; {Index,StartPositionTicks,Name?,ImageTag}) + =GET /items/:id/Chapters/:index/Image= (ffmpeg -ss frame, cached JPEG under stateDir/chapters/, ?version= support)
 ** TODO Metadata refresh (manual + scheduled), "replace all metadata" option
-** TODO Manual metadata editing with field locking
+** DONE Manual metadata editing with field locking: =POST /items/:id/metadata= (applyManualPatch; lockedFields skip locked fields), refresh merges via applyProviderMerge so locked fields survive NFO/TMDB refresh; persisted in metadata.json
 ** TODO Identify/failures queue: items with no match, reported in UI/API
 
 * 4. Items API :feature:

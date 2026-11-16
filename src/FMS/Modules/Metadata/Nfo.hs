@@ -56,6 +56,7 @@ movieFromCursor m =
     , metaRuntimeMinutes = readIntField "runtime" m
     , metaProviderIds    = HM.fromList (providerIds m)
     , metaSource         = "nfo"
+    , metaLockedFields   = []                          -- milestone 4k
     }
 
 -- | Text of all child elements with the given local name, stripped, with
@@ -144,6 +145,7 @@ tvShowFromCursor c =
     , metaRuntimeMinutes = Nothing
     , metaProviderIds    = HM.fromList (providerIds c)
     , metaSource         = "nfo"
+    , metaLockedFields   = []                          -- milestone 4k
     }
 
 -- | Year from <premiered>2022-01-01</premiered> (first 4 chars).

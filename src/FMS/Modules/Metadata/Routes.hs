@@ -1,6 +1,7 @@
 module FMS.Modules.Metadata.Routes
   ( metadataHandler
   , refreshMetadataHandler
+  , editMetadataHandler
   , genresHandler
   , studiosHandler
   , personsHandler
@@ -12,19 +13,22 @@ module FMS.Modules.Metadata.Routes
   ) where
 
 import Control.Monad.Except (throwError)
-import Data.Aeson (object, (.=))
+import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (eitherDecode, object, (.=))
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.List (nub, sortOn)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import Network.Wai (Request, Response)
+import qualified Data.Text as T
+import Network.Wai (Request, Response, strictRequestBody)
 
 import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..))
-import FMS.Modules.Metadata.Types (MediaMetadata (..))
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata)
 
 -- | @GET \/items\/:id\/metadata@ — the library item merged with its
 -- cached metadata:
@@ -68,6 +72,30 @@ refreshMetadataHandler captures req =
           case mMeta of
             Nothing -> throwError (NotFound "no metadata found for item")
             Just meta -> pure (jsonResponse meta)
+
+-- | @POST \/items\/:id\/metadata@ — manual metadata edit (milestone 4k,
+-- docs/todo.org section 3). The body is a partial metadata object (any
+-- subset of the editable keys plus @lockedFields@); 'applyManualPatch'
+-- skips fields locked in the stored record and ignores unknown keys.
+-- 200 with the updated metadata JSON, 404 unknown item (also enforces
+-- folder/policy access via 'getItemWithAccess'), 400 on a non-object body.
+editMetadataHandler :: [(Text, Text)] -> Request -> AppM Response
+editMetadataHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just _ -> do
+          body <- liftIO (strictRequestBody req)
+          case eitherDecode body of
+            Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+            Right patch -> do
+              mOld <- getMetadata i
+              let updated = applyManualPatch (fromMaybe emptyMetadata mOld) patch
+              setMetadata i updated
+              pure (jsonResponse updated)
 
 -- | @GET \/Genres@ — 200 JSON array of @{\"Name\": genre, \"ItemCount\": n}@
 -- derived from all stored 'MediaMetadata', grouped by genre and sorted by

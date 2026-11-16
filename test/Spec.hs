@@ -110,7 +110,7 @@ import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..))
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
 import FMS.Modules.Playlists.Types (Playlist (..))
@@ -926,6 +926,7 @@ main = do
         , metaRuntimeMinutes = Just 95
         , metaProviderIds    = HM.fromList [("tmdb", "42"), ("imdb", "tt1234567")]
         , metaSource         = "nfo"
+        , metaLockedFields   = []                         -- milestone 4k
         }
       isLeftE' :: Either String MediaMetadata -> Bool
       isLeftE' (Left _)  = True
@@ -937,7 +938,7 @@ main = do
   check "parseMovieNfo on non-movie XML is Left"
     True (isLeftE' (parseMovieNfo (BSC.pack "<tvshow><title>x</title></tvshow>")))
   let sparseMeta = MediaMetadata
-        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing Nothing HM.empty "nfo"
+        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing Nothing HM.empty "nfo" []
   check "parseMovieNfo with missing fields -> Nothing/empty fields"
     (Right sparseMeta)
     (parseMovieNfo (BSC.pack "<movie><title>Only Title</title></movie>"))
@@ -2430,5 +2431,42 @@ main = do
     [ isLeft' (validateConfig (cfg1d { configCorsOrigins = [] }))
     , isLeft' (validateConfig (cfg1d { configPasswordMinLength = (-1) }))
     , isLeft' (validateConfig (cfg1d { configMaxBitrate = (-5) })) ]
+
+  -- Milestone 4k (manual metadata editing + field locking, docs/todo.org
+  -- section 3): fieldNameFor, applyManualPatch, applyProviderMerge, and the
+  -- pre-4k metadata.json default for lockedFields.
+  let mkPatch kvs = KeyMap.fromList [(Key.fromText k, v) | (k, v) <- kvs]
+      base4k = emptyMetadata { metaTitle = Just "Old Title", metaGenres = ["Drama"], metaLockedFields = ["title"] }
+  check "fieldNameFor maps known keys case-insensitively, rejects others"
+    [Just "title", Just "genres", Just "officialRating", Nothing, Nothing]
+    [ fieldNameFor "Title", fieldNameFor "GENRES", fieldNameFor "officialRating"
+    , fieldNameFor "source", fieldNameFor "bogus" ]
+  check "applyManualPatch sets unlocked fields, skips locked ones"
+    (base4k { metaGenres = ["Horror"], metaYear = Just 1999 })
+    (applyManualPatch base4k (mkPatch
+      [ ("genres", Aeson.toJSON (["Horror"] :: [T.Text]))
+      , ("title", Aeson.toJSON ("New" :: T.Text))    -- locked: skipped
+      , ("year", Aeson.toJSON (1999 :: Int))
+      ]))
+  check "applyManualPatch ignores unknown keys"
+    base4k (applyManualPatch base4k (mkPatch [("bogus", Aeson.toJSON (1 :: Int))]))
+  check "applyManualPatch lockedFields key is always settable"
+    (base4k { metaLockedFields = ["title", "genres"] })
+    (applyManualPatch base4k (mkPatch [("lockedFields", Aeson.toJSON (["title", "genres"] :: [T.Text]))]))
+  check "applyManualPatch JSON null clears a Maybe field"
+    (emptyMetadata { metaOverview = Nothing })
+    (applyManualPatch (emptyMetadata { metaOverview = Just "x" }) (mkPatch [("overview", Aeson.Null)]))
+  check "applyProviderMerge keeps locked old fields, takes new elsewhere, carries locks"
+    (emptyMetadata { metaTitle = Just "Old Title", metaOverview = Just "New plot"
+                   , metaGenres = ["Action"], metaLockedFields = ["title"] })
+    (applyProviderMerge base4k (emptyMetadata
+      { metaTitle = Just "Prov Title", metaOverview = Just "New plot", metaGenres = ["Action"] }))
+  check "MediaMetadata FromJSON without lockedFields defaults to [] (pre-4k metadata.json)"
+    []
+    (metaLockedFields (either (const emptyMetadata) id
+      (Aeson.eitherDecode "{\"title\":\"x\"}" :: Either String MediaMetadata)))
+  check "MediaMetadata JSON roundtrip carries lockedFields"
+    (Just (base4k { metaLockedFields = ["year"] }))
+    (Aeson.decode (Aeson.encode (base4k { metaLockedFields = ["year"] })) :: Maybe MediaMetadata)
 
   putStrLn "All tests passed."

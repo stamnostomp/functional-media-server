@@ -6,7 +6,8 @@ module FMS.Modules.Metadata
 import FMS.Core.Module (Module (..), Segment (..), get, post)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState)
 import FMS.Modules.Metadata.Routes
-  ( genresHandler
+  ( editMetadataHandler
+  , genresHandler
   , metadataHandler
   , personsHandler
   , refreshMetadataHandler
@@ -32,6 +33,7 @@ metadataModule =
         , get  [Lit "Persons"] personsHandler      -- milestone 4h
         , get  [Lit "Tags"] tagsHandler            -- milestone 4h
         , get  [Lit "items", Capture "id", Lit "metadata"] metadataHandler
+        , post [Lit "items", Capture "id", Lit "metadata"] editMetadataHandler          -- milestone 4k
         , post [Lit "items", Capture "id", Lit "metadata", Lit "refresh"] refreshMetadataHandler
         ]
     }

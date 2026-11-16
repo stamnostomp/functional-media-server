@@ -25,7 +25,7 @@ import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..))
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyProviderMerge)
 
 -- | Namespaced key under which the metadata module stashes its
 -- @TVar (HashMap Text MediaMetadata)@ in the typed registry
@@ -81,11 +81,21 @@ instance MonadMetadata AppM where
         nfoMeta <- readNfoMetadata item
         case nfoMeta of
           Just meta -> do
-            setMetadata itemIdent meta
-            pure (Just meta)
+            merged <- mergeWithStored itemIdent meta
+            setMetadata itemIdent merged
+            pure (Just merged)
           -- Milestone 4c: no usable NFO -> remote provider fallback (TMDB),
           -- keyed by the item's title, only when an API key is configured.
           Nothing -> refreshFromTmdb itemIdent item
+
+-- | Milestone 4k: merge a freshly parsed provider record over the stored
+-- one so that fields the user locked (the old record's 'metaLockedFields')
+-- survive a refresh ('applyProviderMerge'). With nothing stored yet the
+-- fresh record is used as-is.
+mergeWithStored :: Text -> MediaMetadata -> AppM MediaMetadata
+mergeWithStored itemIdent fresh = do
+  mOld <- getMetadata itemIdent
+  pure (maybe fresh (\old -> applyProviderMerge old fresh) mOld)
 
 -- | Read and parse the item's NFO sidecar. 'Nothing' when the file is
 -- missing, unreadable, or malformed (a malformed file is logged, then the
@@ -150,11 +160,12 @@ refreshFromTmdb itemIdent item = do
           logInfo ("metadata: TMDB has no results for \"" <> itemTitle item <> "\"")
           pure Nothing
         Right (top : _) -> do
-          let meta = tmdbResultToMetadata top
-          setMetadata itemIdent meta
+          let fresh = tmdbResultToMetadata top
+          merged <- mergeWithStored itemIdent fresh
+          setMetadata itemIdent merged
           logInfo ("metadata: \"" <> itemTitle item <> "\" matched TMDB id "
                    <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
-          pure (Just meta)
+          pure (Just merged)
 
 -- | Map a TMDB search hit onto the stored 'MediaMetadata' shape. Fields
 -- TMDB search results do not carry (genres, runtime) stay empty; the id
@@ -177,6 +188,7 @@ tmdbResultToMetadata r =
     , metaRuntimeMinutes = Nothing
     , metaProviderIds    = HM.singleton "tmdb" (T.pack (show (tmdbId r)))
     , metaSource         = "tmdb"
+    , metaLockedFields   = []                          -- milestone 4k
     }
 
 -- | The metadata TVar, creating and registering it on first use (the

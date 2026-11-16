@@ -78,6 +78,8 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
+import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
+import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
@@ -1997,5 +1999,32 @@ main = do
                            , KeyMap.member "Message" o )
         _ -> (False, False, False))
       <$> (Aeson.decode (Aeson.encode (le 1)) :: Maybe Aeson.Value))
+
+  -- Milestone 12 (webhooks): eventMatches matrix + Webhook JSON + webhooks.json.
+  check "eventMatches: empty list matches everything"
+    [True, True] (map (eventMatches []) ["PlaybackStart", "anything"])
+  check "eventMatches: \"*\" matches everything"
+    [True, True] (map (eventMatches ["*"]) ["PlaybackStart", "Test"])
+  check "eventMatches: case-insensitive membership"
+    [True, False] (map (eventMatches ["playbackstart", "LibraryChanged"]) ["PlaybackStart", "UserDataSaved"])
+  check "eventMatches: no match"
+    False (eventMatches ["PlaybackStart"] "LibraryChanged")
+  let w1 = Webhook "aa11" "http://example.com/hook" ["PlaybackStart", "*"] True (Just "s3cret") aNow
+      w2 = Webhook "bb22" "http://example.com/other" [] False Nothing aNow
+  check "Webhook JSON roundtrip"
+    (Just w1) (Aeson.decode (Aeson.encode w1) :: Maybe Webhook)
+  check "Webhook FromJSON defaults for missing optional fields"
+    (Just ([], True, Nothing))
+    ((\w -> (whEvents w, whEnabled w, whSecret w)) <$>
+      (Aeson.decode (LBSC.pack "{\"Id\":\"x\",\"Url\":\"http://u\",\"AddedAt\":\"2024-01-01T00:00:00Z\"}")
+        :: Maybe Webhook))
+  let whFile = "/tmp/fms-test-webhooks.json"
+      whMap = HM.fromList [("aa11", w1), ("bb22", w2)]
+  saveWebhooks whFile whMap
+  loadedWh <- loadWebhooks whFile
+  check "saveWebhooks/loadWebhooks roundtrip" whMap loadedWh
+  missingWh <- loadWebhooks "/tmp/fms-test-webhooks-does-not-exist.json"
+  check "loadWebhooks of a missing file is empty" HM.empty missingWh
+  removeFile whFile
 
   putStrLn "All tests passed."

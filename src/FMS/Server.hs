@@ -48,6 +48,7 @@ import FMS.Modules.Socket (socketFallback, socketModule, socketServerApp)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Stats (statsModule)
 import FMS.Modules.UserData (userDataModule)
+import FMS.Modules.Webhooks (webhooksModule)
 import FMS.Modules.System (systemModule)
 import FMS.Modules.Stream (streamModule)
 import FMS.Modules.Subtitles (subtitlesModule)
@@ -65,6 +66,7 @@ modules =
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
   , collectionsModule, socketModule
   , devicesModule
+  , webhooksModule
   , webModule, apiDocsModule
   ]
 

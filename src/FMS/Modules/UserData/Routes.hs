@@ -29,6 +29,7 @@ import FMS.Modules.Library (MonadLibrary (..))
 -- module), so importing it here does not create a cycle.
 import FMS.Modules.Library.Routes (itemsQueryResponse)
 import FMS.Modules.Socket (broadcastSocket)
+import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.UserData.Monad
   ( MonadUserData (..)
   , markPlayed
@@ -117,6 +118,11 @@ updateUserDataHandler captures req = do
         Right merged -> do
           ud <- updateUserData uid iid (const merged)
           _ <- broadcastSocket "UserDataSaved" (object   -- milestone 8
+                 [ "UserId"   .= uid
+                 , "ItemId"   .= iid
+                 , "UserData" .= toJSON ud
+                 ])
+          fireWebhooks "UserDataSaved" (object   -- milestone 12
                  [ "UserId"   .= uid
                  , "ItemId"   .= iid
                  , "UserData" .= toJSON ud

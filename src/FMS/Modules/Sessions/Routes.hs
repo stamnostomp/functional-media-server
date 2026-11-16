@@ -16,6 +16,7 @@ import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (resolveToken))
 import FMS.Modules.Socket (broadcastSocket)
+import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.Library (MonadLibrary (..))
 import FMS.Modules.Sessions.Monad (MonadSessions (..))
 
@@ -113,6 +114,7 @@ playingHandler _captures req = do
           let pos = fromMaybe 0 (plPositionSeconds pr)
           s <- startSession (plItemId pr) (userId <$> mUser) pos
           _ <- broadcastSocket "PlaybackStart" (toJSON s)   -- milestone 8
+          fireWebhooks "PlaybackStart" (toJSON s)           -- milestone 12
           pure (jsonResponse s)
 
 -- | @POST /Sessions/Playing/Progress@ — update position/pause of a live
@@ -130,6 +132,7 @@ progressReportHandler _captures req = do
         Nothing -> throwError (NotFound ("no active session with id " <> prSessionId pr))
         Just s  -> do
           _ <- broadcastSocket "PlaybackProgress" (toJSON s)   -- milestone 8
+          fireWebhooks "PlaybackProgress" (toJSON s)           -- milestone 12
           pure (jsonResponse s)
 
 -- | @POST /Sessions/Playing/Ping@ — heartbeat: bumps LastPingAt so the
@@ -163,6 +166,11 @@ stoppedHandler _captures req = do
         Just _ -> do
           stopSession (stSessionId sr) (stPositionSeconds sr)
           _ <- broadcastSocket "PlaybackStop" (object   -- milestone 8
+                 [ "ItemId"          .= stItemId sr
+                 , "PlaySessionId"   .= stSessionId sr
+                 , "PositionSeconds" .= fromMaybe 0 (stPositionSeconds sr)
+                 ])
+          fireWebhooks "PlaybackStop" (object   -- milestone 12
                  [ "ItemId"          .= stItemId sr
                  , "PlaySessionId"   .= stSessionId sr
                  , "PositionSeconds" .= fromMaybe 0 (stPositionSeconds sr)

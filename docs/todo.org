@@ -162,7 +162,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Scheduled tasks: =GET /ScheduledTasks=, =POST .../:id/Run=, =POST .../:id/Enable=; 10s scheduler thread; default tasks library-rescan 300s / metadata-refresh 3600s / acid-checkpoint 600s
 ** DONE Server logs endpoint + log levels: in-memory ring buffer (cap 500, "system.logbuf") fed by MonadLog; =GET /System/Logs= (file list) + =GET /System/Logs/Log?startIndex&limit= (newest-first envelope); =FMS_LOG_LEVEL= (debug/info/warn/error) gates printing, buffer ungated
 ** DONE Branding + startup wizard state: =GET/POST /Branding/Configuration= {LoginDisclaimer, CustomCss, SplashscreenEnabled}, persisted in config.json, reloaded at boot
-** TODO Notifications and webhooks (=/Webhooks=) on item added/playback events
+** DONE Webhooks: =/Webhooks= CRUD + =POST /Webhooks/:id/Test=; webhooks.json; fires PlaybackStart/Progress/Stop, LibraryChanged, UserDataSaved as JSON {Event,Data,Timestamp,ServerId} (X-Webhook-Secret header when set, 5s timeout, forked non-blocking); event subscription filter incl. "*"
 ** TODO Plugin system architecture (install/list/enable plugins) — see [[file:modules.org][modules.org]]
 
 * 12. Live TV and DLNA (low priority) :feature:

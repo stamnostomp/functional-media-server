@@ -40,6 +40,7 @@ import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetIte
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
 import FMS.Modules.Socket (broadcastSocket)
+import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.UserData.Monad (MonadUserData (..))
 import FMS.Modules.UserData.Types (UserData)
 
@@ -178,6 +179,7 @@ rescanHandler :: [(Text, Text)] -> Request -> AppM Response
 rescanHandler _captures _req = do
   rescanLibrary
   _ <- broadcastSocket "LibraryChanged" (object [])
+  fireWebhooks "LibraryChanged" (object [])   -- milestone 12
   pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
 -- Media folders (milestone 2c) -------------------------------------------------

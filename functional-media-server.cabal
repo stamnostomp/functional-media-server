@@ -93,6 +93,11 @@ library
                       FMS.Modules.Devices.Persistence
                       FMS.Modules.Devices.Monad
                       FMS.Modules.Devices.Routes
+                      FMS.Modules.Webhooks
+                      FMS.Modules.Webhooks.Types
+                      FMS.Modules.Webhooks.Persistence
+                      FMS.Modules.Webhooks.Monad
+                      FMS.Modules.Webhooks.Routes
                       FMS.Modules.Sessions
                       FMS.Modules.Sessions.Types
                       FMS.Modules.Sessions.Monad

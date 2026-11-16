@@ -24,7 +24,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
   ( Method, ResponseHeaders
-  , status204, status400, status401, status404, status429, status500
+  , status204, status400, status401, status403, status404, status429, status500
   )
 import Network.Socket (SockAddr (..), hostAddressToTuple)
 import Network.Wai
@@ -292,6 +292,7 @@ errorResponse reqId err =
   let (st, msg) = case err of
         BadRequest     m -> (status400, m)
         Unauthorized   m -> (status401, m)
+        Forbidden      m -> (status403, m)
         NotFound       m -> (status404, m)
         TooManyRequests m -> (status429, m)
         InternalError  m -> (status500, m)

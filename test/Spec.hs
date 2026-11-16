@@ -4,6 +4,8 @@ import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
@@ -31,7 +33,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
+import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -1432,5 +1434,63 @@ main = do
   check "applyItemQuery type=Episode still works alongside 4e params"
     (4, [other, epA, epB, epC])
     (applyItemQuery [("type", "Episode"), ("recursive", "false")] showItems)
+
+  -- User-scoped filters + fields projection (milestone 5e).
+  let ud5eRec played fav pos = UserData played fav pos 0 Nothing
+      ud5eMap = HM.fromList
+        [ ("1", ud5eRec True True (Just 30))    -- played + favorite + resumable-but-played
+        , ("2", ud5eRec False False (Just 5))   -- resumable
+        , ("3", ud5eRec True False Nothing)     -- played, not resumable
+        ]
+      ud5eLookup = flip HM.lookup ud5eMap
+      uItems = [qi "1" "a", qi "2" "b", qi "3" "c", qi "4" "d"]
+  check "applyUserDataFilters IsPlayed" [qi "1" "a", qi "3" "c"]
+    (applyUserDataFilters ["IsPlayed"] ud5eLookup uItems)
+  check "applyUserDataFilters Unplayed (missing record = unplayed)"
+    [qi "2" "b", qi "4" "d"] (applyUserDataFilters ["Unplayed"] ud5eLookup uItems)
+  check "applyUserDataFilters IsFavorite" [qi "1" "a"]
+    (applyUserDataFilters ["IsFavorite"] ud5eLookup uItems)
+  check "applyUserDataFilters IsLiked is an alias of IsFavorite" [qi "1" "a"]
+    (applyUserDataFilters ["IsLiked"] ud5eLookup uItems)
+  check "applyUserDataFilters IsResumable (pos>0 and not played)" [qi "2" "b"]
+    (applyUserDataFilters ["IsResumable"] ud5eLookup uItems)
+  check "applyUserDataFilters tokens are case-insensitive" [qi "1" "a", qi "3" "c"]
+    (applyUserDataFilters ["isplayed"] ud5eLookup uItems)
+  check "applyUserDataFilters tokens are ANDed" [qi "1" "a"]
+    (applyUserDataFilters ["IsPlayed", "IsFavorite"] ud5eLookup uItems)
+  check "applyUserDataFilters unknown token ignored" uItems
+    (applyUserDataFilters ["IsSomething"] ud5eLookup uItems)
+  check "applyUserDataFilters empty list is identity" uItems
+    (applyUserDataFilters [] ud5eLookup uItems)
+  let iv = Aeson.toJSON (qi "1" "movie")
+      lookupObj v = case v of
+        Aeson.Object o -> KeyMap.toList o
+        _              -> []
+      keysOf v = map (Key.toText . fst) (lookupObj v)
+  check "projectFields keeps requested keys (case-insensitive) plus id"
+    ["id", "title"] (keysOf (projectFields ["Title"] iv))
+  check "projectFields empty list is identity" iv (projectFields [] iv)
+  check "projectFields keeps only id when nothing requested matches"
+    ["id"] (keysOf (projectFields ["nope"] iv))
+  check "projectFields non-object passthrough"
+    (Aeson.String "hello") (projectFields ["id"] (Aeson.String "hello"))
+  check "projectFields result still encodes"
+    True (not (null (LBSC.unpack (Aeson.encode (projectFields ["type"] iv)))))
+  let attached = attachUserData (Just ud5eLookup) (qi "1" "movie") iv
+  check "attachUserData adds a UserData key with the looked-up record"
+    (Just (Aeson.toJSON (ud5eRec True True (Just 30))))
+    (case attached of
+       Aeson.Object o -> KeyMap.lookup (Key.fromText "UserData") o
+       _              -> Nothing)
+  check "attachUserData defaults to emptyUserData for unknown items"
+    (Just (Aeson.toJSON emptyUserData))
+    (case attachUserData (Just ud5eLookup) (qi "9" "zz") iv of
+       Aeson.Object o -> KeyMap.lookup (Key.fromText "UserData") o
+       _              -> Nothing)
+  check "attachUserData without a lookup is identity"
+    iv (attachUserData Nothing (qi "1" "movie") iv)
+  check "attachUserData + projectFields: fields=UserData keeps the record"
+    [ "UserData", "id" ]
+    (keysOf (projectFields ["userdata"] (attachUserData (Just ud5eLookup) (qi "1" "movie") iv)))
 
   putStrLn "All tests passed."

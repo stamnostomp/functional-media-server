@@ -24,12 +24,13 @@ import System.IO (hPutStrLn, stderr)
 
 import FMS.Core.Types.Config (Config)
 
--- | Application errors; the router maps these to HTTP 400 / 401 / 404 / 500
--- (see docs/modules.org).
+-- | Application errors; the router maps these to HTTP 400 / 401 / 403 /
+-- 404 / 429 / 500 (see docs/modules.org).
 data AppError
   = NotFound Text
   | BadRequest Text
   | Unauthorized Text
+  | Forbidden Text      -- ^ milestone 5e; maps to HTTP 403
   | TooManyRequests Text  -- ^ milestone 14a rate limiting; maps to HTTP 429
   | InternalError Text
   deriving (Show, Eq)

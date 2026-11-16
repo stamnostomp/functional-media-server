@@ -7,6 +7,9 @@ module FMS.Core.Query
   , filterByIncludeTypes
   , itemYear
   , filterByYears
+  , applyUserDataFilters
+  , projectFields
+  , attachUserData
   , showsFromItems
   , sortEpisodes
   , sortItems
@@ -14,6 +17,9 @@ module FMS.Core.Query
   , applyItemQuery
   ) where
 
+import Data.Aeson (ToJSON (..), Value (..))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.List (sortBy)
@@ -26,6 +32,7 @@ import Network.HTTP.Types (urlDecode)
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 
 -- | Decode a WAI query string (@[(ByteString, Maybe ByteString)]@, see
 -- 'Network.Wai.queryString') into @[(Text, Text)]@: percent-decode with
@@ -95,6 +102,61 @@ filterByYears mParam = case mParam of
     where
       years = catMaybes [ readMaybe (T.unpack (T.strip t))
                         | t <- T.splitOn "," raw, not (T.null (T.strip t)) ]
+
+-- | Pure (milestone 5e): apply the @filters=@ tokens (comma-separated,
+-- case-insensitive, whitespace trimmed) against a per-item 'UserData'
+-- lookup. All tokens are ANDed; unknown tokens are ignored; an empty
+-- token list is the identity. Semantics: IsPlayed -> 'udPlayed',
+-- Unplayed -> not 'udPlayed', IsFavorite/IsLiked -> 'udFavorite',
+-- IsResumable -> a 'udPlaybackPosition' > 0 on an unplayed item. A
+-- missing 'UserData' record counts as not-played / not-favorite / not
+-- resumable.
+applyUserDataFilters
+  :: [Text]                     -- ^ filter tokens
+  -> (Text -> Maybe UserData)   -- ^ itemId -> 'UserData' lookup
+  -> [MediaItem]
+  -> [MediaItem]
+applyUserDataFilters tokens lookupItems = case tokens of
+  [] -> id
+  ts -> filter (\i -> all (matches (lookupItems (itemId i))) ts)
+  where
+    matches mUd tok = case T.toCaseFold (T.strip tok) of
+      "isplayed"    -> maybe False udPlayed mUd
+      "unplayed"    -> not (maybe False udPlayed mUd)
+      "isfavorite"  -> maybe False udFavorite mUd
+      "isliked"     -> maybe False udFavorite mUd
+      "isresumable" -> case mUd of
+        Just u  -> maybe False (> 0) (udPlaybackPosition u) && not (udPlayed u)
+        Nothing -> False
+      _             -> True   -- unknown token ignored
+
+-- | Pure (milestone 5e): keep only the requested object keys of an item
+-- JSON value, compared case-insensitively against the object's keys;
+-- the @id@ key is always kept. An empty fields list is the identity and
+-- a non-object value is returned unchanged.
+projectFields :: [Text] -> Value -> Value
+projectFields fields v = case v of
+  Object o
+    | null wanted -> v
+    | otherwise   -> Object (KeyMap.filterWithKey (\k _ -> keep k) o)
+    where
+      wanted = [ T.toCaseFold (T.strip f) | f <- fields, not (T.null (T.strip f)) ]
+      keep k = k == Key.fromText "id" || T.toCaseFold (Key.toText k) `elem` wanted
+  _ -> v
+
+-- | Pure (milestone 5e): attach a @UserData@ key to an item's JSON object
+-- when a lookup is given (the looked-up record, or 'emptyUserData' when
+-- the item has none). Without a lookup, or on a non-object value, the
+-- value is returned unchanged.
+attachUserData
+  :: Maybe (Text -> Maybe UserData)  -- ^ itemId -> 'UserData' lookup
+  -> MediaItem
+  -> Value
+  -> Value
+attachUserData mLookup item v = case (mLookup, v) of
+  (Just lk, Object o) ->
+    Object (KeyMap.insert (Key.fromText "UserData") (toJSON (fromMaybe emptyUserData (lk (itemId item)))) o)
+  _ -> v
 
 -- | Pure (milestone 4d): the series present in the library as
 -- @(name, episodeCount)@, sorted by name. Only @Episode@ items with a

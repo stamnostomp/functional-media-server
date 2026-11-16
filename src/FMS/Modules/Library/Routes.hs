@@ -11,6 +11,7 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson.Key as Key
+import qualified Data.HashMap.Strict as HM
 import Data.List (sortBy)
 import Data.Map.Strict (toAscList)
 import qualified Data.Map.Strict as Map
@@ -25,11 +26,14 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
-import FMS.Core.Query (applyItemQuery, filterBySeries, queryParams, searchItems, showsFromItems, sortEpisodes)
+import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
+import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
+import FMS.Modules.UserData.Monad (MonadUserData (..))
+import FMS.Modules.UserData.Types (UserData)
 
 -- | The library API (docs/modules.org): list all items, fetch one by id,
 -- trigger a rescan, and (milestone 2c) manage the media folders
@@ -56,25 +60,65 @@ listItemsHandler _captures req = do
   jsonResponse <$> (visibleItems mUser <$> listItems)
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
--- query params @search@, @sortBy@, @sortOrder@, @startIndex@, @limit@ over
--- the whole library, applied by the pure helpers in "FMS.Core.Query".
--- Responds with the envelope
--- @{\"Items\": [...], \"TotalRecordCount\": n, \"StartIndex\": s}@ where
--- the count is taken /before/ pagination. Invalid integer params are
--- ignored (defaults apply). Unlike @GET \/library@, which stays a plain
--- JSON array, this is the paginated envelope Jellyfin clients expect.
+-- query params @search@/@searchTerm@, @sortBy@, @sortOrder@, @startIndex@,
+-- @limit@ over the whole library, applied by the pure helpers in
+-- "FMS.Core.Query". Milestone 5e: @userId@ scopes the query to that
+-- user's 'UserData' (attached as a @UserData@ key on each item),
+-- @filters=IsPlayed,Unplayed,...@ filters on it (applied BEFORE the
+-- count/pagination so @TotalRecordCount@ reflects them), and @fields=a,b@
+-- projects the item JSON keys. A non-admin user asking for another
+-- user's @userId@ gets 403. Responds with the envelope
+-- @{\"Items\": [...], \"TotalRecordCount\": n, \"StartIndex\": s}@.
+-- Invalid integer params are ignored (defaults apply). Unlike
+-- @GET \/library@, which stays a plain JSON array, this is the paginated
+-- envelope Jellyfin clients expect.
 itemsHandler :: [(Text, Text)] -> Request -> AppM Response
 itemsHandler _captures req = do
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items0 <- visibleItems mUser <$> listItems
   let qparams = queryParams (queryString req)
+  (mLookup, filterTokens, fields) <- resolveUserQuery qparams mUser
+  let items = case mLookup of
+        Just lk | not (null filterTokens) -> applyUserDataFilters filterTokens lk items0
+        _                                 -> items0
       (total, page) = applyItemQuery qparams items
       startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
+      renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))
   pure (jsonResponse (object
-    [ "Items" .= page
+    [ "Items" .= map renderItem page
     , "TotalRecordCount" .= total
     , "StartIndex" .= startIndex
     ]))
+
+-- | Milestone 5e shared helper for @\/items@ and @\/items\/:id@: resolve the
+-- optional @userId@ query param into a 'UserData' lookup (403 'Forbidden'
+-- when a non-admin user asks for a different user's data; admins and
+-- anonymous/open mode pass), and parse @filters@ (comma-separated tokens)
+-- and @fields@ (comma-separated keys) from the query string.
+resolveUserQuery
+  :: [(Text, Text)]
+  -> Maybe User
+  -> AppM ( Maybe (Text -> Maybe UserData)  -- UserData lookup by itemId
+            , [Text]                         -- filters tokens
+            , [Text]                         -- fields keys
+            )
+resolveUserQuery qparams mUser = do
+  mLookup <- case lookup "userId" qparams of
+    Nothing -> pure Nothing
+    Just uid -> do
+      case mUser of
+        Just u | not (isAdmin u), userId u /= uid ->
+          throwError (Forbidden ("userId " <> uid <> " does not match the authenticated user"))
+        _ -> pure ()
+      ud <- listUserData uid
+      pure (Just (flip HM.lookup ud))
+  let filterTokens = case lookup "filters" qparams of
+        Just f  -> [ t | t <- T.splitOn "," f, not (T.null (T.strip t)) ]
+        Nothing -> []
+      fields = case lookup "fields" qparams of
+        Just f | not (T.null (T.strip f)) -> T.splitOn "," f
+        _                                 -> []
+  pure (mLookup, filterTokens, fields)
 
 -- | @GET \/library\/:id@ — one item, or 404. Milestone 5d: 401 when the
 -- requester's token belongs to a non-admin user without access to the
@@ -199,9 +243,22 @@ captureName captures =
 
 -- | @GET \/items\/:id@ — one item, or 404. Same behaviour as
 -- @GET \/library\/:id@ (milestone 5d folder enforcement via
--- 'getItemWithAccess'), on the Jellyfin-shaped /items path.
+-- 'getItemWithAccess'), on the Jellyfin-shaped /items path. Milestone 5e:
+-- @userId@ attaches that user's @UserData@ to the item JSON (403 for a
+-- non-admin asking for another user) and @fields@ projects the keys.
 itemDetailHandler :: [(Text, Text)] -> Request -> AppM Response
-itemDetailHandler = itemHandler
+itemDetailHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          mUser <- currentUserFromReq req
+          let qparams = queryParams (queryString req)
+          (mLookup, _filterTokens, fields) <- resolveUserQuery qparams mUser
+          pure (jsonResponse (projectFields fields (attachUserData mLookup item (toJSON item))))
 
 -- | @GET \/items\/Counts@ — JSON object mapping item Type -> count over
 -- the requester-visible items, e.g. @{\"Movie\":2,\"Episode\":5}@.

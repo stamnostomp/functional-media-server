@@ -8,6 +8,7 @@ import Control.Applicative ((<|>))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HM
+import Data.List (nub)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -46,6 +47,9 @@ movieFromCursor m =
     { metaTitle          = firstText "title" m
     , metaOverview       = firstText "overview" m
     , metaGenres         = allTexts "genre" m
+    , metaStudios        = allTexts "studio" m          -- milestone 4h
+    , metaPersons        = personNames m                -- milestone 4h
+    , metaTags           = allTexts "tag" m             -- milestone 4h
     , metaYear           = readIntField "year" m
     , metaRating         = readDoubleField "rating" m
     , metaRuntimeMinutes = readIntField "runtime" m
@@ -68,6 +72,27 @@ allTexts name c =
 -- | Text of the first non-empty child element with the given local name.
 firstText :: Text -> Cursor -> Maybe Text
 firstText name c = listToMaybe (allTexts name c)
+
+-- | Milestone 4h: text of the @childName@ sub-elements of every @parent@
+-- child element, e.g. all @<name>@ values inside @<actor>@ elements.
+allChildTexts :: Text -> Text -> Cursor -> [Text]
+allChildTexts parent childName c =
+  [ T.strip t
+  | e <- child c >>= laxElement parent
+  , n <- child e >>= laxElement childName
+  , t <- child n >>= content
+  , not (T.null (T.strip t))
+  ]
+
+-- | Milestone 4h: all person names of an NFO element — @<actor><name>..@
+-- and @<person><name>..@ (nested) plus plain @<director>..</director>@
+-- text (Kodi NFO conventions), deduplicated, order preserved.
+personNames :: Cursor -> [Text]
+personNames c =
+  nub (  allChildTexts "actor" "name" c
+      ++ allTexts "director" c
+      ++ allChildTexts "person" "name" c
+      )
 
 -- | Read a child element's text as an 'Int' (@<year>2020</year>@,
 -- @<runtime>95</runtime>@); unparseable text is 'Nothing'.
@@ -109,6 +134,9 @@ tvShowFromCursor c =
     { metaTitle          = firstText "title" c
     , metaOverview       = firstText "overview" c
     , metaGenres         = allTexts "genre" c
+    , metaStudios        = allTexts "studio" c          -- milestone 4h
+    , metaPersons        = personNames c                -- milestone 4h
+    , metaTags           = allTexts "tag" c             -- milestone 4h
     , metaYear           = readIntField "year" c <|> premieredYear c
     , metaRating         = readDoubleField "rating" c
     , metaRuntimeMinutes = Nothing

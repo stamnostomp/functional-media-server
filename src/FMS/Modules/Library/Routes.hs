@@ -8,11 +8,13 @@ module FMS.Modules.Library.Routes
   , specialFeaturesHandler
   ) where
 
+import Control.Concurrent.STM (TVar, readTVarIO)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.HashMap.Strict as HM
+import Data.HashMap.Strict (HashMap)
 import Data.List (sortBy)
 import Data.Map.Strict (toAscList)
 import qualified Data.Map.Strict as Map
@@ -26,13 +28,14 @@ import Network.Wai (Request, Response, queryString, responseLBS, strictRequestBo
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError(..), AppM)
-import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf)
+import FMS.Core.Monad (AppError(..), AppM, getState)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, specialFeaturesOf)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
+import FMS.Modules.Metadata.Types (MediaMetadata)
 import FMS.Modules.UserData.Monad (MonadUserData (..))
 import FMS.Modules.UserData.Types (UserData)
 
@@ -65,10 +68,12 @@ listItemsHandler _captures req = do
 -- @limit@ over the whole library, applied by the pure helpers in
 -- "FMS.Core.Query". Milestone 5e: @userId@ scopes the query to that
 -- user's 'UserData' (attached as a @UserData@ key on each item),
--- @filters=IsPlayed,Unplayed,...@ filters on it (applied BEFORE the
--- count/pagination so @TotalRecordCount@ reflects them), and @fields=a,b@
--- projects the item JSON keys. A non-admin user asking for another
--- user's @userId@ gets 403. Responds with the envelope
+-- @filters=IsPlayed,Unplayed,...@ filters on it, and @fields=a,b@ projects
+-- the item JSON keys. Milestone 4h: @genres@/@studios@/@persons@ filter on
+-- the stored metadata. The user-data and metadata filters are applied
+-- BEFORE the count/pagination so @TotalRecordCount@ reflects them. A
+-- non-admin user asking for another user's @userId@ gets 403. Responds
+-- with the envelope
 -- @{\"Items\": [...], \"TotalRecordCount\": n, \"StartIndex\": s}@.
 -- Invalid integer params are ignored (defaults apply). Unlike
 -- @GET \/library@, which stays a plain JSON array, this is the paginated
@@ -79,9 +84,18 @@ itemsHandler _captures req = do
   items0 <- visibleItems mUser <$> listItems
   let qparams = queryParams (queryString req)
   (mLookup, filterTokens, fields) <- resolveUserQuery qparams mUser
-  let items = case mLookup of
-        Just lk | not (null filterTokens) -> applyUserDataFilters filterTokens lk items0
-        _                                 -> items0
+  -- Milestone 4h: the metadata cache map keyed by itemId. Read straight
+  -- from the typed registry under "metadata.cache" (the same key as
+  -- FMS.Modules.Metadata.Monad.metadataStateKey) because importing
+  -- FMS.Modules.Metadata.Monad here would create a module cycle
+  -- (Metadata.Monad -> Library -> Library.Routes).
+  mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+  metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+  let metaLookup = flip HM.lookup metaMap
+      items1 = applyMetadataFilters qparams metaLookup items0
+      items = case mLookup of
+        Just lk | not (null filterTokens) -> applyUserDataFilters filterTokens lk items1
+        _                                 -> items1
       (total, page) = applyItemQuery qparams items
       startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
       renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))

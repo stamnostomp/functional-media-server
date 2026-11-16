@@ -8,6 +8,7 @@ module FMS.Core.Query
   , itemYear
   , filterByYears
   , applyUserDataFilters
+  , applyMetadataFilters
   , projectFields
   , attachUserData
   , showsFromItems
@@ -34,6 +35,7 @@ import System.FilePath (takeDirectory)
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Modules.Metadata.Types (MediaMetadata (..))
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 
 -- | Decode a WAI query string (@[(ByteString, Maybe ByteString)]@, see
@@ -145,6 +147,32 @@ projectFields fields v = case v of
       wanted = [ T.toCaseFold (T.strip f) | f <- fields, not (T.null (T.strip f)) ]
       keep k = k == Key.fromText "id" || T.toCaseFold (Key.toText k) `elem` wanted
   _ -> v
+
+-- | Pure (milestone 4h): apply the metadata-backed query params @genres@,
+-- @studios@ and @persons@ (comma-separated, case-insensitive) using a
+-- per-itemId 'MediaMetadata' lookup. An item matches a param when ANY of
+-- the param tokens equals (case-insensitively) ANY entry of the
+-- corresponding metadata list; different params are ANDed together;
+-- absent/empty params are the identity; an item with NO stored metadata
+-- matches only absent/empty params.
+applyMetadataFilters
+  :: [(Text, Text)]                 -- ^ query params
+  -> (Text -> Maybe MediaMetadata)  -- ^ itemId -> metadata lookup
+  -> [MediaItem]
+  -> [MediaItem]
+applyMetadataFilters params lookupMeta =
+  foldl applyParam id
+        [ ("genres", metaGenres), ("studios", metaStudios), ("persons", metaPersons) ]
+  where
+    applyParam acc (key, getField) = case tokensOf (lookup key params) of
+      []   -> acc
+      toks -> \xs -> filter (\i -> case lookupMeta (itemId i) of
+                              Just m  -> any (`elem` toks) (map T.toLower (getField m))
+                              Nothing -> False)
+                           (acc xs)
+    tokensOf Nothing     = []
+    tokensOf (Just raw)  =
+      [ T.toLower (T.strip t) | t <- T.splitOn "," raw, not (T.null (T.strip t)) ]
 
 -- | Pure (milestone 5e): attach a @UserData@ key to an item's JSON object
 -- when a lookup is given (the looked-up record, or 'emptyUserData' when

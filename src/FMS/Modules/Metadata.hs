@@ -8,7 +8,10 @@ import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState)
 import FMS.Modules.Metadata.Routes
   ( genresHandler
   , metadataHandler
+  , personsHandler
   , refreshMetadataHandler
+  , studiosHandler
+  , tagsHandler
   )
 
 -- | The metadata module (docs/roadmap.org milestone 4, docs/todo.org
@@ -25,6 +28,9 @@ metadataModule =
     , moduleInit = loadMetadataIntoState
     , moduleRoutes =
         [ get  [Lit "Genres"] genresHandler
+        , get  [Lit "Studios"] studiosHandler      -- milestone 4h
+        , get  [Lit "Persons"] personsHandler      -- milestone 4h
+        , get  [Lit "Tags"] tagsHandler            -- milestone 4h
         , get  [Lit "items", Capture "id", Lit "metadata"] metadataHandler
         , post [Lit "items", Capture "id", Lit "metadata", Lit "refresh"] refreshMetadataHandler
         ]

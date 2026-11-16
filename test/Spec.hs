@@ -33,7 +33,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems, specialFeaturesOf)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -94,7 +94,7 @@ import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (genresFromMetadata)
+import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
@@ -864,6 +864,9 @@ main = do
         { metaTitle          = Just "Test Movie"
         , metaOverview       = Just "A test overview."
         , metaGenres         = ["Action", "Sci-Fi"]
+        , metaStudios        = []
+        , metaPersons        = []
+        , metaTags           = []
         , metaYear           = Just 2020
         , metaRating         = Just 7.5
         , metaRuntimeMinutes = Just 95
@@ -880,7 +883,7 @@ main = do
   check "parseMovieNfo on non-movie XML is Left"
     True (isLeftE' (parseMovieNfo (BSC.pack "<tvshow><title>x</title></tvshow>")))
   let sparseMeta = MediaMetadata
-        (Just "Only Title") Nothing [] Nothing Nothing Nothing HM.empty "nfo"
+        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing HM.empty "nfo"
   check "parseMovieNfo with missing fields -> Nothing/empty fields"
     (Right sparseMeta)
     (parseMovieNfo (BSC.pack "<movie><title>Only Title</title></movie>"))
@@ -1623,5 +1626,69 @@ main = do
     [exSameDir, exOneBelow] (specialFeaturesOf mainItem sfItems)
   check "specialFeaturesOf from another dir finds only extras there (itself)"
     [exFar] (specialFeaturesOf exFar sfItems)
+
+  -- Studios / persons / tags (milestone 4h, docs/todo.org section 3).
+  let sm studios persons tags =
+        sparseMeta { metaStudios = studios, metaPersons = persons, metaTags = tags }
+  check "studiosFromMetadata groups/counts/sorts"
+    [("StudioA",2),("StudioB",1)]
+    (studiosFromMetadata [sm ["StudioB","StudioA"] [] [], sm ["StudioA"] [] [], sm [] [] []])
+  check "personsFromMetadata groups/counts/sorts"
+    [("Alice",2),("Bob",1)]
+    (personsFromMetadata [sm [] ["Bob","Alice"] [], sm [] ["Alice"] [], sm [] [] []])
+  check "tagsFromMetadata groups/counts/sorts"
+    [("tag1",1),("tag2",2)]
+    (tagsFromMetadata [sm [] [] ["tag2"], sm [] [] ["tag2","tag1"]])
+  check "studiosFromMetadata on empty input is []" [] (studiosFromMetadata [])
+  let nfo4h = BSC.pack (unlines
+        [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        , "<movie>"
+        , "  <title>T</title>"
+        , "  <studio>StudioA</studio>"
+        , "  <studio>StudioB</studio>"
+        , "  <actor><name>Alice</name><role>R</role></actor>"
+        , "  <actor><name>Bob</name></actor>"
+        , "  <director>Dir Person</director>"
+        , "  <tag>tag1</tag>"
+        , "</movie>" ])
+  case parseMovieNfo nfo4h of
+    Left _ -> check "parseMovieNfo parses studio/actor/director/tag fields" True False
+    Right m -> do
+      check "parseMovieNfo <studio> list" ["StudioA","StudioB"] (metaStudios m)
+      check "parseMovieNfo persons = actor names + director"
+        ["Alice","Bob","Dir Person"] (metaPersons m)
+      check "parseMovieNfo <tag> list" ["tag1"] (metaTags m)
+  check "MediaMetadata JSON roundtrip keeps the new fields"
+    (Just (sm ["S"] ["P"] ["t"]))
+    (Aeson.decode (Aeson.encode (sm ["S"] ["P"] ["t"])) :: Maybe MediaMetadata)
+  check "MediaMetadata FromJSON of pre-4h JSON (no new keys) defaults to []"
+    (Just ([], [], []))
+    ((\m -> (metaStudios m, metaPersons m, metaTags m))
+       <$> (Aeson.decode (LBSC.pack "{\"title\":\"x\",\"genres\":[\"Drama\"],\"source\":\"nfo\"}")
+            :: Maybe MediaMetadata))
+  let metaOf4h studios genres persons =
+        sparseMeta { metaStudios = studios, metaGenres = genres, metaPersons = persons }
+      mMap4h = HM.fromList
+        [ ("1", metaOf4h ["StudioA"] ["Action"] ["Alice"])
+        , ("2", metaOf4h ["StudioB"] ["Drama"] ["Bob"])
+        ]
+      mLookup4h = flip HM.lookup mMap4h
+      fItems = [qi "1" "a", qi "2" "b", qi "3" "c"]   -- item 3 has no metadata
+  check "applyMetadataFilters genres=ACTION (case-insensitive), no-metadata item excluded"
+    [qi "1" "a"] (applyMetadataFilters [("genres", "ACTION")] mLookup4h fItems)
+  check "applyMetadataFilters genres=action,drama (ANY token intersects)"
+    [qi "1" "a", qi "2" "b"] (applyMetadataFilters [("genres", "action,drama")] mLookup4h fItems)
+  check "applyMetadataFilters studios=studiob" [qi "2" "b"]
+    (applyMetadataFilters [("studios", "studiob")] mLookup4h fItems)
+  check "applyMetadataFilters persons=Bob" [qi "2" "b"]
+    (applyMetadataFilters [("persons", "Bob")] mLookup4h fItems)
+  check "applyMetadataFilters different params are ANDed"
+    [] (applyMetadataFilters [("genres", "action"), ("studios", "StudioB")] mLookup4h fItems)
+  check "applyMetadataFilters empty params are the identity"
+    fItems (applyMetadataFilters [] mLookup4h fItems)
+  check "applyMetadataFilters blank param value is the identity"
+    fItems (applyMetadataFilters [("genres", " , ")] mLookup4h fItems)
+  check "applyMetadataFilters unknown param is ignored"
+    fItems (applyMetadataFilters [("year", "2020")] mLookup4h fItems)
 
   putStrLn "All tests passed."

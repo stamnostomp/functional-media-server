@@ -2,7 +2,13 @@ module FMS.Modules.Metadata.Routes
   ( metadataHandler
   , refreshMetadataHandler
   , genresHandler
+  , studiosHandler
+  , personsHandler
+  , tagsHandler
   , genresFromMetadata
+  , studiosFromMetadata
+  , personsFromMetadata
+  , tagsFromMetadata
   ) where
 
 import Control.Monad.Except (throwError)
@@ -68,21 +74,57 @@ refreshMetadataHandler captures req =
 -- name (docs/todo.org section 10, milestone 10a). Always 200; with no
 -- metadata stored the array is empty.
 genresHandler :: [(Text, Text)] -> Request -> AppM Response
-genresHandler _captures _req = do
+genresHandler _captures _req = nameCountsResponse genresFromMetadata
+
+-- | @GET \/Studios@ — same shape as 'genresHandler', over 'metaStudios'
+-- (milestone 4h).
+studiosHandler :: [(Text, Text)] -> Request -> AppM Response
+studiosHandler _captures _req = nameCountsResponse studiosFromMetadata
+
+-- | @GET \/Persons@ — same shape as 'genresHandler', over 'metaPersons'
+-- (milestone 4h).
+personsHandler :: [(Text, Text)] -> Request -> AppM Response
+personsHandler _captures _req = nameCountsResponse personsFromMetadata
+
+-- | @GET \/Tags@ — same shape as 'genresHandler', over 'metaTags'
+-- (milestone 4h).
+tagsHandler :: [(Text, Text)] -> Request -> AppM Response
+tagsHandler _captures _req = nameCountsResponse tagsFromMetadata
+
+-- | Shared shape of the name-count endpoints: 200 array of
+-- @{\"Name\": v, \"ItemCount\": n}@ sorted by name.
+nameCountsResponse :: ([MediaMetadata] -> [(Text, Int)]) -> AppM Response
+nameCountsResponse countFn = do
   metas <- listAllMetadata
   pure (jsonResponse
-    [ object ["Name" .= g, "ItemCount" .= n]
-    | (g, n) <- genresFromMetadata metas
+    [ object ["Name" .= v, "ItemCount" .= n]
+    | (v, n) <- countFn metas
     ])
 
--- | Pure: group the genres of the given metadata records into
--- @(genre, item count)@ pairs, sorted by genre name. Each item counts
--- once per genre (duplicate genre entries inside one record are nubbed);
--- empty input -> []. Used by 'genresHandler' and unit-tested directly.
-genresFromMetadata :: [MediaMetadata] -> [(Text, Int)]
-genresFromMetadata metas =
+-- | Pure: group a list-valued metadata field into @(value, item count)@
+-- pairs, sorted by value. Each record counts once per distinct value
+-- (duplicates inside one record are nubbed); empty input -> [].
+countMetadataField :: (MediaMetadata -> [Text]) -> [MediaMetadata] -> [(Text, Int)]
+countMetadataField get metas =
   sortOn fst (HM.toList counts)
   where
     counts :: HashMap Text Int
     counts = foldl (\m g -> HM.insertWith (+) g 1 m) HM.empty
-               (concatMap (nub . metaGenres) metas)
+               (concatMap (nub . get) metas)
+
+-- | Pure: the genres of the given metadata records as @(genre, count)@,
+-- sorted by genre name. Used by 'genresHandler' and unit-tested directly.
+genresFromMetadata :: [MediaMetadata] -> [(Text, Int)]
+genresFromMetadata = countMetadataField metaGenres
+
+-- | Pure (milestone 4h): studios, see 'genresFromMetadata'.
+studiosFromMetadata :: [MediaMetadata] -> [(Text, Int)]
+studiosFromMetadata = countMetadataField metaStudios
+
+-- | Pure (milestone 4h): persons, see 'genresFromMetadata'.
+personsFromMetadata :: [MediaMetadata] -> [(Text, Int)]
+personsFromMetadata = countMetadataField metaPersons
+
+-- | Pure (milestone 4h): tags, see 'genresFromMetadata'.
+tagsFromMetadata :: [MediaMetadata] -> [(Text, Int)]
+tagsFromMetadata = countMetadataField metaTags

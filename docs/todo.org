@@ -66,7 +66,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Identify/failures queue: items with no match, reported in UI/API
 
 * 4. Items API :feature:
-** TODO =GET /Items= with filters: genres, person, studio, exclusive
+** TODO =GET /Items= with filters: exclusive
+   - [X] genres=, studios=, persons= (comma lists, case-insensitive ANY-intersect, AND across params; from metadata.json, applied before count/pagination)
    - [X] recursive (accepted, flat library), includeItemTypes, years (match-when-present; MediaItem has no year field yet), search + searchTerm alias, type, series, sortBy/sortOrder, startIndex/limit
    - [X] =GET /items?search=...= (case-insensitive title match)
 ** DONE Sorting (sortBy + sortOrder) + pagination (startIndex/limit)
@@ -144,7 +145,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Watch history
 
 * 10. Organization endpoints :feature:
-** TODO Studios, persons, tags endpoints (=/Studios=, =/Persons=)
+** DONE Studios, persons, tags endpoints: =GET /Studios=, =/Persons=, =/Tags= ({Name, ItemCount}; MediaMetadata metaStudios/metaPersons/metaTags parsed from NFO studio/actor/director/person/tag)
    - [X] =GET /Genres= (derived from stored metadata: Name + ItemCount, sorted)
 ** TODO Box sets (=/Collections=) create/manage
 ** DONE Playlists: =/Playlists= CRUD + =/Playlists/:id/Items= add/remove/list (persisted playlists.json)

@@ -16,6 +16,9 @@ data MediaMetadata = MediaMetadata
   { metaTitle          :: Maybe Text          -- ^ <title>
   , metaOverview       :: Maybe Text          -- ^ <overview> / plot
   , metaGenres         :: [Text]              -- ^ all <genre> elements
+  , metaStudios        :: [Text]              -- ^ all <studio> elements (milestone 4h)
+  , metaPersons        :: [Text]              -- ^ actor/director/person names (milestone 4h)
+  , metaTags           :: [Text]              -- ^ all <tag> elements (milestone 4h)
   , metaYear           :: Maybe Int           -- ^ <year>
   , metaRating         :: Maybe Double        -- ^ <rating>
   , metaRuntimeMinutes :: Maybe Int           -- ^ <runtime> in minutes
@@ -28,6 +31,9 @@ instance ToJSON MediaMetadata where
     [ "title"          .= metaTitle m
     , "overview"       .= metaOverview m
     , "genres"         .= metaGenres m
+    , "studios"        .= metaStudios m
+    , "persons"        .= metaPersons m
+    , "tags"           .= metaTags m
     , "year"           .= metaYear m
     , "rating"         .= metaRating m
     , "runtimeMinutes" .= metaRuntimeMinutes m
@@ -41,6 +47,9 @@ instance FromJSON MediaMetadata where
       <$> o .:? "title"
       <*> o .:? "overview"
       <*> o .:? "genres" .!= []
+      <*> o .:? "studios" .!= []      -- milestone 4h; absent in pre-4h metadata.json
+      <*> o .:? "persons" .!= []
+      <*> o .:? "tags" .!= []
       <*> o .:? "year"
       <*> o .:? "rating"
       <*> o .:? "runtimeMinutes"

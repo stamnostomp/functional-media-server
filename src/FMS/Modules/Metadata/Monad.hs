@@ -45,6 +45,7 @@ class Monad m => MonadMetadata m where
   setMetadata     :: Text -> MediaMetadata -> m ()
   refreshMetadata :: Text -> m (Maybe MediaMetadata)
   listAllMetadata :: m [MediaMetadata]   -- ^ every stored metadata record (milestone 10a /Genres)
+  listAllMetadataMap :: m (HashMap Text MediaMetadata)  -- ^ the whole cache keyed by itemId (milestone 4h /items filters)
 
 instance MonadMetadata AppM where
   getMetadata itemIdent = do
@@ -56,6 +57,10 @@ instance MonadMetadata AppM where
   listAllMetadata = do
     tv <- ensureMetadataTVar
     liftIO (HM.elems <$> readTVarIO tv)
+
+  listAllMetadataMap = do
+    tv <- ensureMetadataTVar
+    liftIO (readTVarIO tv)
 
   setMetadata itemIdent meta = do
     cfg <- asks envConfig
@@ -153,13 +158,19 @@ refreshFromTmdb itemIdent item = do
 
 -- | Map a TMDB search hit onto the stored 'MediaMetadata' shape. Fields
 -- TMDB search results do not carry (genres, runtime) stay empty; the id
--- goes into 'metaProviderIds' under @\"tmdb\"@.
+-- goes into 'metaProviderIds' under @\"tmdb\"@. Milestone 4h: studios /
+-- persons / tags also stay empty here -- the search endpoint does not
+-- return them (that would need the credits / production_companies
+-- endpoints); NFO-sourced metadata carries them instead.
 tmdbResultToMetadata :: TmdbResult -> MediaMetadata
 tmdbResultToMetadata r =
   MediaMetadata
     { metaTitle          = Just (tmdbTitle r)
     , metaOverview       = tmdbOverview r
     , metaGenres         = []
+    , metaStudios        = []
+    , metaPersons        = []
+    , metaTags           = []
     , metaYear           = tmdbReleaseYear r
     , metaRating         = tmdbVoteAverage r
     , metaRuntimeMinutes = Nothing

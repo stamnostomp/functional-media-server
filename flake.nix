@@ -34,9 +34,46 @@
         );
     in
     {
-      packages = forAllSystems (pkgs: {
-        default = (mkHaskellPackages pkgs).functional-media-server;
-      });
+      packages = forAllSystems (pkgs:
+        let
+          fmsPkg = (mkHaskellPackages pkgs).functional-media-server;
+        in
+        {
+          default = fmsPkg;
+
+          # Container image (docs/todo.org section 16, milestone 13/16):
+          # the wrapped fms binary (ffmpeg already on its PATH via the
+          # wrapProgram in mkHaskellPackages), plus ffmpeg/coreutils/bash.
+          # /bin/fms is guaranteed by extraCommands regardless of how
+          # dockerTools merges the contents' bin directories.
+          docker = pkgs.dockerTools.buildLayeredImage {
+            name = "functional-media-server";
+            tag = "latest";
+            contents = [
+              fmsPkg
+              pkgs.ffmpeg
+              pkgs.coreutils
+              pkgs.bash
+            ];
+            extraCommands = ''
+              mkdir -p bin var/lib/fms media
+              if [ ! -e bin/fms ]; then
+                ln -s ${fmsPkg}/bin/fms bin/fms
+              fi
+            '';
+            config = {
+              Cmd = [ "/bin/fms" ];
+              Env = [
+                "PATH=/bin"
+                "MEDIA_LIBRARY_PATH=/media"
+                "MEDIA_SERVER_PORT=8096"
+                "FMS_STATE_DIR=/var/lib/fms"
+              ];
+              ExposedPorts = { "8096/tcp" = { }; };
+              WorkingDir = "/var/lib/fms";
+            };
+          };
+        });
 
       devShells = forAllSystems (pkgs: {
         default =

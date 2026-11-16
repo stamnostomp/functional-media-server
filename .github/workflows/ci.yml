@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Build the server (runs the test suite in checkPhase)
+        run: nix build .#default
+
+      - name: Run the cabal test suite
+        run: nix develop --command cabal test
+
+      - name: Evaluate the docker image derivation
+        run: nix eval .#packages.x86_64-linux.docker.drvPath

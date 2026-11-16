@@ -88,6 +88,7 @@ library
                       FMS.Modules.Admin.Tasks
                       FMS.Modules.Admin.Scheduler
                       FMS.Modules.Admin.Routes
+                      FMS.Modules.Web
     build-depends:    base >=4.14 && <5
                     , mtl
                     , transformers

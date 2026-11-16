@@ -155,7 +155,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO DLNA server profile (low priority)
 
 * 13. Clients :feature:
-** TODO Serve the official jellyfin-web static client (or a minimal web UI of our own)
+** DONE Minimal built-in web client: GET / and /web serve an inline vanilla-JS page (search /items, grid with thumbs, <video> play via /stream/:id, HLS + metadata links)
+** TODO Serve the official jellyfin-web static client instead
 ** TODO API must be compatible enough for jellyfin-web to browse/play
 ** TODO Chromecast/AirPlay are client-side; ensure casting endpoints work
 
@@ -174,6 +175,6 @@ flipped to DONE in the same commit as the code that implements it.
 * 16. Testing, packaging, ops :techdebt:
 ** TODO Unit tests for Range parsing, NFO parsing, ID stability across restarts
 ** TODO Integration tests against the API (items, playback info, auth flow)
-** TODO CI pipeline (nix build + cabal test on push)
-** TODO Docker image + docker-compose
+** DONE CI pipeline: .github/workflows/ci.yml (nix build .#default + cabal test + docker drvPath eval on push/PR to main)
+** DONE Docker: nix packages.docker (dockerTools image, /bin/fms + ffmpeg, port 8096) + docker-compose.yml
 ** TODO Haddock docs on all exports

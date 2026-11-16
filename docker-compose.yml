@@ -1,0 +1,19 @@
+# functional-media-server (docs/todo.org section 16, milestone 13/16).
+#
+# The image is built with nix, not with a Dockerfile:
+#   nix build .#docker
+#   docker load < result
+# Then:
+#   docker compose up -d
+services:
+  fms:
+    image: functional-media-server:latest
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./media:/media:ro
+      - ./var:/var/lib/fms
+    environment:
+      # FMS_ADMIN_PASSWORD=change-me   # bootstrap admin password (optional)
+      FMS_SERVER_NAME: Functional Media Server
+    restart: unless-stopped

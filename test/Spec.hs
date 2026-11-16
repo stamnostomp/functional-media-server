@@ -102,6 +102,7 @@ import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
 import FMS.Modules.Sessions.Types (PlaySession (..))
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
 import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..))
+import FMS.Modules.Web (webPageHtml)
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -1161,5 +1162,16 @@ main = do
   check "ScheduledTask JSON uses the PascalCase keys"
     True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode stk))
       ["\"Id\":", "\"Name\":", "\"IntervalSeconds\":", "\"Enabled\":", "\"LastRun\":", "\"LastResult\":"])
+
+  -- Web client (milestone 13/16, docs/todo.org section 13): the embedded
+  -- single-page HTML must contain the player, the search query, and the
+  -- playback/thumb/HLS/metadata links, and must be ASCII-only.
+  check "web page contains a <video> player" True ("<video" `BSC.isInfixOf` LBS.toStrict webPageHtml)
+  check "web page queries /items?search=" True ("/items?search=" `BSC.isInfixOf` LBS.toStrict webPageHtml)
+  check "web page plays via /stream/" True ("/stream/" `BSC.isInfixOf` LBS.toStrict webPageHtml)
+  check "web page links thumbs, HLS and metadata"
+    True (all (`BSC.isInfixOf` LBS.toStrict webPageHtml)
+      ["/items/'+it.id+'/thumb", "/videos/'+it.id+'/main.m3u8", "/items/'+it.id+'/metadata"])
+  check "web page is pure ASCII" True (LBS.all (<= 0x7F) webPageHtml)
 
   putStrLn "All tests passed."

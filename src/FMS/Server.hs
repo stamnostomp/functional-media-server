@@ -43,6 +43,7 @@ import FMS.Modules.Stream (streamModule)
 import FMS.Modules.Subtitles (subtitlesModule)
 import FMS.Modules.Thumbs (thumbsModule)
 import FMS.Modules.Transcode (transcodeModule)
+import FMS.Modules.Web (webModule)
 
 -- | The active module list. Adding a module never changes the core
 -- (docs/modules.org).
@@ -52,6 +53,7 @@ modules =
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
+  , webModule
   ]
 
 -- | Boot the server: build the environment, register the runtime state

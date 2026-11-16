@@ -4,25 +4,32 @@ module FMS.Modules.Library.Routes
   ) where
 
 import Control.Monad.Except (throwError)
-import Data.Aeson (object, (.=))
+import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.Wai (Request, Response, queryString)
+import Network.HTTP.Types (status201)
+import Network.Wai (Request, Response, queryString, responseLBS, strictRequestBody)
 import Text.Read (readMaybe)
 
-import FMS.Core.Module (Route, Segment(..), get, jsonResponse, post)
+import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
 import FMS.Core.Query (applyItemQuery, queryParams)
+import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 
 -- | The library API (docs/modules.org): list all items, fetch one by id,
--- trigger a rescan.
+-- trigger a rescan, and (milestone 2c) manage the media folders
+-- (@/Library/MediaFolders@, Jellyfin-shaped).
 libraryRoutes :: [Route]
 libraryRoutes =
-  [ get  [Lit "library"] listItemsHandler
-  , get  [Lit "library", Capture "id"] itemHandler
-  , post [Lit "library", Lit "rescan"] rescanHandler
+  [ get    [Lit "library"] listItemsHandler
+  , get    [Lit "library", Capture "id"] itemHandler
+  , post   [Lit "library", Lit "rescan"] rescanHandler
+  , get    [Lit "Library", Lit "MediaFolders"] listFoldersHandler
+  , post   [Lit "Library", Lit "MediaFolders"] addFolderHandler
+  , delete [Lit "Library", Lit "MediaFolders", Capture "id"] removeFolderHandler
   ]
 
 -- | @GET \/library@ — JSON array of all items.
@@ -61,8 +68,62 @@ itemHandler captures _req =
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> pure (jsonResponse item)
 
--- | @POST \/library\/rescan@ — rescan the library, then @{\"status\":\"ok\"}@.
+-- | @POST \/library\/rescan@ — rescan the library (all media folders),
+-- then @{\"status\":\"ok\"}@.
 rescanHandler :: [(Text, Text)] -> Request -> AppM Response
 rescanHandler _captures _req = do
   rescanLibrary
   pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
+
+-- Media folders (milestone 2c) -------------------------------------------------
+
+-- | Body of @POST /Library/MediaFolders@:
+-- @{\"Name\": \"Movies\", \"Path\": \"/mnt/movies\", \"Type\"?: \"movies\"@}@.
+data AddFolderRequest = AddFolderRequest
+  { afrName :: Text
+  , afrPath :: FilePath
+  , afrType :: Maybe Text
+  }
+
+instance FromJSON AddFolderRequest where
+  parseJSON = withObject "AddFolderRequest" $ \o ->
+    AddFolderRequest
+      <$> o .:  "Name"
+      <*> o .:  "Path"
+      <*> o .:? "Type"
+
+-- | @GET \/Library\/MediaFolders@ — 200 JSON array of the folders
+-- (Id/Name/Path/Type), sorted by id.
+listFoldersHandler :: [(Text, Text)] -> Request -> AppM Response
+listFoldersHandler _captures _req =
+  jsonResponse <$> listFolders
+
+-- | @POST \/Library\/MediaFolders@ — create a folder (the path is created
+-- if missing, the type defaults to \"mixed\"), rescan so its items appear,
+-- then 201 with the folder JSON. Bad JSON -> 400.
+addFolderHandler :: [(Text, Text)] -> Request -> AppM Response
+addFolderHandler _captures req = do
+  body <- liftIO (strictRequestBody req)
+  case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right afr -> do
+      f <- addFolder (afrName afr) (afrPath afr) (fromMaybe "mixed" (afrType afr))
+      rescanLibrary
+      pure (responseLBS status201 [("Content-Type", "application/json")] (encode f))
+
+-- | @DELETE \/Library\/MediaFolders\/:id@ — remove the folder and its items
+-- from acid-state; 200 @{\"status\":\"ok\"}@, 404 for an unknown id, 400
+-- when trying to remove the last remaining folder.
+removeFolderHandler :: [(Text, Text)] -> Request -> AppM Response
+removeFolderHandler captures _req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just fid -> do
+      folders <- listFolders
+      if length folders <= 1 && any ((== fid) . folderId) folders
+        then throwError (BadRequest "cannot remove the last media folder")
+        else do
+          ok <- removeFolder fid
+          if ok
+            then pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
+            else throwError (NotFound ("no media folder with id " <> fid))

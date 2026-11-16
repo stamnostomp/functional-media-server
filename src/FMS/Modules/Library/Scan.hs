@@ -61,10 +61,11 @@ mimeFor p = case map toLower (takeExtension p) of
   _       -> "application/octet-stream"
 
 -- | Build a 'MediaItem' from a path: size + mtime from the filesystem,
--- title = base name, mime from the extension. The id is left empty ("")
--- -- the acid-state 'RegisterItem' event assigns the stable id.
-itemFromPath :: FilePath -> IO MediaItem
-itemFromPath p = do
+-- title = base name, mime from the extension, tagged with the id of the
+-- media folder it was scanned from (milestone 2c). The id is left empty
+-- ("") -- the acid-state 'RegisterItem' event assigns the stable id.
+itemFromPath :: Text -> FilePath -> IO MediaItem
+itemFromPath folder p = do
   size  <- getFileSize p
   mtime <- getModificationTime p
   pure MediaItem
@@ -74,6 +75,7 @@ itemFromPath p = do
     , itemSize    = size
     , itemMime    = mimeFor p
     , itemAddedAt = mtime
+    , itemFolder  = folder
     }
 
 -- | Pure: is @canon@ already in the visited set? Used to detect circular

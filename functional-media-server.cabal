@@ -32,6 +32,7 @@ library
                       FMS.Core.Range
                       FMS.Core.Process
                       FMS.Core.Types.Config
+                      FMS.Core.Types.MediaFolder
                       FMS.Core.Types.MediaItem
                       FMS.Core.Types.Progress
                       FMS.Core.Types.ServerConfig
@@ -69,6 +70,7 @@ library
                       FMS.Modules.Library.Routes
                       FMS.Modules.Library.Scan
                       FMS.Modules.Library.State
+                      FMS.Modules.Library.Folders
                       FMS.Modules.Playback
                       FMS.Modules.Playback.Types
                       FMS.Modules.Playback.Probe
@@ -131,6 +133,7 @@ test-suite fms-test
                     , time
                     , acid-state
                     , safecopy
+                    , cereal
                     , process
                     , unix
                     , aeson

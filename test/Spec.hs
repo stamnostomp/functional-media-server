@@ -12,6 +12,8 @@ import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
+import Data.SafeCopy (safeGet, safePut)
+import Data.Serialize (runGet, runPut)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory
@@ -29,10 +31,11 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment(..))
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, paginate, queryParams, searchItems, sortItems)
+import FMS.Core.Query (applyItemQuery, filterByFolder, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
-import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Core.Types.MediaFolder (MediaFolder (..))
+import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), migrateMediaItem)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..)
@@ -47,6 +50,7 @@ import FMS.Core.Types.User (User(..), toInternalJSON)
 import FMS.Modules.Auth.Monad (hashPassword, verifyPassword)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
+import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
 import FMS.Modules.Library.Scan
   ( diffScan
   , isCircular
@@ -169,7 +173,7 @@ main = do
   check "scan finds only media file paths"
     (sort [scanDir </> "Movies" </> "a.mp4", scanDir </> "song.mp3"])
     (sort scanned)
-  scannedItems <- mapM itemFromPath scanned
+  scannedItems <- mapM (itemFromPath "1") scanned
   check "scan titles are base names" ["a", "song"] (sort (map (T.unpack . itemTitle) scannedItems))
   check "scan sizes" [11, 11] (sort (map itemSize scannedItems))
   check "scan mimes" ["audio/mpeg", "video/mp4"] (sort (map (T.unpack . itemMime) scannedItems))
@@ -260,6 +264,7 @@ main = do
         , itemSize    = 42
         , itemMime    = "video/mp4"
         , itemAddedAt = now
+        , itemFolder  = "1"
         }
   st1 <- openLocalStateFrom acidDir initialLibraryState
   id1 <- update st1 (RegisterItem "/x.mp4" testItem)
@@ -551,6 +556,7 @@ main = do
         , itemSize    = size
         , itemMime    = "video/mp4"
         , itemAddedAt = t
+        , itemFolder  = "1"
         }
       items4 =
         [ mkItem 1 "alpha"      300 t3
@@ -1173,5 +1179,54 @@ main = do
     True (all (`BSC.isInfixOf` LBS.toStrict webPageHtml)
       ["/items/'+it.id+'/thumb", "/videos/'+it.id+'/main.m3u8", "/items/'+it.id+'/metadata"])
   check "web page is pure ASCII" True (LBS.all (<= 0x7F) webPageHtml)
+
+  -- Media folders (milestone 2c, docs/todo.org section 2): folder JSON,
+  -- folders.json persistence, nextFolderId, the /items?libraryId= filter,
+  -- and the SafeCopy v0->v1 migration of MediaItem (docs/acid-state.org).
+  let mf  = MediaFolder "2" "Movies" "/tmp/movies" "movies"
+      mf1 = MediaFolder "1" "Media" "/media" "mixed"
+      mfMap = HM.fromList [("1", mf1), ("2", mf)]
+      foldersFile = "/tmp/fms-test-folders.json"
+  check "MediaFolder JSON roundtrip"
+    (Just mf) (Aeson.decode (Aeson.encode mf) :: Maybe MediaFolder)
+  check "MediaFolder JSON uses Id/Name/Path/Type keys"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode mf))
+      ["\"Id\":", "\"Name\":", "\"Path\":", "\"Type\":"])
+  saveFolders foldersFile mfMap
+  loadedFolders <- loadFolders foldersFile
+  check "folders save/load roundtrip" mfMap loadedFolders
+  check "loadFolders of a missing file is empty"
+    HM.empty =<< loadFolders "/tmp/fms-test-folders-gone.json"
+  removeFile foldersFile
+  check "nextFolderId after numeric ids 1,2" "3" (nextFolderId mfMap)
+  check "nextFolderId of an empty map is 1" "1" (nextFolderId HM.empty)
+  let qi fid title = MediaItem
+        { itemId = fid, itemTitle = title, itemPath = "/" ++ T.unpack title ++ ".mp4"
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = fid }
+      qItems = [qi "1" "b", qi "2" "m", qi "1" "a"]
+      qSorted = [qi "1" "a", qi "1" "b", qi "2" "m"]
+  check "applyItemQuery libraryId=2 keeps only folder-2 items"
+    (1, [qi "2" "m"]) (applyItemQuery [("libraryId", "2")] qItems)
+  check "applyItemQuery libraryId=1 keeps only folder-1 items"
+    (2, [qi "1" "a", qi "1" "b"]) (applyItemQuery [("libraryId", "1")] qItems)
+  check "applyItemQuery without libraryId keeps all (sorted by title)"
+    (3, qSorted) (applyItemQuery [] qItems)
+  check "applyItemQuery libraryId + search combine"
+    (1, [qi "1" "a"]) (applyItemQuery [("libraryId", "1"), ("search", "a")] qItems)
+  check "filterByFolder Nothing is the identity" qItems (filterByFolder Nothing qItems)
+  check "filterByFolder Just filters by itemFolder"
+    [qi "2" "m"] (filterByFolder (Just "2") qItems)
+  let v0 = MediaItemV0
+        { v0ItemId = "9", v0ItemTitle = "old", v0ItemPath = "/old.mp4"
+        , v0ItemSize = 10, v0ItemMime = "video/mp4", v0ItemAddedAt = aNow }
+      v1 = migrateMediaItem v0
+  check "migrateMediaItem v0->v1 defaults itemFolder to \"1\"" "1" (itemFolder v1)
+  check "migrateMediaItem keeps the other fields"
+    ("9", "/old.mp4", 10) (itemId v1, itemPath v1, itemSize v1)
+  check "MediaItem SafeCopy v1 serialize/deserialize roundtrip"
+    (Right v1) (runGet safeGet (runPut (safePut v1)))
+  check "SafeCopy reads v0 bytes as v1 via the Migrate chain (folder \"1\")"
+    (Right "1") (itemFolder <$> (runGet safeGet (runPut (safePut v0))
+                                 :: Either String MediaItem))
 
   putStrLn "All tests passed."

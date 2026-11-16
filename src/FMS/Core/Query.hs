@@ -1,6 +1,7 @@
 module FMS.Core.Query
   ( queryParams
   , searchItems
+  , filterByFolder
   , sortItems
   , paginate
   , applyItemQuery
@@ -33,6 +34,13 @@ searchItems :: Text -> [MediaItem] -> [MediaItem]
 searchItems term =
   filter (\i -> T.toLower term `T.isInfixOf` T.toLower (itemTitle i))
 
+-- | Keep only items scanned from the given media folder (milestone 2c).
+-- 'Nothing' (no @libraryId@ param) keeps everything.
+filterByFolder :: Maybe Text -> [MediaItem] -> [MediaItem]
+filterByFolder mFolder = case mFolder of
+  Nothing  -> id
+  Just fid -> filter (\i -> itemFolder i == fid)
+
 -- | Sort by @sortBy@ ∈ {title, size, addedAt} — unknown or missing falls
 -- back to title — with direction @sortOrder@ ∈ {asc, desc} (default asc).
 -- 'sortBy' is stable: items with equal keys keep their relative order.
@@ -58,15 +66,17 @@ paginate mStart mLimit xs =
        Just l  -> take l (drop start xs)
 
 -- | Apply the Jellyfin-shaped items query (docs/todo.org section 4) to a
--- list of items: search first, then sort, then paginate. Returns the
--- total record count taken /before/ pagination together with the page.
+-- list of items: search first, then the optional @libraryId@ folder
+-- filter (milestone 2c), then sort, then paginate. Returns the total
+-- record count taken /before/ pagination together with the page.
 -- Integer params (@startIndex@, @limit@) are parsed with 'readMaybe';
 -- invalid values are ignored and the defaults apply.
 applyItemQuery :: [(Text, Text)] -> [MediaItem] -> (Int, [MediaItem])
 applyItemQuery params items =
   let get name = lookup name params
       searched = maybe items (`searchItems` items) (get "search")
-      sorted   = sortItems (get "sortBy") (get "sortOrder") searched
+      inFolder = filterByFolder (get "libraryId") searched
+      sorted   = sortItems (get "sortBy") (get "sortOrder") inFolder
       total    = length sorted
       start    = get "startIndex" >>= readMaybe . T.unpack
       limit    = get "limit" >>= readMaybe . T.unpack

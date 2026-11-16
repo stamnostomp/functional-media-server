@@ -12,14 +12,18 @@ import System.FilePath ((</>))
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (MonadLog(..), envConfig, putState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Modules.Library.Monad (MonadLibrary(..), libraryAcidKey)
+import FMS.Modules.Library.Monad (MonadLibrary(..), initFolders, libraryAcidKey)
 import FMS.Modules.Library.Routes (itemsHandler, libraryRoutes)
 import FMS.Modules.Library.State (initialLibraryState)
 
--- | The library module (docs/roadmap.org milestone 2). Init opens the
--- acid-state at @configStateDir \/ \"acid-state\" \/ \"library\"@ and stashes
--- the handle in the typed registry under "library.acid" — the core never
--- learns about module state (docs/modules.org) — then does an initial scan.
+-- | The library module (docs/roadmap.org milestone 2, milestone 2c media
+-- folders). Init opens the acid-state at @configStateDir \/ \"acid-state\"
+-- \/ \"library\"@ and stashes the handle in the typed registry under
+-- "library.acid" — the core never learns about module state
+-- (docs/modules.org) — loads the media folders from
+-- @stateDir/folders.json@ (default: one folder at the configured library
+-- path) into the "library.folders" TVar, then does an initial scan of
+-- every folder.
 libraryModule :: Module
 libraryModule = Module
   { moduleName = "library"
@@ -29,6 +33,7 @@ libraryModule = Module
       liftIO (createDirectoryIfMissing True acidDir)
       acid <- liftIO (openLocalStateFrom acidDir initialLibraryState)
       putState libraryAcidKey acid
+      initFolders
       rescanLibrary
       logInfo "library module initialised"
     -- Milestone 4a (docs/todo.org section 4): the Jellyfin-shaped items

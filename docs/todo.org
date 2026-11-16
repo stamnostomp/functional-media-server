@@ -32,9 +32,10 @@ flipped to DONE in the same commit as the code that implements it.
    - [ ] validation, CLI arg
 
 * 2. Libraries and scanning :feature:
-** TODO Library model: media folders (=GET /Library/MediaFolders=, add/remove/update)
+** DONE Library model: media folders =GET /Library/MediaFolders= (GET/POST/DELETE, folders.json persisted, default folder from MEDIA_LIBRARY_PATH)
 ** TODO Library types: movies, shows, music, books, photos, mixed, home videos
-** TODO Virtual folders / path mapping per library (multiple paths per library)
+   - [X] folder Type field (mixed default); /items?libraryId= filter
+** DONE Multiple paths per library root (multi-folder scan under one lock; items tagged folderId)
 ** DONE Scanner: recursive walk, media-extension filter, mime map
 ** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
 ** DONE [#A] Stable IDs via acid-state (see [[file:acid-state.org][acid-state.org]]) - monotonic ids persisted across restarts

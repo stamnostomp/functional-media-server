@@ -105,7 +105,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Transcoding via ffmpeg
    - [X] =GET /stream/:id/transcode=: on-the-fly ffmpeg -> fragmented MP4, streamed
    - [X] HLS: =/videos/:id/main.m3u8= + =/videos/:id/:seg= (ffmpeg vod playlist, cached in stateDir/hls)
-   - [ ] remux vs transcode decisions, DASH
+   - [X] DASH: =GET /videos/:id/dash.mpd= (ffmpeg -f dash, cached under stateDir/dash/<id>-<version>/) + =/videos/:id/dash/:seg= (sanitized, init video/mp4, chunks video/iso.segment, ?version= + maxBitrate cap)
 ** TODO Audio/subtitle stream selection, codec profiles and levels
 ** DONE Hardware acceleration behind config: =FMS_HWACCEL= (none|vaapi|nvenc|qsv|videotoolbox; unknown -> none) adds -hwaccel + matching h264_* encoder in transcodeArgsWith, libx264 fallback
 ** DONE Bitrate limits: =FMS_MAX_BITRATE= server cap + per-user Policy MaxStreamingBitrate + client ?maxBitrate=/body MaxStreamingBitrate; effectiveBitrateCap = min of set caps; PlaybackInfo decides PlayMethod DirectPlay/Transcode + TranscodingUrl; /stream/:id/transcode?maxBitrate=N applies -b:v/-maxrate/-bufsize

@@ -34,6 +34,7 @@ import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
+import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
@@ -90,6 +91,7 @@ import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
+import FMS.Modules.Dash (dashArgs, dashArgsWith, dashDirFor, isValidDashSegName)
 import FMS.Modules.Transcode (effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, transcodeArgs, transcodeArgsWith)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
@@ -2265,5 +2267,42 @@ main = do
     (Just (Just Nothing))
     (either (const Nothing) (Just . ppMaxBitrate)
       (Aeson.eitherDecode (LBSC.pack "{\"MaxStreamingBitrate\":null}") :: Either String PolicyPatch))
+
+  -- Milestone 3g (DASH): dashArgs shape, bitrate cap args, isValidDashSegName
+  -- traversal matrix, dashDirFor path shape.
+  let dargs = dashArgs "/m/a.mkv" "/st/dash/1-0/manifest.mpd"
+  check "dashArgs: dash muxer, 4s segments, template names"
+    (True, True, True, True)
+    ( elem "-f" dargs && take 1 (drop 1 (dropWhile (/= "-f") dargs)) == ["dash"]
+    , take 1 (drop 1 (dropWhile (/= "-seg_duration") dargs)) == ["4"]
+    , "init-stream$Number$.m4s" `elem` dargs
+    , "chunk-stream$Number$-$Number$.m4s" `elem` dargs )
+  check "dashArgs: output mpd is the last arg, no bitrate args without cap"
+    (True, False)
+    ( last dargs == "/st/dash/1-0/manifest.mpd"
+    , "-b:v" `elem` dargs )
+  check "dashArgsWith: bitrate cap adds -b:v/-maxrate/-bufsize(2x)"
+    ["-b:v", "1000000", "-maxrate", "1000000", "-bufsize", "2000000"]
+    (take 6 (dropWhile (/= "-b:v") (dashArgsWith (Just 1000000) "/m/a.mkv" "/o/manifest.mpd")))
+  check "dashArgsWith: Nothing/0 cap -> no -b:v"
+    (False, False)
+    ( "-b:v" `elem` dashArgsWith Nothing "/m/a.mkv" "/o.mpd"
+    , "-b:v" `elem` dashArgsWith (Just 0) "/m/a.mkv" "/o.mpd" )
+  check "isValidDashSegName: accepts init/media segment names"
+    [True, True, True]
+    (map isValidDashSegName ["init-stream0.m4s", "chunk-stream0-00001.m4s", "a-b_c.d"])
+  check "isValidDashSegName: rejects traversal, separators, empty"
+    [False, False, False, False, False]
+    (map isValidDashSegName ["..", "../manifest.mpd", "a/b.m4s", "", "a b.m4s"])
+  check "dashDirFor: stateDir/dash/<id>-<version>"
+    "/st/dash/7-2"
+    (dashDirFor Config
+      { configLibraryPath = "/lib", configPort = 8080, configStateDir = "/st"
+      , configRequireAuth = False, configServerName = "fms"
+      , configFollowSymlinks = False, configTmdbApiKey = ""
+      , configRateLimit = Nothing, configLogLevel = "info"
+      , configCorsOrigins = ["*"], configSecurityHeaders = True
+      , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
+      } "7" 2)
 
   putStrLn "All tests passed."

@@ -45,6 +45,7 @@ import FMS.Modules.Playback (playbackModule)
 import FMS.Modules.Playlists (playlistsModule)
 import FMS.Modules.Sessions (sessionsModule)
 import FMS.Modules.Socket (socketFallback, socketModule, socketServerApp)
+import FMS.Modules.Dash (dashModule)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Stats (statsModule)
 import FMS.Modules.UserData (userDataModule)
@@ -63,6 +64,9 @@ modules :: [Module]
 modules =
   [ systemModule, authModule, libraryModule, playbackModule, streamModule
   , transcodeModule
+  -- dashModule BEFORE hlsModule: videos/:id/dash.mpd must not be captured
+  -- by the HLS [videos, id, Capture seg] route (milestone 3g).
+  , dashModule
   , hlsModule, subtitlesModule, chaptersModule, thumbsModule, imagesModule
   , statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule

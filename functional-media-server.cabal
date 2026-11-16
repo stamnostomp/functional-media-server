@@ -47,6 +47,7 @@ library
                       FMS.Modules.Auth.Routes
                       FMS.Modules.Stream
                       FMS.Modules.Transcode
+                      FMS.Modules.Dash
                       FMS.Modules.Hls
                       FMS.Modules.Subtitles
                       FMS.Modules.Chapters

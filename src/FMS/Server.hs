@@ -44,6 +44,7 @@ import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Playback (playbackModule)
 import FMS.Modules.Playlists (playlistsModule)
 import FMS.Modules.Sessions (sessionsModule)
+import FMS.Modules.Segments (segmentsModule)
 import FMS.Modules.Socket (socketFallback, socketModule, socketServerApp)
 import FMS.Modules.Dash (dashModule)
 import FMS.Modules.Hls (hlsModule)
@@ -70,7 +71,7 @@ modules =
   , hlsModule, subtitlesModule, chaptersModule, thumbsModule, imagesModule
   , statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
-  , collectionsModule, socketModule
+  , collectionsModule, segmentsModule, socketModule
   , devicesModule
   , webhooksModule
   , webModule, apiDocsModule

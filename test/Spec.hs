@@ -118,6 +118,8 @@ import FMS.Modules.Collections.Persistence (loadCollections, saveCollections)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdFor, boxSetItemValue, isBoxSetId)
 import FMS.Modules.Devices.Persistence (loadDevices, saveDevices)
 import FMS.Modules.Devices.Types (Device (..), upsertDevice)
+import FMS.Modules.Segments.Persistence (loadSegments, saveSegments)
+import FMS.Modules.Segments.Types (MediaSegment (..), secondsToTicks, ticksToSeconds, validSegmentType, validateSegment)
 import FMS.Modules.Socket (addConn, encodeMessage, parseApiKey, parseApiKeyFromPath, removeConn)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
@@ -2342,5 +2344,40 @@ main = do
     [ selectBackdrop ["/d/Backdrop.jpg"] 1
     , selectBackdrop ["/d/Backdrop.jpg"] (-1)
     , selectBackdrop [] 0 ]
+
+  -- Milestone 6h (MediaSegments): validSegmentType, ticks<->seconds,
+  -- validateSegment matrix, JSON roundtrip, persistence roundtrip.
+  check "validSegmentType: recognised types, case-insensitive"
+    [True, True, True, False, False]
+    (map validSegmentType ["Intro", "OUTRO", "preview", "Ad", ""])
+  check "ticksToSeconds/secondsToTicks roundtrip"
+    [0, 1.5, 20] (map (ticksToSeconds . secondsToTicks) [0, 1.5, 20 :: Double])
+  check "secondsToTicks: 100ns units"
+    [0, 15000000, 200000000] (map secondsToTicks [0, 1.5, 20 :: Double])
+  let segOk = MediaSegment "s1" "1" "Intro" 0 50000000
+      segBadType = segOk { segType = "Ad" }
+      segBadRange = segOk { segEndTicks = 0 }
+      segNeg = segOk { segStartTicks = -1 }
+  check "validateSegment: valid passes"
+    (Right segOk) (validateSegment segOk)
+  check "validateSegment: bad type -> Left"
+    True (either (const True) (const False) (validateSegment segBadType))
+  check "validateSegment: end <= start -> Left"
+    True (either (const True) (const False) (validateSegment segBadRange))
+  check "validateSegment: negative start -> Left"
+    True (either (const True) (const False) (validateSegment segNeg))
+  check "MediaSegment JSON roundtrip"
+    (Just segOk) (Aeson.decode (Aeson.encode segOk) :: Maybe MediaSegment)
+  check "MediaSegment FromJSON defaults for missing keys"
+    (Just (MediaSegment "" "" "" 0 0))
+    (Aeson.decode (LBSC.pack "{}") :: Maybe MediaSegment)
+  let segFile = "/tmp/fms-test-segments.json"
+      segMap = HM.fromList [("1", [segOk]), ("2", [segOk { segId = "s2", segItemId = "2", segType = "Outro" }])]
+  saveSegments segFile segMap
+  loadedSegs <- loadSegments segFile
+  check "saveSegments/loadSegments roundtrip" segMap loadedSegs
+  missingSegs <- loadSegments "/tmp/fms-test-segments-does-not-exist.json"
+  check "loadSegments of a missing file is empty" HM.empty missingSegs
+  removeFile segFile
 
   putStrLn "All tests passed."

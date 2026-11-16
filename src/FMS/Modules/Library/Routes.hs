@@ -9,13 +9,14 @@ import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Types (status201)
+import qualified Data.Text.Encoding as TE
+import Network.HTTP.Types (status201, urlDecode)
 import Network.Wai (Request, Response, queryString, responseLBS, strictRequestBody)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
-import FMS.Core.Query (applyItemQuery, queryParams)
+import FMS.Core.Query (applyItemQuery, filterBySeries, queryParams, showsFromItems, sortEpisodes)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
@@ -31,6 +32,9 @@ libraryRoutes =
   , get    [Lit "Library", Lit "MediaFolders"] listFoldersHandler
   , post   [Lit "Library", Lit "MediaFolders"] addFolderHandler
   , delete [Lit "Library", Lit "MediaFolders", Capture "id"] removeFolderHandler
+  , get    [Lit "Shows"] showsHandler
+  , get    [Lit "Shows", Capture "name", Lit "Episodes"] episodesHandler
+  , get    [Lit "Shows", Capture "name", Lit "NextUp"] nextUpHandler
   ]
 
 -- | @GET \/library@ — JSON array of all items visible to the requester
@@ -134,3 +138,46 @@ removeFolderHandler captures _req =
           if ok
             then pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
             else throwError (NotFound ("no media folder with id " <> fid))
+
+-- TV shows (milestone 4d) -----------------------------------------------------
+
+-- | Percent-decode a path capture (series names may contain spaces etc.).
+decodeCapture :: Text -> Text
+decodeCapture = TE.decodeUtf8 . urlDecode True . TE.encodeUtf8
+
+-- | @GET \/Shows@ — 200 array of @{\"Name\": series, \"ItemCount\": n}@,
+-- sorted by name (pure 'showsFromItems').
+showsHandler :: [(Text, Text)] -> Request -> AppM Response
+showsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
+  pure (jsonResponse [ object ["Name" .= s, "ItemCount" .= n]
+                     | (s, n) <- showsFromItems items ])
+
+-- | @GET \/Shows\/:name\/Episodes@ — 200 array of the series' episodes
+-- ordered by (season, episode, title) (pure 'sortEpisodes'); an unknown
+-- series is an empty array.
+episodesHandler :: [(Text, Text)] -> Request -> AppM Response
+episodesHandler captures req = do
+  name <- decodeCapture <$> captureName captures
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
+  let eps = sortEpisodes (filterBySeries (Just name) items)
+  pure (jsonResponse eps)
+
+-- | @GET \/Shows\/:name\/NextUp@ — 200 the first episode by the
+-- (season, episode, title) order, 404 when the series has no episodes.
+nextUpHandler :: [(Text, Text)] -> Request -> AppM Response
+nextUpHandler captures req = do
+  name <- decodeCapture <$> captureName captures
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
+  case sortEpisodes (filterBySeries (Just name) items) of
+    []   -> throwError (NotFound ("no episodes for series " <> name))
+    (e : _) -> pure (jsonResponse e)
+
+captureName :: [(Text, Text)] -> AppM Text
+captureName captures =
+  case lookup "name" captures of
+    Nothing -> throwError (BadRequest "missing name capture")
+    Just n  -> pure n

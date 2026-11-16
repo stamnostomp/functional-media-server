@@ -34,7 +34,8 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 2. Libraries and scanning :feature:
 ** DONE Library model: media folders =GET /Library/MediaFolders= (GET/POST/DELETE, folders.json persisted, default folder from MEDIA_LIBRARY_PATH)
-** TODO Library types: movies, shows, music, books, photos, mixed, home videos
+** TODO Library types: music/books/photos/home-videos item kinds
+   - [X] item type field (Movie/Episode/Audio/Unknown from mime), SxxEyy episode parsing, tvshow.nfo series detection, /Shows + /Shows/:name/Episodes + NextUp, /items?type=&series= filters
    - [X] folder Type field (mixed default); /items?libraryId= filter
 ** DONE Multiple paths per library root (multi-folder scan under one lock; items tagged folderId)
 ** DONE Scanner: recursive walk, media-extension filter, mime map
@@ -72,7 +73,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO =Fields= projection, =EnableImages=, image type selection
 ** TODO User-scoped queries: =userId=, filters IsPlayed/IsFavorite/IsResumable, IsLiked
 ** TODO =GET /Items/{id}=, =GET /Items/{id}/Similar=, =GET /Items/{id}/SpecialFeatures=
-** TODO Ancestors/breadcrumb endpoints (=/Items/{id}/Ancestors=), next-up for series
+** TODO Ancestors/breadcrumb endpoints (=/Items/{id}/Ancestors=)
+   - [X] next-up for series: =GET /Shows/:name/NextUp=
 ** TODO Item counts per library, =GET /Items/Counts=
 ** TODO Search endpoint =/Search/Hints= + full-text search across titles/people
 

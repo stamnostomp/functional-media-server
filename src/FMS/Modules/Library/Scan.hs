@@ -6,13 +6,16 @@ module FMS.Modules.Library.Scan
   , diffScan
   , planRescan
   , itemFromPath
+  , classifyItem
+  , parseEpisodeFilename
+  , hasTvShowNfo
   , isMediaFile
   , mimeFor
   , mediaExtensions
   ) where
 
 import Control.Monad (foldM, forM)
-import Data.Char (toLower)
+import Data.Char (isDigit, toLower)
 import Data.Either (partitionEithers)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
@@ -30,9 +33,9 @@ import System.Directory
   , listDirectory
   , pathIsSymbolicLink
   )
-import System.FilePath (takeBaseName, takeExtension, (</>))
+import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 
-import FMS.Core.Types.MediaItem (MediaItem(..))
+import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
 
 -- | Extensions recognised as media files (lowercase, with dot).
 mediaExtensions :: [String]
@@ -60,14 +63,59 @@ mimeFor p = case map toLower (takeExtension p) of
   ".m4a"  -> "audio/mp4"
   _       -> "application/octet-stream"
 
+-- | Pure (milestone 4d): detect a Kodi-style episode tag @S01E02@ /
+-- @s1e2@ / @S01E02E03@ in a file base name and return the first
+-- @(season, episode)@ pair. Manual scanning, no regex dependency.
+parseEpisodeFilename :: Text -> Maybe (Int, Int)
+parseEpisodeFilename t = go (T.unpack t)
+  where
+    go [] = Nothing
+    go (c : rest)
+      | c == 's' || c == 'S' =
+          case span isDigit rest of
+            (ds, e : rest') | not (null ds), e == 'e' || e == 'E' ->
+              case span isDigit rest' of
+                (es, _) | not (null es) -> Just (read ds, read es)
+                _                       -> go rest
+            _ -> go rest
+      | otherwise = go rest
+
+-- | IO: does the file's parent directory contain a @tvshow.nfo@?
+hasTvShowNfo :: FilePath -> IO Bool
+hasTvShowNfo path = doesFileExist (takeDirectory path </> "tvshow.nfo")
+
+-- | Pure (milestone 4d): classify a scanned file into
+-- @(itemType, series, season, episode)@. When the parent directory has a
+-- @tvshow.nfo@ the file is an 'Episode' of the series named after the
+-- directory, with season/episode from 'parseEpisodeFilename'; otherwise
+-- the type comes from the mime and the episode fields are 'Nothing'.
+classifyItem
+  :: Bool      -- ^ hasTvShowNfo (parent dir contains tvshow.nfo)
+  -> FilePath  -- ^ the file path
+  -> Text      -- ^ the file base name
+  -> (Text, Maybe Text, Maybe Int, Maybe Int)
+classifyItem hasNfo path baseName
+  | hasNfo =
+      let series = T.pack (takeFileName (takeDirectory path))
+          (season, episode) = case parseEpisodeFilename baseName of
+            Just (s, e) -> (Just s, Just e)
+            Nothing     -> (Nothing, Nothing)
+      in ("Episode", Just series, season, episode)
+  | otherwise = (itemTypeFromMime (mimeFor path), Nothing, Nothing, Nothing)
+
 -- | Build a 'MediaItem' from a path: size + mtime from the filesystem,
--- title = base name, mime from the extension, tagged with the id of the
--- media folder it was scanned from (milestone 2c). The id is left empty
--- ("") -- the acid-state 'RegisterItem' event assigns the stable id.
+-- title = base name, mime from the extension, classification via
+-- 'classifyItem' (milestone 4d: tvshow.nfo -> Episode with series/season/
+-- episode, else mime-based type), tagged with the id of the media folder
+-- it was scanned from (milestone 2c). The id is left empty ("") -- the
+-- acid-state 'RegisterItem' event assigns the stable id.
 itemFromPath :: Text -> FilePath -> IO MediaItem
 itemFromPath folder p = do
   size  <- getFileSize p
   mtime <- getModificationTime p
+  nfo   <- hasTvShowNfo p
+  let (itype, series, season, episode) =
+        classifyItem nfo p (T.pack (takeBaseName p))
   pure MediaItem
     { itemId      = ""
     , itemTitle   = T.pack (takeBaseName p)
@@ -76,6 +124,10 @@ itemFromPath folder p = do
     , itemMime    = mimeFor p
     , itemAddedAt = mtime
     , itemFolder  = folder
+    , itemType    = itype
+    , itemSeries  = series
+    , itemSeason  = season
+    , itemEpisode = episode
     }
 
 -- | Pure: is @canon@ already in the visited set? Used to detect circular

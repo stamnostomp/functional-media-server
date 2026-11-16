@@ -15,7 +15,7 @@ import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 
 import FMS.Core.Monad (AppEnv (..), AppM, MonadLog (..), getState, putState)
 import FMS.Core.Types.Config (Config (..))
@@ -23,7 +23,7 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Library (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
-import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
+import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
 
@@ -84,10 +84,31 @@ instance MonadMetadata AppM where
 
 -- | Read and parse the item's NFO sidecar. 'Nothing' when the file is
 -- missing, unreadable, or malformed (a malformed file is logged, then the
--- caller falls through to the remote provider).
+-- caller falls through to the remote provider). Milestone 4d: episode
+-- items also accept the series-level @tvshow.nfo@ in the parent directory
+-- ('parseTvShowNfo') when no per-file NFO exists.
 readNfoMetadata :: MediaItem -> AppM (Maybe MediaMetadata)
 readNfoMetadata item = do
   let nfoPath = nfoPathFor (itemPath item)
+  exists <- liftIO (doesFileExist nfoPath)
+  if exists
+    then do
+      result <- liftIO (try (BS.readFile nfoPath) :: IO (Either SomeException BS.ByteString))
+      case result of
+        Left _ -> pure Nothing
+        Right bytes ->
+          case parseMovieNfo bytes of
+            Left err -> do
+              logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
+              pure Nothing
+            Right meta -> pure (Just meta)
+    else if itemType item == "Episode"
+      then readTvShowNfo (takeDirectory (itemPath item) </> "tvshow.nfo")
+      else pure Nothing
+
+-- | Milestone 4d: read + parse a series-level @tvshow.nfo@.
+readTvShowNfo :: FilePath -> AppM (Maybe MediaMetadata)
+readTvShowNfo nfoPath = do
   exists <- liftIO (doesFileExist nfoPath)
   if not exists
     then pure Nothing
@@ -96,7 +117,7 @@ readNfoMetadata item = do
       case result of
         Left _ -> pure Nothing
         Right bytes ->
-          case parseMovieNfo bytes of
+          case parseTvShowNfo bytes of
             Left err -> do
               logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
               pure Nothing

@@ -1,8 +1,10 @@
 module FMS.Modules.Metadata.Nfo
   ( parseMovieNfo
+  , parseTvShowNfo
   , nfoPathFor
   ) where
 
+import Control.Applicative ((<|>))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HM
@@ -84,3 +86,36 @@ providerIds m =
   | (tag, key) <- [("tmdbid", "tmdb"), ("imdbid", "imdb")]
   , Just v <- [firstText tag m]
   ]
+
+-- | Parse a Kodi/Jellyfin-style <tvshow>...</tvshow> NFO (the series-level
+-- sidecar that lives next to the episode files, milestone 4d) into a
+-- 'MediaMetadata'. Same rules as 'parseMovieNfo': malformed XML or a
+-- non-<tvshow> root is a 'Left'; <premiered>YYYY-MM-DD</premiered> is read
+-- as the year (first 4 chars), <rating> as a double, <tmdbid>/<imdbid>
+-- into 'metaProviderIds'. 'metaSource' is always "nfo".
+parseTvShowNfo :: BS.ByteString -> Either String MediaMetadata
+parseTvShowNfo bytes =
+  case parseLBS def (LBS.fromStrict bytes) of
+    Left err -> Left ("malformed XML: " ++ show err)
+    Right doc
+      | T.toCaseFold (nameLocalName (elementName (documentRoot doc))) == "tvshow" ->
+          Right (tvShowFromCursor (fromDocument doc))
+      | otherwise -> Left "no <tvshow> root element"
+
+-- | Build the 'MediaMetadata' from a <tvshow> element cursor.
+tvShowFromCursor :: Cursor -> MediaMetadata
+tvShowFromCursor c =
+  MediaMetadata
+    { metaTitle          = firstText "title" c
+    , metaOverview       = firstText "overview" c
+    , metaGenres         = allTexts "genre" c
+    , metaYear           = readIntField "year" c <|> premieredYear c
+    , metaRating         = readDoubleField "rating" c
+    , metaRuntimeMinutes = Nothing
+    , metaProviderIds    = HM.fromList (providerIds c)
+    , metaSource         = "nfo"
+    }
+
+-- | Year from <premiered>2022-01-01</premiered> (first 4 chars).
+premieredYear :: Cursor -> Maybe Int
+premieredYear c = firstText "premiered" c >>= \t -> readMaybe (take 4 (T.unpack (T.strip t)))

@@ -31,12 +31,12 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, filterByFolder, paginate, queryParams, searchItems, sortItems)
+import FMS.Core.Query (applyItemQuery, filterByFolder, filterBySeries, filterByType, paginate, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
-import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), migrateMediaItem)
+import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..)
@@ -54,9 +54,11 @@ import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
 import FMS.Modules.Library.Scan
-  ( diffScan
+  ( classifyItem
+  , diffScan
   , isCircular
   , isMediaFile
+  , parseEpisodeFilename
   , itemFromPath
   , mimeFor
   , planRescan
@@ -87,7 +89,7 @@ import FMS.Modules.Library.State
   )
 import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
-import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
+import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Routes (genresFromMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
@@ -268,6 +270,10 @@ main = do
         , itemMime    = "video/mp4"
         , itemAddedAt = now
         , itemFolder  = "1"
+        , itemType    = "Movie"
+        , itemSeries  = Nothing
+        , itemSeason  = Nothing
+        , itemEpisode = Nothing
         }
   st1 <- openLocalStateFrom acidDir initialLibraryState
   id1 <- update st1 (RegisterItem "/x.mp4" testItem)
@@ -560,6 +566,10 @@ main = do
         , itemMime    = "video/mp4"
         , itemAddedAt = t
         , itemFolder  = "1"
+        , itemType    = "Movie"
+        , itemSeries  = Nothing
+        , itemSeason  = Nothing
+        , itemEpisode = Nothing
         }
       items4 =
         [ mkItem 1 "alpha"      300 t3
@@ -1284,7 +1294,8 @@ main = do
   check "nextFolderId of an empty map is 1" "1" (nextFolderId HM.empty)
   let qi fid title = MediaItem
         { itemId = fid, itemTitle = title, itemPath = "/" ++ T.unpack title ++ ".mp4"
-        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = fid }
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = fid
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing }
       qItems = [qi "1" "b", qi "2" "m", qi "1" "a"]
       qSorted = [qi "1" "a", qi "1" "b", qi "2" "m"]
   check "applyItemQuery libraryId=2 keeps only folder-2 items"
@@ -1302,13 +1313,85 @@ main = do
         { v0ItemId = "9", v0ItemTitle = "old", v0ItemPath = "/old.mp4"
         , v0ItemSize = 10, v0ItemMime = "video/mp4", v0ItemAddedAt = aNow }
       v1 = migrateMediaItem v0
-  check "migrateMediaItem v0->v1 defaults itemFolder to \"1\"" "1" (itemFolder v1)
+  check "migrateMediaItem v0->v1 defaults itemFolder to \"1\"" "1" (v1ItemFolder v1)
   check "migrateMediaItem keeps the other fields"
-    ("9", "/old.mp4", 10) (itemId v1, itemPath v1, itemSize v1)
-  check "MediaItem SafeCopy v1 serialize/deserialize roundtrip"
+    ("9", "/old.mp4", 10) (v1ItemId v1, v1ItemPath v1, v1ItemSize v1)
+  check "MediaItemV1 SafeCopy v1 serialize/deserialize roundtrip"
     (Right v1) (runGet safeGet (runPut (safePut v1)))
-  check "SafeCopy reads v0 bytes as v1 via the Migrate chain (folder \"1\")"
+  check "SafeCopy reads v0 bytes as v2 via the chain v0->v1->v2 (folder \"1\")"
     (Right "1") (itemFolder <$> (runGet safeGet (runPut (safePut v0))
                                  :: Either String MediaItem))
+  let v2 = migrateMediaItemV1 v1
+  check "migrateMediaItemV1 v1->v2 derives type Movie from video mime"
+    "Movie" (itemType v2)
+  check "migrateMediaItemV1 v1->v2 defaults series/season/episode to Nothing"
+    (Nothing, Nothing, Nothing) (itemSeries v2, itemSeason v2, itemEpisode v2)
+  check "migrateMediaItemV1 keeps id/folder"
+    ("9", "1") (itemId v2, itemFolder v2)
+  check "itemTypeFromMime audio -> Audio" "Audio" (itemTypeFromMime "audio/mpeg")
+  check "itemTypeFromMime other -> Unknown" "Unknown" (itemTypeFromMime "application/octet-stream")
+  check "SafeCopy reads v1 bytes as v2 (type from mime)"
+    (Right "Movie") (itemType <$> (runGet safeGet (runPut (safePut v1))
+                                   :: Either String MediaItem))
+
+  -- Item types + TV shows (milestone 4d, docs/todo.org sections 2-4).
+  check "parseEpisodeFilename S01E02" (Just (1, 2)) (parseEpisodeFilename "S01E02")
+  check "parseEpisodeFilename s1e2 lowercase" (Just (1, 2)) (parseEpisodeFilename "s1e2")
+  check "parseEpisodeFilename S01E02E03 takes the first pair"
+    (Just (1, 2)) (parseEpisodeFilename "S01E02E03")
+  check "parseEpisodeFilename S10E10" (Just (10, 10)) (parseEpisodeFilename "S10E10")
+  check "parseEpisodeFilename no match" Nothing (parseEpisodeFilename "movie")
+  check "parseEpisodeFilename inside a longer name"
+    (Just (2, 5)) (parseEpisodeFilename "My Show S02E05")
+  check "classifyItem with tvshow.nfo -> Episode of the dir name"
+    ("Episode", Just "MyShow", Just 1, Just 2)
+    (classifyItem True "/lib/MyShow/S01E02.mp4" "S01E02")
+  check "classifyItem without nfo -> Movie from mime"
+    ("Movie", Nothing, Nothing, Nothing)
+    (classifyItem False "/lib/movie.mp4" "movie")
+  check "classifyItem without nfo, audio -> Audio"
+    ("Audio", Nothing, Nothing, Nothing)
+    (classifyItem False "/lib/song.mp3" "song")
+  let tvNfo = BSC.pack (unlines
+        [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        , "<tvshow>"
+        , "  <title>My Show</title>"
+        , "  <overview>A test show</overview>"
+        , "  <genre>Drama</genre>"
+        , "  <premiered>2022-01-01</premiered>"
+        , "  <rating>8.0</rating>"
+        , "  <tmdbid>4242</tmdbid>"
+        , "</tvshow>" ])
+  case parseTvShowNfo tvNfo of
+    Left _ -> check "parseTvShowNfo parses a <tvshow> root" True False
+    Right m -> do
+      check "parseTvShowNfo parses a <tvshow> root" True True
+      check "parseTvShowNfo title/overview/genres"
+        (Just "My Show", Just "A test show", ["Drama"]) (metaTitle m, metaOverview m, metaGenres m)
+      check "parseTvShowNfo premiered -> year 2022" (Just 2022) (metaYear m)
+      check "parseTvShowNfo rating + tmdbid + source"
+        (Just 8.0, Just "4242", "nfo") (metaRating m, HM.lookup "tmdb" (metaProviderIds m), metaSource m)
+  check "parseTvShowNfo rejects a <movie> root"
+    True (either (const True) (const False) (parseTvShowNfo (BSC.pack "<movie><title>x</title></movie>")))
+  let epA = (qi "1" "S01E01") { itemType = "Episode", itemSeries = Just "MyShow", itemSeason = Just 1, itemEpisode = Just 1 }
+      epB = (qi "1" "S01E02") { itemType = "Episode", itemSeries = Just "MyShow", itemSeason = Just 1, itemEpisode = Just 2 }
+      epC = (qi "1" "S02E01") { itemType = "Episode", itemSeries = Just "MyShow", itemSeason = Just 2, itemEpisode = Just 1 }
+      other = (qi "2" "Other") { itemType = "Episode", itemSeries = Just "OtherShow" }
+      showItems = [epB, other, epA, epC, qi "1" "movie"]
+  check "showsFromItems aggregates and sorts by name"
+    [("MyShow", 3), ("OtherShow", 1)] (showsFromItems showItems)
+  check "showsFromItems ignores non-episodes" [] (showsFromItems [qi "1" "movie"])
+  check "sortEpisodes orders by season/episode"
+    [epA, epB, epC] (sortEpisodes [epC, epB, epA])
+  check "filterByType Episode keeps episodes in list order"
+    [epB, other, epA, epC] (filterByType (Just "Episode") showItems)
+  check "filterByType Movie" [qi "1" "movie"] (filterByType (Just "Movie") showItems)
+  check "filterBySeries MyShow" [epB, epA, epC] (filterBySeries (Just "MyShow") showItems)
+  check "applyItemQuery type=Episode (then title sort)"
+    (4, [other, epA, epB, epC])
+    (applyItemQuery [("type", "Episode")] showItems)
+  check "applyItemQuery series=MyShow&type=Episode"
+    (3, [epA, epB, epC])
+    (applyItemQuery [("series", "MyShow"), ("type", "Episode")] showItems)
 
   putStrLn "All tests passed."

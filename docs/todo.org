@@ -57,7 +57,9 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 4. Items API :feature:
 ** TODO =GET /Items= with filters: recursive, include item types, genres, years, person, studio, exclusive, search term
-** TODO Sorting (sortBy + sortOrder), pagination (startIndex/limit)
+   - [X] =GET /items?search=...= (case-insensitive title match)
+** DONE Sorting (sortBy + sortOrder) + pagination (startIndex/limit)
+   - [X] =GET /items?sortBy=title|size|addedAt&sortOrder=asc|desc&startIndex&limit= -> {Items, TotalRecordCount, StartIndex}
 ** TODO =Fields= projection, =EnableImages=, image type selection
 ** TODO User-scoped queries: =userId=, filters IsPlayed/IsFavorite/IsResumable, IsLiked
 ** TODO =GET /Items/{id}=, =GET /Items/{id}/Similar=, =GET /Items/{id}/SpecialFeatures=

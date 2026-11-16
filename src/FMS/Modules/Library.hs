@@ -9,11 +9,11 @@ import Data.Acid (openLocalStateFrom)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
-import FMS.Core.Module (Module(..))
+import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (MonadLog(..), envConfig, putState)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Library.Monad (MonadLibrary(..), libraryAcidKey)
-import FMS.Modules.Library.Routes (libraryRoutes)
+import FMS.Modules.Library.Routes (itemsHandler, libraryRoutes)
 import FMS.Modules.Library.State (initialLibraryState)
 
 -- | The library module (docs/roadmap.org milestone 2). Init opens the
@@ -31,5 +31,7 @@ libraryModule = Module
       putState libraryAcidKey acid
       rescanLibrary
       logInfo "library module initialised"
-  , moduleRoutes = libraryRoutes
+    -- Milestone 4a (docs/todo.org section 4): the Jellyfin-shaped items
+    -- query endpoint lives next to the plain /library routes.
+  , moduleRoutes = libraryRoutes ++ [get [Lit "items"] (\captures req -> itemsHandler captures req)]
   }

@@ -3,9 +3,10 @@ module Main (main) where
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
+import qualified Data.ByteString.Char8 as BSC
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import qualified Data.Text as T
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
@@ -24,6 +25,7 @@ import System.Process (proc, readCreateProcessWithExitCode)
 import GHC.IO.Encoding (latin1, setLocaleEncoding)
 
 import FMS.Core.Module (Segment(..))
+import FMS.Core.Query (applyItemQuery, paginate, queryParams, searchItems, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (matchSegments)
 import FMS.Core.Types.MediaItem (MediaItem(..))
@@ -297,5 +299,99 @@ main = do
         [0xFF, 0xD8] (map fromEnum (take 2 out))
       check "thumb output is > 1000 bytes" True (length out > 1000)
       removeFile mp4
+
+  -- Items query helpers (milestone 4a, docs/todo.org section 4): the pure
+  -- functions of FMS.Core.Query.
+  let qp = queryParams
+        [ (BSC.pack "search", Just (BSC.pack "a%20b+c"))
+        , (BSC.pack "empty", Nothing)
+        , (BSC.pack "uni",   Just (BSC.pack "caf%C3%A9"))
+        , (BSC.pack "plain", Just (BSC.pack "x"))
+        ]
+  check "queryParams percent-decodes (%20, + as space, UTF-8) and drops Nothing"
+    [("search", "a b c"), ("uni", "café"), ("plain", "x")] qp
+  check "queryParams drops valueless params"
+    [("a", "1")] (queryParams [(BSC.pack "a", Just (BSC.pack "1")), (BSC.pack "b", Nothing)])
+  check "queryParams on empty input" [] (queryParams [])
+
+  -- A sample library of 4 items with distinct titles, sizes and times.
+  let t1 = read "2024-01-01 00:00:00 UTC" :: UTCTime
+      t2 = read "2024-01-02 00:00:00 UTC" :: UTCTime
+      t3 = read "2024-01-03 00:00:00 UTC" :: UTCTime
+      t4 = read "2024-01-04 00:00:00 UTC" :: UTCTime
+      mkItem :: Int -> T.Text -> Integer -> UTCTime -> MediaItem
+      mkItem i title size t = MediaItem
+        { itemId      = T.pack (show i)
+        , itemTitle   = title
+        , itemPath    = "/" ++ T.unpack title ++ ".mp4"
+        , itemSize    = size
+        , itemMime    = "video/mp4"
+        , itemAddedAt = t
+        }
+      items4 =
+        [ mkItem 1 "alpha"      300 t3
+        , mkItem 2 "beta"       100 t1
+        , mkItem 3 "gamma song" 200 t2
+        , mkItem 4 "delta"      400 t4
+        ]
+
+  -- searchItems: case-insensitive substring match on itemTitle.
+  check "searchItems is case-insensitive" ["alpha"] (map itemTitle (searchItems "ALPHA" items4))
+  check "searchItems substring (SONG in 'gamma song')" ["gamma song"] (map itemTitle (searchItems "SONG" items4))
+  check "searchItems no match -> []" [] (map itemTitle (searchItems "zzz" items4))
+  check "searchItems empty term matches all" 4 (length (searchItems "" items4))
+
+  -- sortItems: title asc by default, size desc, addedAt, unknown -> title.
+  check "sortItems default is title asc"
+    ["alpha", "beta", "delta", "gamma song"] (map itemTitle (sortItems Nothing Nothing items4))
+  check "sortItems title desc"
+    ["gamma song", "delta", "beta", "alpha"]
+    (map itemTitle (sortItems (Just "title") (Just "desc") items4))
+  check "sortItems size desc"
+    ["delta", "alpha", "gamma song", "beta"]
+    (map itemTitle (sortItems (Just "size") (Just "desc") items4))
+  check "sortItems size asc when sortOrder missing"
+    ["beta", "gamma song", "alpha", "delta"]
+    (map itemTitle (sortItems (Just "size") Nothing items4))
+  check "sortItems addedAt asc"
+    ["beta", "gamma song", "alpha", "delta"]
+    (map itemTitle (sortItems (Just "addedAt") (Just "asc") items4))
+  check "sortItems unknown sortBy falls back to title"
+    ["alpha", "beta", "delta", "gamma song"]
+    (map itemTitle (sortItems (Just "bogus") Nothing items4))
+  let dup = [mkItem 5 "same" 30 t1, mkItem 6 "same" 10 t2, mkItem 7 "same" 20 t3]
+  check "sortItems is stable on equal keys" [30, 10, 20] (map itemSize (sortItems Nothing Nothing dup))
+
+  -- paginate: windows, clamping, defaults.
+  let xs5 = [1 .. 5] :: [Int]
+  check "paginate with no params returns all" xs5 (paginate Nothing Nothing xs5)
+  check "paginate startIndex only" [3, 4, 5] (paginate (Just 2) Nothing xs5)
+  check "paginate limit only" [1, 2] (paginate Nothing (Just 2) xs5)
+  check "paginate startIndex+limit window" [2] (paginate (Just 1) (Just 1) xs5)
+  check "paginate startIndex beyond the end -> []" [] (paginate (Just 10) Nothing xs5)
+  check "paginate negative startIndex clamped to 0" [1, 2] (paginate (Just (-3)) (Just 2) xs5)
+  check "paginate limit larger than the rest" [4, 5] (paginate (Just 3) (Just 100) xs5)
+
+  -- applyItemQuery: search + sort + paginate combined; the total count is
+  -- taken BEFORE pagination.
+  let titlesOf (n, is) = (n, map itemTitle is)
+  check "applyItemQuery with no params returns all, total 4"
+    (4, ["alpha", "beta", "delta", "gamma song"])
+    (titlesOf (applyItemQuery [] items4))
+  check "applyItemQuery search only (total = number of matches)"
+    (2, ["beta", "delta"]) (titlesOf (applyItemQuery [("search", "ta")] items4))
+  check "applyItemQuery search + sortBy=size + sortOrder=desc"
+    (2, ["delta", "beta"])
+    (titlesOf (applyItemQuery [("search", "ta"), ("sortBy", "size"), ("sortOrder", "desc")] items4))
+  check "applyItemQuery combined search+sort+paginate keeps pre-pagination total"
+    (2, ["beta"])
+    (titlesOf (applyItemQuery
+        [ ("search", "ta"), ("sortBy", "size"), ("sortOrder", "desc")
+        , ("startIndex", "1"), ("limit", "1") ] items4))
+  check "applyItemQuery invalid ints are ignored (defaults apply)"
+    (4, ["alpha", "beta", "delta", "gamma song"])
+    (titlesOf (applyItemQuery [("limit", "abc"), ("startIndex", "xyz")] items4))
+  check "applyItemQuery startIndex beyond end -> empty page, total kept"
+    (4, []) (titlesOf (applyItemQuery [("startIndex", "99")] items4))
 
   putStrLn "All tests passed."

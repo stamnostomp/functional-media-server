@@ -28,6 +28,7 @@ library
                       FMS.Core.Monad
                       FMS.Core.Module
                       FMS.Core.Router
+                      FMS.Core.Query
                       FMS.Core.Range
                       FMS.Core.Types.Config
                       FMS.Core.Types.MediaItem

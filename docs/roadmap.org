@@ -43,7 +43,8 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO Parallel directory walking :improvement:
 ** TODO Incremental scanning + filesystem event watching (inotify/FSEvents) :improvement:
 ** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
-** TODO Filtering (type, genre, year), sorting, pagination, search endpoint :improvement:
+** TODO Filtering (type, genre, year), fuller search endpoint :improvement:
+   - [X] search + sortBy/sortOrder + startIndex/limit on GET /items (envelope {Items, TotalRecordCount, StartIndex})
 ** DONE Extra item fields: size + mtime (addedAt) in MediaItem
 ** TODO Checksum/hash for integrity verification :improvement:
 

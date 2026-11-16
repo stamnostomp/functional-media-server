@@ -80,7 +80,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Client device profiles (=/DeviceProfiles=, playback profiles per codec/container)
 ** TODO Transcoding via ffmpeg
    - [X] =GET /stream/:id/transcode=: on-the-fly ffmpeg -> fragmented MP4, streamed
-   - [ ] remux vs transcode decisions, HLS (=/videos/{id}/main.m3u8= + segments), DASH
+   - [X] HLS: =/videos/:id/main.m3u8= + =/videos/:id/:seg= (ffmpeg vod playlist, cached in stateDir/hls)
+   - [ ] remux vs transcode decisions, DASH
 ** TODO Audio/subtitle stream selection, codec profiles and levels
 ** TODO Hardware acceleration (VAAPI, NVENC, QSV, VideoToolbox) behind config
 ** TODO Bitrate limits per user/network; quality options

@@ -15,6 +15,7 @@ import FMS.Core.Monad (AppError, runApp, newAppEnv)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Library (libraryModule)
+import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Stream (streamModule)
 import FMS.Modules.System (systemModule)
 import FMS.Modules.Transcode (transcodeModule)
@@ -22,7 +23,7 @@ import FMS.Modules.Transcode (transcodeModule)
 -- | The active module list. Adding a module never changes the core
 -- (docs/modules.org).
 modules :: [Module]
-modules = [systemModule, libraryModule, streamModule, transcodeModule]
+modules = [systemModule, libraryModule, streamModule, transcodeModule, hlsModule]
 
 -- | Boot the server: build the environment, run each module's init, then
 -- serve HTTP with warp.

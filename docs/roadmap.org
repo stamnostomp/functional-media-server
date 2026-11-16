@@ -60,7 +60,8 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    - [ ] Quality/bitrate adaptation (transcode profiles per client)
 ** TODO Thumbnail generation :feature:
 ** TODO Subtitles: detection, streaming, format conversion (SRT/VTT) :feature:
-** TODO HLS packaging for adaptive streaming :feature:
+** DONE HLS packaging :feature:
+   - [X] GET /videos/:id/main.m3u8 + /videos/:id/:seg (ffmpeg HLS vod, -c copy, cached under stateDir/hls/<id>/, segment names sanitized)
 ** TODO Stream large responses lazily; memory monitoring :improvement:
 
 * Milestone 4 — metadata

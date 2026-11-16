@@ -3,14 +3,16 @@ module Main (main) where
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
-import Data.List (sort)
+import Data.List (isPrefixOf, isSuffixOf, sort)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
+  , doesFileExist
   , findExecutable
   , removeDirectoryRecursive
+  , removeFile
   )
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
@@ -26,6 +28,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (matchSegments)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
+import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Transcode (transcodeArgs)
 import FMS.Modules.Library.State
@@ -172,5 +175,50 @@ main = do
       -- (0x66 0x74 0x79 0x70 = [102,116,121,112]).
       check "output bytes 4..8 are the ftyp box type"
         [0x66, 0x74, 0x79, 0x70] (map fromEnum (take 4 (drop 4 out)))
+
+  -- HLS module (milestone 3c): the pure ffmpeg argument list + dir helper.
+  let hlsIn  = "/tmp/fms-test-hls-src.mp4"
+      hlsOut = "/tmp/fms-test-hls-out/main.m3u8"
+      hargs  = hlsArgs hlsIn hlsOut
+      containsPair x y = any (\(a, b) -> a == x && b == y) (zip hargs (drop 1 hargs))
+  check "hlsArgs has -hls_playlist_type vod" True (containsPair "-hls_playlist_type" "vod")
+  check "hlsArgs has -c copy"               True (containsPair "-c" "copy")
+  check "hlsArgs has -hls_time 4"           True (containsPair "-hls_time" "4")
+  check "hlsArgs ends with the output m3u8 path" hlsOut (last hargs)
+  check "hlsArgs contains the input path"   True (hlsIn `elem` hargs)
+  check "hlsArgs has the seg%03d.ts pattern in the output dir"
+    True ("/tmp/fms-test-hls-out/seg%03d.ts" `elem` hargs)
+  check "hlsDirFor joins stateDir/hls/id" "/state/hls/42" (hlsDirFor "/state" "42")
+
+  -- IO test of the actual HLS packaging, guarded by ffmpeg availability:
+  -- skip gracefully when ffmpeg is not on PATH.
+  case mFFmpeg of
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping HLS IO test"
+    Just _ -> do
+      let mp4    = "/tmp/fms-test-hls-src.mp4"
+          outDir = "/tmp/fms-test-hls-out"
+          m3u8   = outDir </> "main.m3u8"
+      resetDir outDir
+      createDirectoryIfMissing True outDir
+      (ecGen, _, genErr) <- readCreateProcessWithExitCode
+        (proc "ffmpeg"
+          [ "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10"
+          , "-c:v", "libx264", "-y", mp4 ]) ""
+      check "generate 4s test mp4: exit Success" ExitSuccess ecGen
+      when (ecGen /= ExitSuccess) (putStrLn ("ffmpeg mp4 gen stderr: " ++ show genErr))
+      (ec, _, hlsErr) <- readCreateProcessWithExitCode
+        (proc "ffmpeg" (hlsArgs mp4 m3u8)) ""
+      check "hlsArgs run on 4s mp4: exit Success" ExitSuccess ec
+      when (ec /= ExitSuccess) (putStrLn ("ffmpeg hls stderr: " ++ show hlsErr))
+      m3u8Exists <- doesFileExist m3u8
+      check "main.m3u8 exists after ffmpeg" True m3u8Exists
+      playlist <- readFile m3u8
+      check "playlist starts with #EXTM3U" True ("#EXTM3U" `isPrefixOf` playlist)
+      let segNames = filter (".ts" `isSuffixOf`) (lines playlist)
+      check "playlist references at least one .ts segment" True (not (null segNames))
+      segsExist <- mapM (\s -> doesFileExist (outDir </> s)) segNames
+      check "all referenced .ts segments exist on disk" True (and segsExist)
+      removeDirectoryRecursive outDir
+      removeFile mp4
 
   putStrLn "All tests passed."

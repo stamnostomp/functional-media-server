@@ -34,6 +34,7 @@ library
                       FMS.Modules.System
                       FMS.Modules.Stream
                       FMS.Modules.Transcode
+                      FMS.Modules.Hls
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
                       FMS.Modules.Library.Routes

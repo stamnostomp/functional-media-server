@@ -11,6 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory
@@ -20,7 +21,9 @@ import System.Directory
   , findExecutable
   , removeDirectoryRecursive
   , removeFile
+  , setModificationTime
   )
+import System.Posix.Files (createSymbolicLink)
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
@@ -43,7 +46,18 @@ import FMS.Core.Types.ServerConfig
 import FMS.Core.Types.User (User(..), toInternalJSON)
 import FMS.Modules.Auth.Monad (hashPassword, verifyPassword)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
-import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
+import FMS.Modules.Library.Monad (withScanLock)
+import FMS.Modules.Library.Scan
+  ( diffScan
+  , isCircular
+  , isMediaFile
+  , itemFromPath
+  , mimeFor
+  , planRescan
+  , scanDirectory
+  , walk
+  , walkWithLoops
+  )
 import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popular)
 import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
@@ -59,7 +73,10 @@ import FMS.Modules.Library.State
   ( GetAllItems(..)
   , GetIdByPath(..)
   , GetItemById(..)
+  , ListPaths(..)
   , RegisterItem(..)
+  , RemovePaths(..)
+  , UpdateItemMeta(..)
   , initialLibraryState
   )
 import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
@@ -145,21 +162,88 @@ main = do
   writeFile (scanDir </> "Movies" </> "a.mp4") "dummy video"  -- 11 bytes
   writeFile (scanDir </> "song.mp3") "dummy audio"           -- 11 bytes
   writeFile (scanDir </> "notes.txt") "not media"
-  scanned <- scanDirectory scanDir
-  check "scan finds only media files"
+  scanned <- scanDirectory False scanDir
+  check "scan finds only media file paths"
     (sort [scanDir </> "Movies" </> "a.mp4", scanDir </> "song.mp3"])
-    (sort (map itemPath scanned))
-  check "scan titles are base names" ["a", "song"] (sort (map (T.unpack . itemTitle) scanned))
-  check "scan sizes" [11, 11] (sort (map itemSize scanned))
-  check "scan mimes" ["audio/mpeg", "video/mp4"] (sort (map (T.unpack . itemMime) scanned))
-  check "scan assigns empty id (RegisterItem fills it)" ["", ""] (sort (map (T.unpack . itemId) scanned))
+    (sort scanned)
+  scannedItems <- mapM itemFromPath scanned
+  check "scan titles are base names" ["a", "song"] (sort (map (T.unpack . itemTitle) scannedItems))
+  check "scan sizes" [11, 11] (sort (map itemSize scannedItems))
+  check "scan mimes" ["audio/mpeg", "video/mp4"] (sort (map (T.unpack . itemMime) scannedItems))
+  check "scan assigns empty id (RegisterItem fills it)" ["", ""] (sort (map (T.unpack . itemId) scannedItems))
   check "mimeFor .mp4" "video/mp4" (mimeFor (scanDir </> "Movies" </> "a.mp4"))
   check "mimeFor .mp3" "audio/mpeg" (mimeFor (scanDir </> "song.mp3"))
   check "isMediaFile .txt is False" False (isMediaFile (scanDir </> "notes.txt"))
   check "isMediaFile .MKV (case-insensitive) is True" True (isMediaFile "/x/Y.MKV")
-  missing <- scanDirectory "/tmp/fms-test-scan-does-not-exist"
+  missing <- scanDirectory False "/tmp/fms-test-scan-does-not-exist"
   check "scan of missing dir is []" [] missing
   removeDirectoryRecursive scanDir
+
+  -- Incremental rescan pure helpers (milestone 2b, docs/todo.org section 2).
+  check "diffScan unchanged" ([], []) (diffScan ["a", "b"] ["b", "a"])
+  check "diffScan add/remove" (["a"], ["c"]) (diffScan ["a", "b"] ["b", "c"])
+  check "diffScan empty" ([], []) (diffScan [] [])
+  check "diffScan all new" ([], ["x", "y"]) (diffScan [] ["y", "x"])
+  check "isCircular hit" True (isCircular (Set.fromList ["/x"]) "/x")
+  check "isCircular miss" False (isCircular (Set.fromList ["/x"]) "/y")
+  check "isCircular empty" False (isCircular Set.empty "/x")
+  tNow <- getCurrentTime
+  let pt1 = tNow
+      pt2 = addUTCTime 5 tNow
+  check "planRescan mixed (removed, changedOrNew, unchanged)"
+    (["gone"], ["changed", "new"], ["same"])
+    (planRescan
+      [("same", 10, pt1), ("changed", 20, pt2), ("new", 5, pt1)]
+      [("same", Just (10, pt1)), ("changed", Just (10, pt1)), ("gone", Just (1, pt1))])
+  check "planRescan no existing (all new)"
+    ([], ["a", "b"], [])
+    (planRescan [("a", 1, pt1), ("b", 2, pt1)] [])
+  check "planRescan all removed"
+    (["x"], [], [])
+    (planRescan [] [("x", Just (1, pt1))])
+  check "planRescan unknown existing meta counts as changed"
+    ([], ["mystery"], [])
+    (planRescan [("mystery", 3, pt1)] [("mystery", Nothing)])
+
+  -- Symlink walk policy (milestone 2b): follow=False skips all symlinks;
+  -- follow=True follows file symlinks and detects circular dir chains.
+  let linkDir = "/tmp/fms-test-symlinks"
+  resetDir linkDir
+  createDirectoryIfMissing True (linkDir </> "real")
+  writeFile (linkDir </> "real" </> "a.mp4") "x"
+  createSymbolicLink (linkDir </> "real" </> "a.mp4") (linkDir </> "link.mp4")
+  createSymbolicLink (linkDir </> "real") (linkDir </> "real" </> "self")
+  createSymbolicLink (linkDir </> "real") (linkDir </> "dup")
+  noFollow <- walk False linkDir
+  check "walk False skips symlinks entirely"
+    [linkDir </> "real" </> "a.mp4"] (sort noFollow)
+  scanNoFollow <- scanDirectory False linkDir
+  check "scanDirectory False skips symlinks"
+    [linkDir </> "real" </> "a.mp4"] (sort scanNoFollow)
+  (followFiles, followLoops) <- walkWithLoops True linkDir
+  check "walk True follows file symlinks (link path reported)"
+    (sort [linkDir </> "real" </> "a.mp4", linkDir </> "link.mp4"]) (sort followFiles)
+  check "walk True detects circular chain AND dir-symlink duplicate of a visited dir"
+    (sort [linkDir </> "real" </> "self", linkDir </> "dup"]) (sort followLoops)
+  check "walk of a missing dir is []" [] =<< walk True "/tmp/fms-test-symlinks-gone"
+  removeDirectoryRecursive linkDir
+
+  -- Scan lock (milestone 2b): creates/removes the lock dir around the
+  -- action; recovers a stale (> 60s) lock.
+  let lockDir = "/tmp/fms-test-scan.lock"
+  resetDir lockDir
+  heldInside <- withScanLock lockDir (doesDirectoryExist lockDir)
+  check "withScanLock holds the lock dir inside the action" True heldInside
+  heldAfter <- doesDirectoryExist lockDir
+  check "withScanLock releases the lock dir after the action" False heldAfter
+  createDirectoryIfMissing True lockDir
+  staleTime <- getCurrentTime
+  setModificationTime lockDir (addUTCTime (-120) staleTime)
+  recovered <- withScanLock lockDir (pure True)
+  check "withScanLock recovers a stale lock" True recovered
+  releasedAfter <- doesDirectoryExist lockDir
+  check "withScanLock cleans up after stale recovery" False releasedAfter
+  resetDir lockDir
 
   -- acid-state persistence + stable ids (docs/acid-state.org test).
   let acidDir = "/tmp/fms-test-acid"
@@ -190,6 +274,27 @@ main = do
     (Just (testItem { itemId = id1 })) mItem
   allItems <- query st2 GetAllItems
   check "GetAllItems has exactly one item" 1 (length allItems)
+  -- Milestone 2b acid events: incremental rescan touches.
+  paths <- query st2 ListPaths
+  check "ListPaths returns the registered path" ["/x.mp4"] paths
+  let later = addUTCTime 10 now
+  changed <- update st2 (UpdateItemMeta "/x.mp4" 43 later)
+  check "UpdateItemMeta reports a change" True changed
+  unchanged <- update st2 (UpdateItemMeta "/x.mp4" 43 later)
+  check "UpdateItemMeta reports no-op on same size/mtime" False unchanged
+  mItem2 <- query st2 (GetItemById id1)
+  check "UpdateItemMeta stored the new size/mtime"
+    (Just (testItem { itemId = id1, itemSize = 43, itemAddedAt = later })) mItem2
+  noPath <- update st2 (UpdateItemMeta "/nope.mp4" 1 now)
+  check "UpdateItemMeta on unknown path is False" False noPath
+  removed <- update st2 (RemovePaths ["/x.mp4", "/nope.mp4"])
+  check "RemovePaths counts only known paths" 1 removed
+  pathsAfter <- query st2 ListPaths
+  check "RemovePaths removed the path" [] pathsAfter
+  mGone <- query st2 (GetItemById id1)
+  check "RemovePaths removed the item" Nothing mGone
+  id4 <- update st2 (RegisterItem "/x.mp4" testItem)
+  check "re-register after removal allocates a fresh id" True (id4 /= id1)
   closeAcidState st2
   removeDirectoryRecursive acidDir
 

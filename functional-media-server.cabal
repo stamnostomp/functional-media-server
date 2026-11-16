@@ -125,6 +125,7 @@ test-suite fms-test
                     , acid-state
                     , safecopy
                     , process
+                    , unix
                     , aeson
                     , functional-media-server
 

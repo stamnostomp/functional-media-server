@@ -40,10 +40,11 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
    - [X] Test persistence across restarts (unit test + live restart check)
    - [ ] Checkpoint on shutdown (createCheckpointAndClose via signal handler)
 ** DONE Filesystem scanner with media-extension filter and mime mapping
-** TODO Handle symbolic links: follow/ignore option, detect circular chains :fix:
-** TODO Fix race conditions during scan (file locking, files changing mid-scan) :fix:
+** DONE Symlink policy: skipped by default; FMS_FOLLOW_SYMLINKS=true follows; circular chains detected + logged :fix:
+** DONE Scan lock (stateDir/scan.lock, atomic createDirectory, 60s stale recovery) :fix:
 ** TODO Parallel directory walking :improvement:
-** TODO Incremental scanning + filesystem event watching (inotify/FSEvents) :improvement:
+** DONE Incremental rescan: planRescan vs acid state (add/change/remove), ids stable on modify :improvement:
+** TODO Filesystem event watching (inotify/FSEvents) :improvement:
 ** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
 ** TODO Filtering (type, genre, year), fuller search endpoint :improvement:
    - [X] search + sortBy/sortOrder + startIndex/limit on GET /items (envelope {Items, TotalRecordCount, StartIndex})

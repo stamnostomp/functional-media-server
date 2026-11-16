@@ -4,6 +4,7 @@ import Data.Char (toLower)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import System.Environment (lookupEnv)
+import System.IO (BufferMode (..), hSetBuffering, stderr, stdout)
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.Config (Config(..))
@@ -20,6 +21,11 @@ import FMS.Server (runServer)
 -- the admin user.
 main :: IO ()
 main = do
+  -- Line-buffer the process output so [INFO]/[ERROR] log lines show up in
+  -- redirected log files immediately (milestone 2b: circular-symlink
+  -- skips must be visible in the server log).
+  hSetBuffering stdout LineBuffering
+  hSetBuffering stderr LineBuffering
   mState <- lookupEnv "FMS_STATE_DIR"
   let stateDir = fromMaybe "./var" mState
   fileCfg <- loadServerConfig (serverConfigFilePath stateDir)
@@ -27,6 +33,7 @@ main = do
   mLib   <- lookupEnv "MEDIA_LIBRARY_PATH"
   mAuth  <- lookupEnv "FMS_REQUIRE_AUTH"
   mName  <- lookupEnv "FMS_SERVER_NAME"
+  mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -42,6 +49,8 @@ main = do
         , configStateDir    = stateDir
         , configRequireAuth = scRequireAuth sc
         , configServerName  = scServerName sc
+        , configFollowSymlinks = maybe False
+            (\v -> map toLower v `elem` ["true", "1", "yes"]) mFollow
         , configTmdbApiKey  = T.pack (fromMaybe "" mTmdb)
         }
   runServer cfg

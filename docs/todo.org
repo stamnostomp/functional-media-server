@@ -38,8 +38,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Scanner: recursive walk, media-extension filter, mime map
 ** DONE Library API: GET /library, GET /library/:id, POST /library/rescan
 ** DONE [#A] Stable IDs via acid-state (see [[file:acid-state.org][acid-state.org]]) - monotonic ids persisted across restarts
-** TODO Symlink policy (follow/ignore, circular detection) and race-safe scanning
-** TODO Incremental scan + filesystem watching (inotify/FSEvents)
+** DONE Symlink policy (skip default, FMS_FOLLOW_SYMLINKS follows, circular chains logged) + scan lock (scan.lock, stale recovery)
+** TODO Filesystem watching (inotify/FSEvents)
+   - [X] incremental rescan: add/change/remove detected via planRescan + acid events, ids stable on modify
 ** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
 ** TODO Multi-version media (multiple files for one movie, version selection)
 ** TODO Extras: trailers, behind-the-scenes, deleted scenes, theme songs/videos

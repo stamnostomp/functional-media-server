@@ -49,6 +49,7 @@ library
                       FMS.Modules.Transcode
                       FMS.Modules.Hls
                       FMS.Modules.Subtitles
+                      FMS.Modules.Chapters
                       FMS.Modules.Thumbs
                       FMS.Modules.Images
                       FMS.Modules.Stats

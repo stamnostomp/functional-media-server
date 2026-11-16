@@ -52,6 +52,7 @@ import FMS.Modules.Webhooks (webhooksModule)
 import FMS.Modules.System (systemModule)
 import FMS.Modules.Stream (streamModule)
 import FMS.Modules.Subtitles (subtitlesModule)
+import FMS.Modules.Chapters (chaptersModule)
 import FMS.Modules.Thumbs (thumbsModule)
 import FMS.Modules.Transcode (transcodeModule)
 import FMS.Modules.Web (webModule)
@@ -62,7 +63,8 @@ modules :: [Module]
 modules =
   [ systemModule, authModule, libraryModule, playbackModule, streamModule
   , transcodeModule
-  , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
+  , hlsModule, subtitlesModule, chaptersModule, thumbsModule, imagesModule
+  , statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
   , collectionsModule, socketModule
   , devicesModule

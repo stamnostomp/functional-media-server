@@ -88,6 +88,7 @@ import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
+import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Transcode (transcodeArgs)
 import FMS.Modules.Library.State
@@ -2111,5 +2112,54 @@ main = do
   check "versionPathFor single-file item: only index 0"
     [Right (itemPath v4), Left "no such version"]
     [versionPathFor v4 0, versionPathFor v4 1]
+
+  -- Milestone 6e (chapter images): fallbackChapters, parseChaptersJson,
+  -- ticks, JSON shape, cache path, ffprobe/ffmpeg arg lists.
+  check "fallbackChapters: 10 evenly spaced starts over 100s, no titles"
+    ([(i, fromIntegral (i * 10) :: Double, Nothing) | i <- [0 .. 9 :: Int]])
+    [(chIndex c, chStartSeconds c, chTitle c) | c <- fallbackChapters 100 10]
+  check "fallbackChapters: count <= 0 defaults to 10"
+    10 (length (fallbackChapters 100 0))
+  check "fallbackChapters: duration 0 -> single chapter at 0"
+    [Chapter 0 0 Nothing] (fallbackChapters 0 10)
+  check "fallbackChapters: negative duration -> single chapter at 0"
+    [Chapter 0 0 Nothing] (fallbackChapters (-5) 10)
+  check "ticksFromSeconds: 100ns units"
+    [0, 15000000, 305000000] (map ticksFromSeconds [0, 1.5, 30.5])
+  let probeJson = LBSC.pack
+        "{\"format\":{\"duration\":\"125.5\"},\"chapters\":["
+        <> LBSC.pack
+        "{\"start_time\":\"0.000000\",\"tags\":{\"title\":\"Intro\"}},"
+        <> LBSC.pack "{\"start_time\":\"30.5\",\"end_time\":\"60.0\"}]}"
+  check "parseChaptersJson: duration + chapters with tags"
+    (Right (Just 125.5, [Chapter 0 0 (Just "Intro"), Chapter 1 30.5 Nothing]))
+    (parseChaptersJson probeJson)
+  check "parseChaptersJson: no chapters -> empty list, numeric duration ok"
+    (Right (Just 42, []))
+    (parseChaptersJson (LBSC.pack "{\"format\":{\"duration\":42},\"chapters\":[]}"))
+  check "parseChaptersJson: malformed JSON -> Left"
+    ("Left" :: String) (either (const "Left") (const "Right") (parseChaptersJson (LBSC.pack "{nope")))
+  check "chapterToJson: Jellyfin shape, Name present when titled"
+    (Just (Aeson.Number 305000000), Just (Aeson.String "Scene"), Just (Aeson.String "2"))
+    (case chapterToJson (Chapter 2 30.5 (Just "Scene")) of
+       Aeson.Object o ->
+         ( KeyMap.lookup (Key.fromText "StartPositionTicks") o
+         , KeyMap.lookup (Key.fromText "Name") o
+         , KeyMap.lookup (Key.fromText "ImageTag") o )
+       _ -> (Nothing, Nothing, Nothing))
+  check "chapterToJson: Name omitted when untitled"
+    (False, Just (Aeson.Number 0))
+    (case chapterToJson (Chapter 0 0 Nothing) of
+       Aeson.Object o ->
+         ( KeyMap.member (Key.fromText "Name") o
+         , KeyMap.lookup (Key.fromText "StartPositionTicks") o )
+       _ -> (True, Nothing))
+  check "chapterImagePathFor: stateDir/chapters/<id>-<version>-<index>.jpg"
+    "/st/chapters/7-1-3.jpg" (chapterImagePathFor "/st" "7" 1 3)
+  check "probeChaptersArgs asks for chapters + format as JSON"
+    (True, True) (elem "-show_chapters" (probeChaptersArgs "x"), elem "-show_format" (probeChaptersArgs "x"))
+  check "chapterImageArgs: -ss start before -i, single mjpeg frame to pipe"
+    ["-ss", "30.5", "-i", "/m/a.mkv", "-frames:v", "1", "-q:v", "3", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"]
+    (dropWhile (/= "-ss") (chapterImageArgs "/m/a.mkv" 30.5))
 
   putStrLn "All tests passed."

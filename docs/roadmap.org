@@ -55,7 +55,9 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO [#B] File handle leaks / stalled streams :fix:
    - [X] File handles closed via bracket in streamFileRange
    - [ ] Timeout for stalled streams
-** TODO Transcoding via FFmpeg: on-the-fly for unsupported formats, quality/bitrate adaptation :feature:
+** TODO Transcoding via FFmpeg :feature:
+   - [X] GET /stream/:id/transcode: ffmpeg -> fragmented MP4 streamed via responseStream (ffmpeg nix-wrapped into the package)
+   - [ ] Quality/bitrate adaptation (transcode profiles per client)
 ** TODO Thumbnail generation :feature:
 ** TODO Subtitles: detection, streaming, format conversion (SRT/VTT) :feature:
 ** TODO HLS packaging for adaptive streaming :feature:

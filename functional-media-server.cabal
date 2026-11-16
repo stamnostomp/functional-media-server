@@ -33,6 +33,7 @@ library
                       FMS.Core.Types.MediaItem
                       FMS.Modules.System
                       FMS.Modules.Stream
+                      FMS.Modules.Transcode
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
                       FMS.Modules.Library.Routes
@@ -56,6 +57,7 @@ library
                     , wai
                     , warp
                     , http-types
+                    , process
 
 test-suite fms-test
     import:           shared
@@ -71,6 +73,7 @@ test-suite fms-test
                     , time
                     , acid-state
                     , safecopy
+                    , process
                     , functional-media-server
 
 executable fms

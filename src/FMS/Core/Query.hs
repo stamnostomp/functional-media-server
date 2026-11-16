@@ -4,6 +4,9 @@ module FMS.Core.Query
   , filterByFolder
   , filterByType
   , filterBySeries
+  , filterByIncludeTypes
+  , itemYear
+  , filterByYears
   , showsFromItems
   , sortEpisodes
   , sortItems
@@ -14,7 +17,7 @@ module FMS.Core.Query
 import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.List (sortBy)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -59,6 +62,40 @@ filterBySeries mSeries = case mSeries of
   Nothing -> id
   Just s  -> filter (\i -> itemSeries i == Just s)
 
+-- | Milestone 4e: keep only items whose 'itemType' appears in the
+-- comma-separated @includeItemTypes@ list (case-insensitive, whitespace
+-- trimmed). Missing or empty param -> identity.
+filterByIncludeTypes :: Maybe Text -> [MediaItem] -> [MediaItem]
+filterByIncludeTypes mParam = case mParam of
+  Nothing -> id
+  Just raw
+    | null wanted -> id
+    | otherwise   -> filter (\i -> T.toCaseFold (itemType i) `elem` wanted)
+    where
+      wanted = [ T.toCaseFold (T.strip t)
+               | t <- T.splitOn "," raw, not (T.null (T.strip t)) ]
+
+-- | The item's release year, if the item carries one. Milestone 4e:
+-- 'MediaItem' has no year field (checked in "FMS.Core.Types.MediaItem"),
+-- so this is always 'Nothing' for now and a non-empty @years@ list
+-- matches no item (Jellyfin semantics: an item matches only when its
+-- year is present and listed).
+itemYear :: MediaItem -> Maybe Int
+itemYear _ = Nothing
+
+-- | Milestone 4e: keep only items whose year is in the comma-separated
+-- @years@ list of ints. Invalid tokens are dropped; when no valid int
+-- remains the param acts as absent (identity).
+filterByYears :: Maybe Text -> [MediaItem] -> [MediaItem]
+filterByYears mParam = case mParam of
+  Nothing -> id
+  Just raw
+    | null years -> id
+    | otherwise  -> filter (\i -> maybe False (`elem` years) (itemYear i))
+    where
+      years = catMaybes [ readMaybe (T.unpack (T.strip t))
+                        | t <- T.splitOn "," raw, not (T.null (T.strip t)) ]
+
 -- | Pure (milestone 4d): the series present in the library as
 -- @(name, episodeCount)@, sorted by name. Only @Episode@ items with a
 -- series name count.
@@ -102,19 +139,28 @@ paginate mStart mLimit xs =
 
 -- | Apply the Jellyfin-shaped items query (docs/todo.org section 4) to a
 -- list of items: search, then the @libraryId@ folder filter (milestone
--- 2c), then the @type@ and @series@ filters (milestone 4d), then sort,
--- then paginate. Returns the total record count taken /before/ pagination
--- together with the page. Integer params (@startIndex@, @limit@) are
--- parsed with 'readMaybe'; invalid values are ignored and the defaults
--- apply.
+-- 2c), then the @type@ and @series@ filters (milestone 4d), then the
+-- @includeItemTypes@ and @years@ filters (milestone 4e), then sort, then
+-- paginate. @searchTerm@ is an alias of @search@ (@search@ wins when both
+-- are present). @recursive@ is accepted and ignored (the library is flat)
+-- and @filters@ is parsed but its IsPlayed/IsFavorite/IsResumable values
+-- are deferred -- unknown params are ignored anyway. Returns the total
+-- record count taken /before/ pagination together with the page. Integer
+-- params (@startIndex@, @limit@) are parsed with 'readMaybe'; invalid
+-- values are ignored and the defaults apply.
 applyItemQuery :: [(Text, Text)] -> [MediaItem] -> (Int, [MediaItem])
 applyItemQuery params items =
   let get name = lookup name params
-      searched = maybe items (`searchItems` items) (get "search")
+      searchTerm = case get "search" of
+        Just s  -> Just s
+        Nothing -> get "searchTerm"          -- milestone 4e alias
+      searched = maybe items (`searchItems` items) searchTerm
       inFolder = filterByFolder (get "libraryId") searched
       typed    = filterByType (get "type") inFolder
       series   = filterBySeries (get "series") typed
-      sorted   = sortItems (get "sortBy") (get "sortOrder") series
+      incTypes = filterByIncludeTypes (get "includeItemTypes") series
+      years    = filterByYears (get "years") incTypes
+      sorted   = sortItems (get "sortBy") (get "sortOrder") years
       total    = length sorted
       start    = get "startIndex" >>= readMaybe . T.unpack
       limit    = get "limit" >>= readMaybe . T.unpack

@@ -13,7 +13,14 @@ import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (MonadLog(..), envConfig, putState)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Library.Monad (MonadLibrary(..), initFolders, libraryAcidKey)
-import FMS.Modules.Library.Routes (itemsHandler, libraryRoutes)
+import FMS.Modules.Library.Routes
+  ( ancestorsHandler
+  , itemDetailHandler
+  , itemsCountsHandler
+  , itemsHandler
+  , libraryRoutes
+  , searchHintsHandler
+  )
 import FMS.Modules.Library.State (initialLibraryState)
 
 -- | The library module (docs/roadmap.org milestone 2, milestone 2c media
@@ -37,6 +44,16 @@ libraryModule = Module
       rescanLibrary
       logInfo "library module initialised"
     -- Milestone 4a (docs/todo.org section 4): the Jellyfin-shaped items
-    -- query endpoint lives next to the plain /library routes.
-  , moduleRoutes = libraryRoutes ++ [get [Lit "items"] (\captures req -> itemsHandler captures req)]
+    -- query endpoint lives next to the plain /library routes. Milestone
+    -- 4e: /items/Counts and /items/:id and /items/:id/Ancestors and
+    -- /Search/Hints. Routes are first-match wins, so the literal
+    -- [Lit "items", Lit "Counts"] MUST come before [Lit "items", Capture
+    -- "id"].
+  , moduleRoutes = libraryRoutes
+      ++ [ get [Lit "items"] (\captures req -> itemsHandler captures req)
+         , get [Lit "items", Lit "Counts"] itemsCountsHandler
+         , get [Lit "items", Capture "id"] itemDetailHandler
+         , get [Lit "items", Capture "id", Lit "Ancestors"] ancestorsHandler
+         , get [Lit "Search", Lit "Hints"] searchHintsHandler
+         ]
   }

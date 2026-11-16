@@ -1,12 +1,21 @@
 module FMS.Modules.Library.Routes
   ( libraryRoutes
   , itemsHandler
+  , itemsCountsHandler
+  , itemDetailHandler
+  , ancestorsHandler
+  , searchHintsHandler
   ) where
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
-import Data.Maybe (fromMaybe)
+import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
+import qualified Data.Aeson.Key as Key
+import Data.List (sortBy)
+import Data.Map.Strict (toAscList)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe)
+import Data.Ord (comparing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -16,8 +25,9 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM)
-import FMS.Core.Query (applyItemQuery, filterBySeries, queryParams, showsFromItems, sortEpisodes)
+import FMS.Core.Query (applyItemQuery, filterBySeries, queryParams, searchItems, showsFromItems, sortEpisodes)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
+import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 
@@ -181,3 +191,69 @@ captureName captures =
   case lookup "name" captures of
     Nothing -> throwError (BadRequest "missing name capture")
     Just n  -> pure n
+
+-- Milestone 4e: item detail / ancestors / counts / search hints -------------
+-- NOTE on registration order (FMS.Modules.Library): routes are first-match
+-- wins, so [Lit "items", Lit "Counts"] must be registered BEFORE
+-- [Lit "items", Capture "id"].
+
+-- | @GET \/items\/:id@ — one item, or 404. Same behaviour as
+-- @GET \/library\/:id@ (milestone 5d folder enforcement via
+-- 'getItemWithAccess'), on the Jellyfin-shaped /items path.
+itemDetailHandler :: [(Text, Text)] -> Request -> AppM Response
+itemDetailHandler = itemHandler
+
+-- | @GET \/items\/Counts@ — JSON object mapping item Type -> count over
+-- the requester-visible items, e.g. @{\"Movie\":2,\"Episode\":5}@.
+itemsCountsHandler :: [(Text, Text)] -> Request -> AppM Response
+itemsCountsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
+  let counts = toAscList (Map.fromListWith (+) [(itemType i, 1 :: Int) | i <- items])
+  pure (jsonResponse (object [ Key.fromText k .= n | (k, n) <- counts ]))
+
+-- | @GET \/items\/:id\/Ancestors@ — breadcrumb array: the item's media
+-- folder as @{\"Name\": folderName, \"Type\": \"CollectionFolder\"}@, then
+-- for episodes @{\"Name\": series, \"Type\": \"Series\"}@, then the item
+-- itself. 404 when the item is unknown (401 when the folder is denied).
+ancestorsHandler :: [(Text, Text)] -> Request -> AppM Response
+ancestorsHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          folders <- listFolders
+          let folderCrumb = case [ f | f <- folders, folderId f == itemFolder item ] of
+                (f : _) -> Just (object [ "Name" .= folderName f
+                                        , "Type" .= ("CollectionFolder" :: Text) ])
+                []      -> Nothing
+              seriesCrumb = case (itemType item, itemSeries item) of
+                ("Episode", Just s) ->
+                  Just (object [ "Name" .= s, "Type" .= ("Series" :: Text) ])
+                _ -> Nothing
+          pure (jsonResponse (catMaybes [folderCrumb, seriesCrumb] ++ [toJSON item]))
+
+-- | @GET \/Search\/Hints@ — query params @searchTerm@ (alias @term@) and
+-- @limit@ (default 20): an array of @{\"ItemId\",\"Name\",\"Type\"@ plus
+-- @\"Series\"@ when the item has one@}@ for the visible items whose title
+-- contains the term case-insensitively, sorted by Name and capped at
+-- @limit@. An empty term yields an empty array.
+searchHintsHandler :: [(Text, Text)] -> Request -> AppM Response
+searchHintsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser <$> listItems
+  let qparams = queryParams (queryString req)
+      term = case lookup "searchTerm" qparams of
+        Just t  -> t
+        Nothing -> fromMaybe "" (lookup "term" qparams)
+      limit = fromMaybe (20 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
+      hits = if T.null term
+               then []
+               else take limit (sortBy (comparing itemTitle) (searchItems term items))
+  pure (jsonResponse
+    [ object ([ "ItemId" .= itemId i, "Name" .= itemTitle i, "Type" .= itemType i ]
+              ++ maybe [] (\s -> ["Series" .= s]) (itemSeries i))
+    | i <- hits ])

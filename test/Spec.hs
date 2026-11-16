@@ -31,7 +31,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, filterByFolder, filterBySeries, filterByType, paginate, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
+import FMS.Core.Query (applyItemQuery, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, itemYear, paginate, queryParams, searchItems, showsFromItems, sortEpisodes, sortItems)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -1393,5 +1393,44 @@ main = do
   check "applyItemQuery series=MyShow&type=Episode"
     (3, [epA, epB, epC])
     (applyItemQuery [("series", "MyShow"), ("type", "Episode")] showItems)
+
+  -- Richer /items query (milestone 4e, docs/todo.org section 4).
+  check "itemYear is Nothing (MediaItem has no year field)"
+    Nothing (itemYear (qi "1" "movie"))
+  check "filterByIncludeTypes case-insensitive episode"
+    [epB, other, epA, epC] (filterByIncludeTypes (Just "episode") showItems)
+  check "filterByIncludeTypes Movie,Episode keeps all five"
+    showItems (filterByIncludeTypes (Just "Movie,Episode") showItems)
+  check "filterByIncludeTypes Audio matches nothing"
+    [] (filterByIncludeTypes (Just "Audio") showItems)
+  check "filterByIncludeTypes empty string is identity"
+    showItems (filterByIncludeTypes (Just "") showItems)
+  check "filterByIncludeTypes Nothing is identity"
+    showItems (filterByIncludeTypes Nothing showItems)
+  check "filterByYears with a listed year matches nothing (no year field)"
+    [] (filterByYears (Just "2022") showItems)
+  check "filterByYears with only invalid tokens is identity"
+    showItems (filterByYears (Just "abc") showItems)
+  check "filterByYears Nothing is identity"
+    showItems (filterByYears Nothing showItems)
+  check "applyItemQuery searchTerm is an alias of search"
+    (applyItemQuery [("search", "S01")] showItems)
+    (applyItemQuery [("searchTerm", "S01")] showItems)
+  check "applyItemQuery search wins over searchTerm when both present"
+    (applyItemQuery [("search", "movie")] showItems)
+    (applyItemQuery [("search", "movie"), ("searchTerm", "S01")] showItems)
+  check "applyItemQuery searchTerm=S01 finds S01E01+S01E02 sorted"
+    (2, [epA, epB]) (applyItemQuery [("searchTerm", "S01")] showItems)
+  check "applyItemQuery includeItemTypes=Episode (then title sort)"
+    (4, [other, epA, epB, epC])
+    (applyItemQuery [("includeItemTypes", "Episode")] showItems)
+  check "applyItemQuery includeItemTypes + years (no year field -> 0)"
+    (0, []) (applyItemQuery [("includeItemTypes", "Movie,Episode"), ("years", "2022")] showItems)
+  check "applyItemQuery recursive + filters accepted and ignored"
+    (applyItemQuery [] showItems)
+    (applyItemQuery [("recursive", "true"), ("filters", "IsPlayed,IsFavorite,IsResumable")] showItems)
+  check "applyItemQuery type=Episode still works alongside 4e params"
+    (4, [other, epA, epB, epC])
+    (applyItemQuery [("type", "Episode"), ("recursive", "false")] showItems)
 
   putStrLn "All tests passed."

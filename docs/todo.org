@@ -67,6 +67,7 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 5. Images API :feature:
 ** TODO =GET /Items/{id}/Images/{type}= with =maxWidth=/=maxHeight=/=quality=
+   - [X] =GET /items/:id/thumb= (ffmpeg frame at 5s -> cached JPEG in stateDir/thumbs)
 ** TODO Image tags and cache-busting; =POST= image upload, =DELETE= image
 ** TODO Backdrop fanart selection (=/Items/{id}/Images/Backdrop=, index)
 ** TODO Image resizing/transcoding (native or ImageMagick); blurhash placeholders

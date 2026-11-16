@@ -31,6 +31,7 @@ import FMS.Modules.Library.Scan (isMediaFile, mimeFor, scanDirectory)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
+import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Transcode (transcodeArgs)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
@@ -257,5 +258,44 @@ main = do
       when (ec /= ExitSuccess) (putStrLn ("ffmpeg subtitle stderr: " ++ show subErr))
       check "converted output contains WEBVTT" True ("WEBVTT" `isInfixOf` out)
       removeFile srt
+
+  -- Thumbs module (milestone 3e): the pure ffmpeg argument list + cache
+  -- path helper.
+  let thumbIn = "/tmp/fms-test-thumb-src.mp4"
+      thArgs  = thumbArgs thumbIn
+      thumbHasPair x y = any (\(a, b) -> a == x && b == y) (zip thArgs (drop 1 thArgs))
+  check "thumbArgs has -ss 5"            True (thumbHasPair "-ss" "5")
+  check "thumbArgs has -i <path>"        True (thumbHasPair "-i" thumbIn)
+  check "thumbArgs has -frames:v 1"      True (thumbHasPair "-frames:v" "1")
+  check "thumbArgs has -f image2"        True (thumbHasPair "-f" "image2")
+  check "thumbArgs has -vcodec mjpeg"    True (thumbHasPair "-vcodec" "mjpeg")
+  check "thumbArgs contains pipe:1"      True ("pipe:1" `elem` thArgs)
+  check "thumbPathFor joins stateDir/thumbs/id.jpg"
+    "/state/thumbs/7.jpg" (thumbPathFor "/state" "7")
+
+  -- IO test of the actual thumbnail extraction, guarded by ffmpeg
+  -- availability: skip gracefully when ffmpeg is not on PATH.
+  -- NOTE: thumbArgs seeks to 5s, so the source must be longer than 5s —
+  -- on a 2s clip ffmpeg 9.0.2 exits 234 with empty output (verified
+  -- empirically), hence the 6s lavfi source here.
+  case mFFmpeg of
+    Nothing -> putStrLn "SKIP: ffmpeg not found on PATH — skipping thumbs IO test"
+    Just _ -> do
+      let mp4 = "/tmp/fms-test-thumb-src.mp4"
+      (ecGen, _, genErr) <- readCreateProcessWithExitCode
+        (proc "ffmpeg"
+          [ "-f", "lavfi", "-i", "testsrc=duration=6:size=160x120:rate=10"
+          , "-c:v", "libx264", "-y", mp4 ]) ""
+      check "generate 6s test mp4: exit Success" ExitSuccess ecGen
+      when (ecGen /= ExitSuccess) (putStrLn ("ffmpeg mp4 gen stderr: " ++ show genErr))
+      (ec, out, thErr) <- readCreateProcessWithExitCode
+        (proc "ffmpeg" (thumbArgs mp4)) ""
+      check "thumbArgs run on 6s mp4: exit Success" ExitSuccess ec
+      when (ec /= ExitSuccess) (putStrLn ("ffmpeg thumb stderr: " ++ show thErr))
+      -- A JPEG starts with the SOI marker 0xFF 0xD8.
+      check "thumb output starts with JPEG SOI (FFD8)"
+        [0xFF, 0xD8] (map fromEnum (take 2 out))
+      check "thumb output is > 1000 bytes" True (length out > 1000)
+      removeFile mp4
 
   putStrLn "All tests passed."

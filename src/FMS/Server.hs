@@ -18,6 +18,7 @@ import FMS.Modules.Library (libraryModule)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Stream (streamModule)
 import FMS.Modules.Subtitles (subtitlesModule)
+import FMS.Modules.Thumbs (thumbsModule)
 import FMS.Modules.System (systemModule)
 import FMS.Modules.Transcode (transcodeModule)
 
@@ -26,7 +27,7 @@ import FMS.Modules.Transcode (transcodeModule)
 modules :: [Module]
 modules =
   [ systemModule, libraryModule, streamModule, transcodeModule, hlsModule
-  , subtitlesModule
+  , subtitlesModule, thumbsModule
   ]
 
 -- | Boot the server: build the environment, run each module's init, then

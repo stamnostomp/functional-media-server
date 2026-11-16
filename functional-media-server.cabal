@@ -36,6 +36,7 @@ library
                       FMS.Modules.Transcode
                       FMS.Modules.Hls
                       FMS.Modules.Subtitles
+                      FMS.Modules.Thumbs
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
                       FMS.Modules.Library.Routes

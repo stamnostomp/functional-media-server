@@ -76,7 +76,7 @@ import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
 import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
 import FMS.Modules.Stream (resolveRange)
-import FMS.Modules.Subtitles (pickSubtitles, subtitleExts, subtitleToVttArgs)
+import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Transcode (transcodeArgs)
 import FMS.Modules.Library.State
@@ -1492,5 +1492,79 @@ main = do
   check "attachUserData + projectFields: fields=UserData keeps the record"
     [ "UserData", "id" ]
     (keysOf (projectFields ["userdata"] (attachUserData (Just ud5eLookup) (qi "1" "movie") iv)))
+
+  -- Embedded subtitle streams (milestone 3f, docs/todo.org section 7).
+  let mkStream i t c l =
+        MediaStream i t c l Nothing Nothing Nothing Nothing Nothing
+      probeStreams =
+        [ mkStream 0 "Video" "h264" Nothing
+        , mkStream 1 "Audio" "aac" (Just "eng")
+        , mkStream 2 "Subtitle" "subrip" (Just "eng")
+        , mkStream 3 "Subtitle" "ass" Nothing
+        ]
+  check "embeddedSubtitleSources keeps only Subtitle streams (index, codec, language)"
+    [(2, "subrip", Just "eng"), (3, "ass", Nothing)]
+    (embeddedSubtitleSources probeStreams)
+  check "embeddedSubtitleSources of empty input is empty"
+    [] (embeddedSubtitleSources [])
+  check "embeddedSubtitleSources ignores video/audio streams"
+    [] (embeddedSubtitleSources [mkStream 0 "Video" "h264" Nothing, mkStream 1 "Audio" "aac" Nothing])
+  let mixedSrcs =
+        [ External "/m/clip.srt" "srt"
+        , External "/m/clip.vtt" "vtt"
+        , Embedded 2 "subrip" (Just "eng")
+        ]
+  check "indexSources assigns 0-based indexes, externals first then embedded"
+    [ (0, External "/m/clip.srt" "srt")
+    , (1, External "/m/clip.vtt" "vtt")
+    , (2, Embedded 2 "subrip" (Just "eng"))
+    ]
+    (indexSources mixedSrcs)
+  check "embeddedToVttArgs maps stream 0:n and converts to webvtt on stdout"
+    ["-v", "error", "-i", "/m/clip.mkv", "-map", "0:2", "-c:s", "webvtt", "-f", "webvtt", "pipe:1"]
+    (embeddedToVttArgs "/m/clip.mkv" 2)
+  -- IO: the combined source list on a real directory. A dummy media file
+  -- makes ffprobe fail -> only the external entry, no crash.
+  let subDir = "/tmp/fms-test-subs-3f"
+  resetDir subDir
+  createDirectoryIfMissing True subDir
+  let dummyMedia = subDir </> "clip.mp4"
+  BS.writeFile dummyMedia (BSC.pack "not a real media file")
+  BS.writeFile (subDir </> "clip.srt") (BSC.pack "1\n00:00:01,000 --> 00:00:02,000\nhello\n")
+  BS.writeFile (subDir </> "other.vtt") (BSC.pack "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n")
+  srcs3f <- subtitleListSources dummyMedia
+  check "subtitleListSources: external files first, probe failure adds no embedded"
+    [ External (subDir </> "clip.srt") "srt" ]
+    srcs3f
+  subs3f <- subtitleList dummyMedia
+  check "subtitleList keeps the milestone-3d shape (index, path, format)"
+    [(0, subDir </> "clip.srt", "srt")] subs3f
+  -- IO, ffprobe-guarded: a real container with an embedded srt stream.
+  mFFprobe <- findExecutable "ffprobe"
+  mFFmpeg3f <- findExecutable "ffmpeg"
+  case (mFFprobe, mFFmpeg3f) of
+    (Just _, Just _) -> do
+      let mkv = subDir </> "withsubs.mkv"
+          srt = subDir </> "withsubs.srt"
+      BS.writeFile srt (BSC.pack "1\n00:00:01,000 --> 00:00:02,000\nembedded hello\n")
+      (ecMux, _, muxErr) <- runProcessBS "ffmpeg"
+        [ "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=5"
+        , "-i", srt, "-map", "0:v", "-map", "1:s", "-c:v", "libx264"
+        , "-c:s", "srt", "-y", mkv ]
+      case ecMux of
+        ExitFailure _ ->
+          putStrLn ("SKIP: ffmpeg mux failed: " ++ show (showBS (LBS.toStrict muxErr)))
+        ExitSuccess -> do
+          srcsMkv <- subtitleListSources mkv
+          let embOk = case srcsMkv of
+                [ External p "srt", Embedded si codec _ ] ->
+                  p == subDir </> "withsubs.srt" && si == 1 && codec == "subrip"
+                _ -> False
+          check "subtitleListSources: external withsubs.srt first, then embedded stream 1 (subrip)"
+            True embOk
+          subsMkv <- subtitleList mkv
+          check "subtitleList on the muxed file still lists only the external file"
+            [(0, subDir </> "withsubs.srt", "srt")] subsMkv
+    _ -> putStrLn "SKIP: ffprobe/ffmpeg not found on PATH -- skipping embedded-subtitle IO test"
 
   putStrLn "All tests passed."

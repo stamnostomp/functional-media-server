@@ -114,7 +114,7 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 7. Subtitles :feature:
 ** DONE Detect external subtitle files (.srt/.vtt/.ass/.ssa/.sub) next to media (basename-preferred, GET /items/:id/subtitles)
-** TODO Embedded subtitle extraction via ffmpeg
+** DONE Embedded subtitle extraction via ffprobe+ffmpeg (SubtitleSource External|Embedded; listed after externals with embedded:true+streamIndex; /stream/:id/subtitle/:index serves -map 0:n as WebVTT)
 ** TODO Subtitle delivery
    - [X] Sidecar endpoints: GET /stream/:id/subtitle/:index -> text/vtt
    - [ ] Burn-in during transcode

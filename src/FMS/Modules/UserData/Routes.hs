@@ -4,7 +4,7 @@ module FMS.Modules.UserData.Routes
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), Value, eitherDecode, withObject, (.:))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither)
 import Data.CaseInsensitive (original)
 import Data.HashMap.Strict (HashMap)
@@ -21,6 +21,7 @@ import FMS.Core.Types.MediaItem (MediaItem)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (..))
 import FMS.Modules.Library (MonadLibrary (..))
+import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.UserData.Monad
   ( MonadUserData (..)
   , markPlayed
@@ -90,6 +91,11 @@ updateUserDataHandler captures req = do
         Left err -> throwError (BadRequest ("invalid UserData field: " <> T.pack err))
         Right merged -> do
           ud <- updateUserData uid iid (const merged)
+          _ <- broadcastSocket "UserDataSaved" (object   -- milestone 8
+                 [ "UserId"   .= uid
+                 , "ItemId"   .= iid
+                 , "UserData" .= toJSON ud
+                 ])
           pure (jsonResponse ud)
 
 -- | @POST /Users/:userId/PlayedItems/:itemId@ with @{\"Played\": true|false}@ —

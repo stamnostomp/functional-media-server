@@ -13,6 +13,9 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Acid (AcidState)
 import Data.Acid.Local (createCheckpointAndClose)
+import Network.Wai (Application, pathInfo)
+import Network.WebSockets (defaultConnectionOptions)
+import qualified Network.Wai.Handler.WebSockets as WS
 import Network.Wai.Handler.Warp
   ( defaultSettings, runSettings, setGracefulShutdownTimeout, setPort )
 import System.Directory (createDirectoryIfMissing)
@@ -39,6 +42,7 @@ import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Playback (playbackModule)
 import FMS.Modules.Playlists (playlistsModule)
 import FMS.Modules.Sessions (sessionsModule)
+import FMS.Modules.Socket (socketFallback, socketModule, socketServerApp)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Stats (statsModule)
 import FMS.Modules.UserData (userDataModule)
@@ -57,7 +61,7 @@ modules =
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
-  , collectionsModule
+  , collectionsModule, socketModule
   , webModule, apiDocsModule
   ]
 
@@ -103,7 +107,16 @@ runServer cfg = do
   let settings = setPort (configPort cfg)
                  $ setGracefulShutdownTimeout (Just 5)
                  $ defaultSettings
-      app = buildApplication appEnv modules
+      routerApp = buildApplication appEnv modules
+      -- Milestone 8: the WebSocket endpoint at /Socket (case-insensitive)
+      -- is served via wai-websockets; everything else goes to the normal
+      -- router app. A non-upgrade request to /Socket gets a plain 400.
+      wsApp = WS.websocketsOr defaultConnectionOptions
+                (socketServerApp appEnv) socketFallback
+      app :: Application
+      app req respond
+        | map T.toLower (pathInfo req) == ["socket"] = wsApp req respond
+        | otherwise = routerApp req respond
   warpThread <- forkIO (runSettings settings app)
   tag <- takeMVar shutdownMv
   _ <- runApp appEnv (logActivity "Server" ("server " <> tag <> " requested"))

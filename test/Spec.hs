@@ -102,6 +102,7 @@ import FMS.Modules.Playlists.Types (Playlist (..))
 import qualified FMS.Modules.Collections.Monad as CM
 import FMS.Modules.Collections.Persistence (loadCollections, saveCollections)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdFor, boxSetItemValue, isBoxSetId)
+import FMS.Modules.Socket (addConn, encodeMessage, parseApiKey, parseApiKeyFromPath, removeConn)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
   , directPlayable
@@ -1729,5 +1730,37 @@ main = do
   removeFile colFile
   check "loadCollections of a missing file is empty"
     HM.empty =<< loadCollections "/tmp/fms-test-collections-gone.json"
+
+  -- WebSocket socket API (milestone 8): pure message encoding, api_key
+  -- extraction, and the connection-registry helpers.
+  let kaMsg = LBSC.unpack (encodeMessage "KeepAlive" (Aeson.object []))
+  check "encodeMessage shape {\"MessageType\",\"Data\"}"
+    True (  "\"MessageType\":\"KeepAlive\"" `isInfixOf` kaMsg
+         && "\"Data\":{}" `isInfixOf` kaMsg )
+  let paMsg = LBSC.unpack (encodeMessage "LibraryChanged" (Aeson.toJSON (["a", "b"] :: [T.Text])))
+  check "encodeMessage carries the Data payload"
+    True (  "\"MessageType\":\"LibraryChanged\"" `isInfixOf` paMsg
+         && "\"Data\":[\"a\",\"b\"]" `isInfixOf` paMsg )
+  check "parseApiKey reads api_key" (Just "k1") (parseApiKey [("api_key", "k1")])
+  check "parseApiKey falls back to token" (Just "t1") (parseApiKey [("token", "t1")])
+  check "parseApiKey prefers api_key over token" (Just "k1")
+    (parseApiKey [("api_key", "k1"), ("token", "t1")])
+  check "parseApiKey ignores empty values" Nothing (parseApiKey [("api_key", "")])
+  check "parseApiKey with no params is Nothing" Nothing (parseApiKey [])
+  check "parseApiKeyFromPath parses /Socket?api_key=k9"
+    (Just "k9") (parseApiKeyFromPath (BSC.pack "/Socket?api_key=k9"))
+  check "parseApiKeyFromPath with token param and extra params"
+    (Just "t2") (parseApiKeyFromPath (BSC.pack "/socket?foo=1&token=t2"))
+  check "parseApiKeyFromPath without query is Nothing"
+    Nothing (parseApiKeyFromPath (BSC.pack "/Socket"))
+  check "addConn appends"
+    ([(1, "c1"), (2, "c2")] :: [(Int, T.Text)])
+    (addConn (2 :: Int) ("c2" :: T.Text) (addConn (1 :: Int) "c1" []))
+  check "removeConn removes only the matching key"
+    ([(2, "c2")] :: [(Int, T.Text)])
+    (removeConn (1 :: Int) [(1, "c1"), (2, "c2")])
+  check "removeConn of a missing key is identity"
+    ([(1, "c1")] :: [(Int, T.Text)])
+    (removeConn (9 :: Int) [(1, "c1")])
 
   putStrLn "All tests passed."

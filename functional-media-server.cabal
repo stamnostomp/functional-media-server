@@ -90,6 +90,7 @@ library
                       FMS.Modules.Sessions.Types
                       FMS.Modules.Sessions.Monad
                       FMS.Modules.Sessions.Routes
+                      FMS.Modules.Socket
                       FMS.Modules.Admin
                       FMS.Modules.Admin.Types
                       FMS.Modules.Admin.Monad
@@ -115,6 +116,8 @@ library
                     , safecopy
                     , wai
                     , warp
+                    , websockets
+                    , wai-websockets
                     , network
                     , http-types
                     , http-conduit

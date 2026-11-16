@@ -20,7 +20,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO CORS handling
    - [X] OPTIONS preflight (204) + permissive CORS headers on every response
    - [ ] CORS configurable per config
-** TODO WebSocket endpoint (=Socket=) for server events
+** DONE WebSocket endpoint (=GET /Socket=, websockets/wai-websockets): api_key query auth (skipped when auth off), KeepAlive 10s, broadcasts PlaybackStart/Progress/Stop, LibraryChanged, UserDataSaved as {"MessageType","Data"}
 ** TODO Error model
    - [X] AppError (NotFound/BadRequest/InternalError) -> 404/400/500 in the router; exceptions caught as 500
    - [X] request IDs: X-Request-Id on every response, mirrored as requestId in JSON error bodies

@@ -4,7 +4,7 @@ module FMS.Modules.Sessions.Routes
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), eitherDecode, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, object, withObject, (.:), (.:?), (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -15,6 +15,7 @@ import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (resolveToken))
+import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.Library (MonadLibrary (..))
 import FMS.Modules.Sessions.Monad (MonadSessions (..))
 
@@ -111,6 +112,7 @@ playingHandler _captures req = do
           mUser <- currentUserFromRequest req
           let pos = fromMaybe 0 (plPositionSeconds pr)
           s <- startSession (plItemId pr) (userId <$> mUser) pos
+          _ <- broadcastSocket "PlaybackStart" (toJSON s)   -- milestone 8
           pure (jsonResponse s)
 
 -- | @POST /Sessions/Playing/Progress@ — update position/pause of a live
@@ -126,7 +128,9 @@ progressReportHandler _captures req = do
                  (fromMaybe False (prIsPaused pr))
       case mS of
         Nothing -> throwError (NotFound ("no active session with id " <> prSessionId pr))
-        Just s  -> pure (jsonResponse s)
+        Just s  -> do
+          _ <- broadcastSocket "PlaybackProgress" (toJSON s)   -- milestone 8
+          pure (jsonResponse s)
 
 -- | @POST /Sessions/Playing/Ping@ — heartbeat: bumps LastPingAt so the
 -- session is not expired as stale. 400 on a malformed body, 404 for an
@@ -158,6 +162,11 @@ stoppedHandler _captures req = do
         Nothing -> throwError (NotFound ("no library item with id " <> stItemId sr))
         Just _ -> do
           stopSession (stSessionId sr) (stPositionSeconds sr)
+          _ <- broadcastSocket "PlaybackStop" (object   -- milestone 8
+                 [ "ItemId"          .= stItemId sr
+                 , "PlaySessionId"   .= stSessionId sr
+                 , "PositionSeconds" .= fromMaybe 0 (stPositionSeconds sr)
+                 ])
           pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
 -- | @GET /Sessions@ — 200 JSON array of the active sessions (stale ones

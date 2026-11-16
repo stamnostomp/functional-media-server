@@ -37,6 +37,7 @@ import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleIte
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
+import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.UserData.Monad (MonadUserData (..))
 import FMS.Modules.UserData.Types (UserData)
 
@@ -156,10 +157,12 @@ itemHandler captures req =
         Just item -> pure (jsonResponse item)
 
 -- | @POST \/library\/rescan@ — rescan the library (all media folders),
--- then @{\"status\":\"ok\"}@.
+-- then @{\"status\":\"ok\"}@. Milestone 8: broadcasts @LibraryChanged@ to
+-- all WebSocket clients after the rescan.
 rescanHandler :: [(Text, Text)] -> Request -> AppM Response
 rescanHandler _captures _req = do
   rescanLibrary
+  _ <- broadcastSocket "LibraryChanged" (object [])
   pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
 -- Media folders (milestone 2c) -------------------------------------------------

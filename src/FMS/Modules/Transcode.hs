@@ -4,7 +4,7 @@ module FMS.Modules.Transcode
   , transcodeArgsWith
   , effectiveBitrateCap
   , hwEncoderFor
-  , normalizeHwAccel
+  , normalizeHwAccel  -- re-exported from FMS.Core.Types.Config
   ) where
 
 import Control.Monad.Except (throwError)
@@ -21,7 +21,7 @@ import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM, envConfig)
 import FMS.Core.Process (runProcessStreamBS)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
-import FMS.Core.Types.Config (Config(..))
+import FMS.Core.Types.Config (Config(..), normalizeHwAccel)
 import FMS.Core.Types.Policy (UserPolicy(..))
 import FMS.Core.Types.User (User(..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess)
@@ -50,15 +50,6 @@ transcodeModule = Module
 -- bitrate cap.
 transcodeArgs :: FilePath -> [String]
 transcodeArgs = transcodeArgsWith "none" Nothing
-
--- | Normalise a hardware-acceleration name (milestone 6f): case-
--- insensitive; anything but vaapi/nvenc/qsv/videotoolbox becomes
--- @\"none\"@. Pure so it is unit-testable (and reused by app/Main.hs for
--- the FMS_HWACCEL env var).
-normalizeHwAccel :: Text -> Text
-normalizeHwAccel t =
-  let l = T.toLower (T.strip t)
-  in if l `elem` ["vaapi", "nvenc", "qsv", "videotoolbox"] then l else "none"
 
 -- | The H.264 encoder matching a hardware-acceleration name
 -- (milestone 6f): vaapi -> h264_vaapi, nvenc -> h264_nvenc, qsv ->

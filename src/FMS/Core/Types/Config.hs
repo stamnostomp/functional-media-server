@@ -1,8 +1,12 @@
 module FMS.Core.Types.Config
   ( Config(..)
+  , normalizeHwAccel
+  , validateConfig
   ) where
 
+import Data.Char (toLower)
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | Server configuration. Loaded from CLI args / env vars in @app/Main.hs@;
 -- more fields (stats path, cache path) land with later milestones
@@ -24,3 +28,44 @@ data Config = Config
   , configHwAccel    :: !Text            -- ^ transcode hardware acceleration: none|vaapi|nvenc|qsv|videotoolbox (env FMS_HWACCEL, default \"none\"; milestone 6f)
   , configWatch      :: !Bool            -- ^ inotify auto-rescan on media changes (env FMS_WATCH, default False; milestone 2d)
   } deriving (Show, Eq)
+
+-- | Normalise a hardware-acceleration name (milestone 6f): case-
+-- insensitive; anything but vaapi/nvenc/qsv/videotoolbox becomes
+-- @\"none\"@. Pure. (Lives here rather than in the Transcode module so
+-- 'validateConfig' can use it without an import cycle.)
+normalizeHwAccel :: Text -> Text
+normalizeHwAccel t =
+  let l = T.toLower (T.strip t)
+  in if l `elem` ["vaapi", "nvenc", "qsv", "videotoolbox"] then l else "none"
+
+-- | Validate a fully-assembled 'Config' (milestone 1d): port in
+-- 1..65535, non-empty library path and state dir, known log level
+-- (debug/info/warn/error, case-insensitive — normalised to lowercase),
+-- non-empty CORS origin list, normalised hwaccel, non-negative password
+-- minimum length and max bitrate. Returns the (possibly normalised)
+-- config on 'Right', or an ASCII 'Left' message the entry point prints
+-- before exiting with code 2.
+validateConfig :: Config -> Either Text Config
+validateConfig cfg
+  | configPort cfg < 1 || configPort cfg > 65535 =
+      Left ("invalid port " <> T.pack (show (configPort cfg))
+            <> " (must be 1..65535)")
+  | null (configLibraryPath cfg) =
+      Left "library path must not be empty"
+  | null (configStateDir cfg) =
+      Left "state dir must not be empty"
+  | not (logLvl `elem` ["debug", "info", "warn", "error"]) =
+      Left ("invalid log level: " <> configLogLevel cfg
+            <> " (expected debug|info|warn|error)")
+  | null (configCorsOrigins cfg) =
+      Left "CORS origins list must not be empty"
+  | configPasswordMinLength cfg < 0 =
+      Left "password min length must be >= 0"
+  | configMaxBitrate cfg < 0 =
+      Left "max bitrate must be >= 0"
+  | otherwise = Right cfg
+      { configLogLevel = T.pack logLvl
+      , configHwAccel  = normalizeHwAccel (configHwAccel cfg)
+      }
+  where
+    logLvl = map toLower (T.unpack (configLogLevel cfg))

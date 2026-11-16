@@ -33,8 +33,9 @@ import System.Posix.Files (createSymbolicLink)
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
+import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
-import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (runProcessBS, showBS)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
@@ -2379,5 +2380,55 @@ main = do
   missingSegs <- loadSegments "/tmp/fms-test-segments-does-not-exist.json"
   check "loadSegments of a missing file is empty" HM.empty missingSegs
   removeFile segFile
+
+  -- Milestone 1d (CLI args + config validation): parseCliArgs matrix and
+  -- validateConfig matrix.
+  check "parseCliArgs: value flags (space and = forms)"
+    (Right [("port","8080"),("library-path","/m"),("state-dir","/s"),("log-level","debug")])
+    (parseCliArgs ["--port","8080","--library-path=/m","--state-dir","/s","--log-level=debug"])
+  check "parseCliArgs: bare boolean flag means true, =false works"
+    (Right [("require-auth","true"),("watch","false"),("follow-symlinks","true")])
+    (parseCliArgs ["--require-auth","--watch=false","--follow-symlinks"])
+  check "parseCliArgs: --no-security-headers maps to security-headers=false"
+    (Right [("security-headers","false")]) (parseCliArgs ["--no-security-headers"])
+  check "parseCliArgs: --help / --version"
+    (Right [("help","")]) (parseCliArgs ["--help"])
+  check "parseCliArgs: all value flags"
+    (Right [("server-name","x"),("tmdb-api-key","k"),("rate-limit","5"),("cors-origins","a,b"),("password-min-length","8"),("max-bitrate","1000"),("hwaccel","vaapi")])
+    (parseCliArgs ["--server-name","x","--tmdb-api-key=k","--rate-limit","5","--cors-origins","a,b","--password-min-length=8","--max-bitrate","1000","--hwaccel","vaapi"])
+  check "parseCliArgs: unknown option -> Left"
+    True (either (const True) (const False) (parseCliArgs ["--frobnicate"]))
+  check "parseCliArgs: missing value -> Left"
+    True (either (const True) (const False) (parseCliArgs ["--port"]))
+  let cfg1d = Config
+        { configLibraryPath = "/lib", configPort = 8080, configStateDir = "/st"
+        , configRequireAuth = False, configServerName = "fms"
+        , configFollowSymlinks = False, configTmdbApiKey = ""
+        , configRateLimit = Nothing, configLogLevel = "INFO"
+        , configCorsOrigins = ["*"], configSecurityHeaders = True
+        , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
+        , configWatch = False
+        }
+      badPort p = cfg1d { configPort = p }
+      isLeft' :: Either a b -> Bool
+      isLeft' = either (const True) (const False)
+  check "validateConfig: ok config passes and normalises log level + hwaccel"
+    (Right (cfg1d { configLogLevel = "info", configHwAccel = "vaapi" }))
+    (validateConfig cfg1d)
+  check "validateConfig: ports 0/65536/70000 rejected, 1 and 65535 ok"
+    ([True, True, True], [False, False])
+    ( map isLeft' [validateConfig (badPort 0), validateConfig (badPort 65536), validateConfig (badPort 70000)]
+    , map isLeft' [validateConfig (badPort 1), validateConfig (badPort 65535)] )
+  check "validateConfig: empty library path / state dir rejected"
+    [True, True] [isLeft' (validateConfig (cfg1d { configLibraryPath = "" })),
+                 isLeft' (validateConfig (cfg1d { configStateDir = "" }))]
+  check "validateConfig: bad log level rejected, case-insensitive ok"
+    [True, False] [isLeft' (validateConfig (cfg1d { configLogLevel = "verbose" })),
+                  isLeft' (validateConfig (cfg1d { configLogLevel = "Warn" }))]
+  check "validateConfig: empty cors list and negative numbers rejected"
+    [True, True, True]
+    [ isLeft' (validateConfig (cfg1d { configCorsOrigins = [] }))
+    , isLeft' (validateConfig (cfg1d { configPasswordMinLength = (-1) }))
+    , isLeft' (validateConfig (cfg1d { configMaxBitrate = (-5) })) ]
 
   putStrLn "All tests passed."

@@ -27,7 +27,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Graceful shutdown
    - [X] health endpoint (=GET /healthz=)
    - [X] =POST /System/Shutdown= -> drain + acid-state checkpoint + clean exit
-** TODO Config: file (JSON/YAML) + env vars + CLI, with validation and defaults
+** DONE Config: config.json + env vars + CLI flags (precedence CLI > env > file > defaults), validateConfig (port range, non-empty paths, log level, CORS list, hwaccel, non-negative numbers) with exit 2 + ASCII error; --help/--version; FMS.Core.Cli parseCliArgs
+   - [ ] YAML config file variant
    - [X] env vars + defaults (MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR, FMS_REQUIRE_AUTH, FMS_ADMIN_PASSWORD, MEDIA_TMDB_API_KEY)
    - [X] config file stateDir/config.json (env overrides file)
    - [ ] validation, CLI arg

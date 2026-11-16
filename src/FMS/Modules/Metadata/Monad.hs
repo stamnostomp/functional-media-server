@@ -21,9 +21,11 @@ import FMS.Core.Monad (AppEnv (..), AppM, MonadLog (..), getState, putState)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Library (MonadLibrary (..))
+import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata (..))
 
 -- | Namespaced key under which the metadata module stashes its
 -- @TVar (HashMap Text MediaMetadata)@ in the typed registry
@@ -65,26 +67,79 @@ instance MonadMetadata AppM where
     case mItem of
       Nothing -> pure Nothing
       Just item -> do
-        let nfoPath = nfoPathFor (itemPath item)
-        exists <- liftIO (doesFileExist nfoPath)
-        if not exists
-          then pure Nothing
-          else do
-            result <- liftIO (try (BS.readFile nfoPath) :: IO (Either SomeException BS.ByteString))
-            case result of
-              Left _ -> pure Nothing
-              Right bytes ->
-                case parseMovieNfo bytes of
-                  Left err -> do
-                    logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
-                    pure Nothing
-                  Right meta -> do
-                    setMetadata itemIdent meta
-                    pure (Just meta)
-        -- SEAM for remote providers (milestone 4c, TMDB/TvMaze): when no
-        -- local NFO exists (or it fails to parse), a remote lookup keyed
-        -- by the item's title/year (or an existing metaProviderIds entry)
-        -- would go here instead of returning Nothing.
+        -- Local NFO always wins when it exists and parses (milestone 4b).
+        nfoMeta <- readNfoMetadata item
+        case nfoMeta of
+          Just meta -> do
+            setMetadata itemIdent meta
+            pure (Just meta)
+          -- Milestone 4c: no usable NFO -> remote provider fallback (TMDB),
+          -- keyed by the item's title, only when an API key is configured.
+          Nothing -> refreshFromTmdb itemIdent item
+
+-- | Read and parse the item's NFO sidecar. 'Nothing' when the file is
+-- missing, unreadable, or malformed (a malformed file is logged, then the
+-- caller falls through to the remote provider).
+readNfoMetadata :: MediaItem -> AppM (Maybe MediaMetadata)
+readNfoMetadata item = do
+  let nfoPath = nfoPathFor (itemPath item)
+  exists <- liftIO (doesFileExist nfoPath)
+  if not exists
+    then pure Nothing
+    else do
+      result <- liftIO (try (BS.readFile nfoPath) :: IO (Either SomeException BS.ByteString))
+      case result of
+        Left _ -> pure Nothing
+        Right bytes ->
+          case parseMovieNfo bytes of
+            Left err -> do
+              logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
+              pure Nothing
+            Right meta -> pure (Just meta)
+
+-- | Milestone 4c (docs/roadmap.org milestone 4, docs/todo.org section 3):
+-- the TMDB fallback for 'refreshMetadata'. When no NFO exists (or it does
+-- not parse) and a TMDB API key is configured, search by the item title
+-- and cache the first hit with 'metaSource' = @\"tmdb\"@. Empty results or
+-- any TMDB error are logged and yield 'Nothing' — never throw, so the
+-- router keeps mapping this to a graceful 404.
+refreshFromTmdb :: Text -> MediaItem -> AppM (Maybe MediaMetadata)
+refreshFromTmdb itemIdent item = do
+  cfg <- asks envConfig
+  let apiKey = configTmdbApiKey cfg
+  if T.null apiKey
+    then pure Nothing
+    else do
+      res <- liftIO (tmdbSearchMovie apiKey (itemTitle item))
+      case res of
+        Left err -> do
+          logErr ("metadata: TMDB search for \"" <> itemTitle item <> "\" failed: " <> T.pack err)
+          pure Nothing
+        Right [] -> do
+          logInfo ("metadata: TMDB has no results for \"" <> itemTitle item <> "\"")
+          pure Nothing
+        Right (top : _) -> do
+          let meta = tmdbResultToMetadata top
+          setMetadata itemIdent meta
+          logInfo ("metadata: \"" <> itemTitle item <> "\" matched TMDB id "
+                   <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
+          pure (Just meta)
+
+-- | Map a TMDB search hit onto the stored 'MediaMetadata' shape. Fields
+-- TMDB search results do not carry (genres, runtime) stay empty; the id
+-- goes into 'metaProviderIds' under @\"tmdb\"@.
+tmdbResultToMetadata :: TmdbResult -> MediaMetadata
+tmdbResultToMetadata r =
+  MediaMetadata
+    { metaTitle          = Just (tmdbTitle r)
+    , metaOverview       = tmdbOverview r
+    , metaGenres         = []
+    , metaYear           = tmdbReleaseYear r
+    , metaRating         = tmdbVoteAverage r
+    , metaRuntimeMinutes = Nothing
+    , metaProviderIds    = HM.singleton "tmdb" (T.pack (show (tmdbId r)))
+    , metaSource         = "tmdb"
+    }
 
 -- | The metadata TVar, creating and registering it on first use (the
 -- Stats module's ensureStatsTVar pattern).

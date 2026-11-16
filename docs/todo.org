@@ -48,7 +48,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO NFO/local metadata parsing
    - [X] movie NFO via xml-conduit (parseMovieNfo), GET /items/:id/metadata + POST /items/:id/metadata/refresh, persisted in metadata.json
    - [ ] series/episode/artist/album NFO variants, Ember/TinyMM formats
-** TODO Remote providers: TMDB, OMDb, TVDB, AniDB, MusicBrainz, AudioDB
+** TODO Remote providers
+   - [X] TMDB movie search (MEDIA_TMDB_API_KEY; NFO-wins fallback; 10s timeout; graceful on failure)
+   - [ ] OMDb, TVDB, AniDB, MusicBrainz, AudioDB
 ** TODO Provider search + identify + auto-match on scan
 ** TODO Rate limiting with exponential backoff; cache API errors
 ** TODO Download images on scan: primary, backdrop, logo, thumb, banner, art, disc, menu

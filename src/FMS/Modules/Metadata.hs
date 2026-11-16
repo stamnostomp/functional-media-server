@@ -11,11 +11,12 @@ import FMS.Modules.Metadata.Routes
   )
 
 -- | The metadata module (docs/roadmap.org milestone 4, docs/todo.org
--- section 3): NFO sidecar parsing plus a disk-backed metadata cache.
+-- section 3): NFO sidecar parsing plus a disk-backed metadata cache, with
+-- a TMDB remote fallback (milestone 4c) when no NFO exists.
 -- Init loads the persisted map at @stateDir/metadata.json@ into a TVar
 -- under "metadata.cache" in the typed registry — the core never learns
--- about it (docs/modules.org). Remote providers (TMDB/TvMaze) plug into
--- 'refreshMetadata' later.
+-- about it (docs/modules.org). Remote providers plug into
+-- 'refreshMetadata' (TMDB done, TvMaze later).
 metadataModule :: Module
 metadataModule =
   Module

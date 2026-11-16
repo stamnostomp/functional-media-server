@@ -54,6 +54,8 @@ library
                       FMS.Modules.UserData.Monad
                       FMS.Modules.UserData.Routes
                       FMS.Modules.Metadata
+                      FMS.Modules.Metadata.Api.Types
+                      FMS.Modules.Metadata.Api.Tmdb
                       FMS.Modules.Metadata.Types
                       FMS.Modules.Metadata.Nfo
                       FMS.Modules.Metadata.Persistence
@@ -82,6 +84,9 @@ library
                     , wai
                     , warp
                     , http-types
+                    , http-conduit
+                    , http-client
+                    , http-client-tls
                     , case-insensitive
                     , xml-conduit
                     , process
@@ -112,4 +117,5 @@ executable fms
     hs-source-dirs:   app
     main-is:          Main.hs
     build-depends:    base >=4.14 && <5
+                    , text
                     , functional-media-server

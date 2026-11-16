@@ -2,6 +2,7 @@ module Main (main) where
 
 import Data.Char (toLower)
 import Data.Maybe (fromMaybe)
+import qualified Data.Text as T
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 
@@ -12,16 +13,20 @@ import FMS.Server (runServer)
 -- server runs (docs/roadmap.org milestone 1). Milestone 5b adds
 -- FMS_REQUIRE_AUTH (strict auth gate in the router); FMS_ADMIN_PASSWORD is
 -- read by the auth module itself when it bootstraps the admin user.
+-- Milestone 4c adds MEDIA_TMDB_API_KEY (TMDB remote metadata fallback;
+-- empty means the fallback is disabled).
 main :: IO ()
 main = do
   mPort  <- lookupEnv "MEDIA_SERVER_PORT"
   mLib   <- lookupEnv "MEDIA_LIBRARY_PATH"
   mState <- lookupEnv "FMS_STATE_DIR"
   mAuth  <- lookupEnv "FMS_REQUIRE_AUTH"
+  mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let cfg = Config
         { configLibraryPath = fromMaybe "./media" mLib
         , configPort        = fromMaybe 8080 (mPort >>= readMaybe)
         , configStateDir    = fromMaybe "./var" mState
         , configRequireAuth = map toLower (fromMaybe "false" mAuth) `elem` ["true", "1", "yes"]
+        , configTmdbApiKey  = T.pack (fromMaybe "" mTmdb)
         }
   runServer cfg

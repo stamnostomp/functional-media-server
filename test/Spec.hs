@@ -54,6 +54,8 @@ import FMS.Modules.Library.State
   , RegisterItem(..)
   , initialLibraryState
   )
+import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
@@ -595,6 +597,53 @@ main = do
   missingMeta <- loadMetadata "/tmp/fms-test-metadata-does-not-exist.json"
   check "loadMetadata of a missing file is empty" HM.empty missingMeta
   removeFile metaFile
+
+  -- TMDB remote provider (milestone 4c, docs/roadmap.org milestone 4,
+  -- docs/todo.org section 3): the PURE helpers only — no network in tests.
+  let tmdbUrl = tmdbSearchUrl "TESTKEY" "a b"
+  check "tmdbSearchUrl is the /search/movie endpoint"
+    True ("https://api.themoviedb.org/3/search/movie?" `isPrefixOf` tmdbUrl)
+  check "tmdbSearchUrl contains api_key=TESTKEY"
+    True ("api_key=TESTKEY" `isInfixOf` tmdbUrl)
+  check "tmdbSearchUrl encodes the query ('a b' -> a%20b or a+b)"
+    True ("a%20b" `isInfixOf` tmdbUrl || "a+b" `isInfixOf` tmdbUrl)
+  let tmdbUrlUni = tmdbSearchUrl "K" "café"
+  check "tmdbSearchUrl UTF-8 percent-encodes non-ASCII (café -> caf%C3%A9)"
+    True ("caf%C3%A9" `isInfixOf` tmdbUrlUni)
+
+  -- A 2-result /search/movie fixture: full first hit, second hit without
+  -- overview. release_date must yield the year; a missing overview -> Nothing.
+  let tmdbFixture = LBS.fromStrict (BSC.pack (unlines
+        [ "{\"page\":1,\"total_results\":2,\"total_pages\":1,\"results\":["
+        , "  {\"id\":550,\"title\":\"Fight Club\",\"original_title\":\"Fight Club\",\"overview\":\"An insomniac office worker.\",\"release_date\":\"1999-10-15\",\"vote_average\":8.433,\"vote_count\":26280},"
+        , "  {\"id\":680,\"title\":\"Pulp Fiction\",\"release_date\":\"1994-09-10\",\"vote_average\":8.5}"
+        , "]}"
+        ]))
+      tmdbExpected =
+        [ TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433)
+        , TmdbResult 680 "Pulp Fiction" Nothing (Just 1994) (Just 8.5)
+        ]
+  check "parseTmdbResults parses a 2-result fixture (year extraction, missing overview -> Nothing)"
+    (Right tmdbExpected) (parseTmdbResults tmdbFixture)
+  check "parseTmdbResults on an empty results array is Right []"
+    (Right []) (parseTmdbResults (LBS.fromStrict (BSC.pack "{\"results\":[]}")))
+  check "parseTmdbResults: empty release_date -> year Nothing, vote_average 0 -> Just 0.0"
+    (Right [TmdbResult 7 "X" Nothing Nothing (Just 0.0)])
+    (parseTmdbResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":7,\"title\":\"X\",\"release_date\":\"\",\"vote_average\":0}]}")))
+  check "parseTmdbResults: malformed release_date -> year Nothing"
+    (Right [TmdbResult 8 "Y" Nothing Nothing (Just 7.0)])
+    (parseTmdbResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":8,\"title\":\"Y\",\"release_date\":\"soon\",\"vote_average\":7}]}")))
+  let isLeftStr :: Either String a -> Bool
+      isLeftStr (Left _)  = True
+      isLeftStr (Right _) = False
+  check "parseTmdbResults on invalid JSON is Left"
+    True (isLeftStr (parseTmdbResults (LBS.fromStrict (BSC.pack "not json"))))
+  check "parseTmdbResults on a non-object body is Left"
+    True (isLeftStr (parseTmdbResults (LBS.fromStrict (BSC.pack "[1,2]"))))
+  check "parseTmdbResults without a results key is Left"
+    True (isLeftStr (parseTmdbResults (LBS.fromStrict (BSC.pack "{\"page\":1}"))))
 
   -- UserData module (milestone 5c, docs/todo.org section 9): the pure
   -- helpers of FMS.Modules.UserData.Monad, the UserData JSON roundtrip

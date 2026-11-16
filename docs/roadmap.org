@@ -70,7 +70,9 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 * Milestone 4 — metadata
 ** DONE NFO parser (movie NFO via xml-conduit; malformed XML -> Left) :fix:
    - [ ] Ember / Tiny Media Manager formats, series/episode NFOs
-** TODO TMDB / TvMaze API clients with rate limiting, exponential backoff, error caching :fix:
+** TODO Remote metadata providers
+   - [X] TMDB movie search via http-conduit (fallback after NFO, graceful errors)
+   - [ ] TvMaze / OMDb; rate limiting + exponential backoff + error caching :fix:
 ** TODO Metadata cache (disk-backed, invalidation strategy) :improvement:
 ** TODO Images: posters, backdrops, thumbnails endpoints
 ** TODO OpenAPI/Swagger spec generated from code + docs endpoint :improvement:

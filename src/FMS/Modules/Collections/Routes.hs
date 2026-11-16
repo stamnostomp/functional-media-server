@@ -115,7 +115,7 @@ collectionItemsHandler captures req =
         Nothing -> throwError (NotFound ("no collection with id " <> cid))
         Just c  -> do
           mUser <- currentUserFromReq req
-          visible <- visibleItems mUser <$> listItems
+          visible <- listItems >>= visibleItems mUser
           let visById = HM.fromList [(itemId i, i) | i <- visible]
           pure (jsonResponse [ i | iid <- colItemIds c, Just i <- [HM.lookup iid visById] ])
 

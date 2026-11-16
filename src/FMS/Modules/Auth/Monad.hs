@@ -25,6 +25,7 @@ import Data.List (find, sortOn)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (getCurrentTime)
 import Network.Wai (Request)
 import System.Directory (createDirectoryIfMissing)
 import Text.Read (readMaybe)
@@ -33,6 +34,13 @@ import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, getState, 
 import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
+import FMS.Core.Types.Policy
+  ( UserPolicy
+  , itemAllowedByPolicy
+  , scheduleAllowsNow
+  , policySchedules
+  , emptyUserPolicy
+  )
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.State
   ( hashPassword
@@ -43,6 +51,9 @@ import FMS.Modules.Auth.State
   , verifyPassword
   )
 import FMS.Modules.Library.Monad (MonadLibrary (..))
+-- FMS.Modules.Metadata.Types is aeson-only, so importing it here cannot
+-- create a cycle (FMS.Core.Query already does the same, milestone 4h).
+import FMS.Modules.Metadata.Types (MediaMetadata)
 
 -- | Namespaced keys under which the auth module stashes its TVars in the
 -- typed registry (docs/modules.org: the core never knows module state).
@@ -66,6 +77,8 @@ class Monad m => MonadAuth m where
   resolveToken :: Text -> m (Maybe User)           -- ^ session token OR api key -> user
   listSessions :: m [(Text, Text)]                 -- ^ (token, userName) for live session tokens
   setAllowedFolders :: Text -> Maybe [Text] -> m Bool  -- ^ userId, folders (Nothing = all); False when unknown (milestone 5d)
+  setPolicy :: Text -> UserPolicy -> m Bool            -- ^ userId, parental policy; False when unknown (milestone 9)
+  setEnabled :: Text -> Bool -> m Bool                 -- ^ userId, enabled flag; False when unknown (milestone 9)
 
 instance MonadAuth AppM where
   listUsers = do
@@ -78,7 +91,7 @@ instance MonadAuth AppM where
     users <- currentUsers
     let uid = nextUserId users
     h <- liftIO (hashPassword pw)
-    let u = User uid name h admin [] Nothing
+    let u = User uid name h admin [] Nothing emptyUserPolicy True
     _ <- modifyAuthUsers (HM.insert uid u)
     logInfo ("auth: created user " <> name <> " (id " <> uid <> ")")
     pure u
@@ -114,9 +127,10 @@ instance MonadAuth AppM where
   resolveToken tok = do
     toks <- currentTokens
     usrs <- currentUsers
+    -- milestone 9: disabled users lose their live tokens and api keys
     pure $ case HM.lookup tok toks of
-      Just uid -> HM.lookup uid usrs
-      Nothing  -> find (\u -> tok `elem` apiKeys u) (HM.elems usrs)
+      Just uid -> HM.lookup uid usrs >>= \u -> if userEnabled u then Just u else Nothing
+      Nothing  -> find (\u -> userEnabled u && tok `elem` apiKeys u) (HM.elems usrs)
 
   listSessions = do
     toks <- currentTokens
@@ -132,6 +146,29 @@ instance MonadAuth AppM where
       Nothing -> pure False
       Just _  -> do
         _ <- modifyAuthUsers (HM.adjust (\u -> u { userAllowedFolders = mFolders }) i)
+        pure True
+
+  setPolicy i pol = do
+    m <- getUser i
+    case m of
+      Nothing -> pure False
+      Just _  -> do
+        _ <- modifyAuthUsers (HM.adjust (\u -> u { userPolicy = pol }) i)
+        pure True
+
+  setEnabled i en = do
+    m <- getUser i
+    case m of
+      Nothing -> pure False
+      Just _  -> do
+        _ <- modifyAuthUsers (HM.adjust (\u -> u { userEnabled = en }) i)
+        -- milestone 9 fix: disabling a user also drops their live session
+        -- tokens, so the router gate cannot pass them as anonymous
+        if not en
+          then do
+            tt <- tokensTVar
+            liftIO (atomically (modifyTVar' tt (HM.filter (/= i))))
+          else pure ()
         pure True
 
 -- | Pure (milestone 5d): the folder restriction of a user
@@ -167,16 +204,37 @@ folderAccessOrThrow mUser folderId =
       | otherwise -> throwError (Unauthorized ("folder access denied: " <> folderId))
     Nothing -> pure ()
 
--- | Milestone 5d: the items visible to the request's user. Admins and
--- anonymous (open mode) see everything; a restricted user sees only items
--- in their allowed folders.
-visibleItems :: Maybe User -> [MediaItem] -> [MediaItem]
-visibleItems mUser = case mUser of
-  Just u | not (isAdmin u) -> filter (canAccessFolder (userAllowedFolders u) . itemFolder)
-  _                        -> id
+-- | Milestone 9: the item metadata cache lives in the typed registry under
+-- the literal key \"metadata.cache\" (importing FMS.Modules.Metadata.Monad
+-- from here would create an import cycle; Library.Routes.hs uses the same
+-- literal-key pattern for the same reason).
+metadataCacheMap :: AppM (HashMap Text MediaMetadata)
+metadataCacheMap = do
+  mTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+  maybe (pure HM.empty) (liftIO . readTVarIO) mTv
 
--- | 'getItem' plus the milestone-5d folder check: 404 when the item is
--- unknown, 401 when the request's user may not access the item's folder.
+-- | Milestone 5d + 9: the items visible to the request's user. Admins and
+-- anonymous (open mode) see everything; a non-admin user sees only items
+-- in their allowed folders, only inside their access schedule (when set),
+-- and only items allowed by their parental policy (blocked tags / max
+-- rating, checked against the metadata cache).
+visibleItems :: Maybe User -> [MediaItem] -> AppM [MediaItem]
+visibleItems mUser items = case mUser of
+  Just u | not (isAdmin u) -> do
+    metaMap <- metadataCacheMap
+    now <- liftIO getCurrentTime
+    if not (scheduleAllowsNow (policySchedules (userPolicy u)) now)
+      then pure []
+      else pure [ i | i <- items
+                   , canAccessFolder (userAllowedFolders u) (itemFolder i)
+                   , itemAllowedByPolicy (userPolicy u) (HM.lookup (itemId i) metaMap)
+                   ]
+  _ -> pure items
+
+-- | 'getItem' plus the milestone-5d folder check and the milestone-9
+-- policy/schedule checks: 404 when the item is unknown, 401 when the
+-- request's user may not access the item's folder, 403 when access is
+-- outside the user's schedule or the item is blocked by parental controls.
 getItemWithAccess :: Request -> Text -> AppM (Maybe MediaItem)
 getItemWithAccess req i = do
   mItem <- getItem i
@@ -185,7 +243,17 @@ getItemWithAccess req i = do
     Just item -> do
       mUser <- currentUserFromReq req
       folderAccessOrThrow mUser (itemFolder item)
-      pure (Just item)
+      case mUser of
+        Just u | not (isAdmin u) -> do
+          now <- liftIO getCurrentTime
+          if not (scheduleAllowsNow (policySchedules (userPolicy u)) now)
+            then throwError (Forbidden "access outside allowed schedule")
+            else do
+              metaMap <- metadataCacheMap
+              if itemAllowedByPolicy (userPolicy u) (HM.lookup i metaMap)
+                then pure (Just item)
+                else throwError (Forbidden "item blocked by parental controls")
+        _ -> pure (Just item)
 
 -- | Apply an update to the users TVar AND persist @users.json@ after every
 -- mutation (in-memory state for reads, JSON on disk for restarts — the same

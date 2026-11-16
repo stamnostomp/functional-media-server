@@ -134,8 +134,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Sessions + router gate: GET /Sessions lists playback sessions (Sessions module); gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
 ** TODO =/Devices=, device capabilities
 ** DONE Per-library (per-folder) permissions: User.allowedFolders, GET/POST /Users/:id/Permissions, enforced (401) on all item routes, filtered from lists; persisted in users.json (admin flag DONE)
-** TODO enabled/disabled users flag
-** TODO Parental controls: rating restrictions, allowed tags, access schedules (basic)
+** DONE enabled/disabled users flag: =POST /Users/:id/Enable|Disable=, User.userEnabled; login -> 403 "user is disabled"; disable purges session tokens AND router gate requires enabled owner (stale token -> 401 in strict mode)
+** DONE Parental controls (basic): =GET/POST /Users/:id/Policy= {MaxParentalRating, BlockedTags, AccessSchedules}; ratingRank ordering (G..NC-17, TV-*), tags block, same-day schedule windows; enforced in visibleItems/getItemWithAccess (403); NFO <mpaa> -> metaOfficialRating
 ** TODO First-run startup wizard (admin creation) like Jellyfin's
 
 * 9. User data and personalization :feature:

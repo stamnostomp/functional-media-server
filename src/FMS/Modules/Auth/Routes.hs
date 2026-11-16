@@ -1,6 +1,8 @@
 module FMS.Modules.Auth.Routes
   ( authRoutes
   , PermissionsRequest(..)
+  , PolicyPatch(..)
+  , applyPolicyPatch
   ) where
 
 import Control.Monad (join)
@@ -8,6 +10,8 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.List (find)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Types (ResponseHeaders, status201, status204)
@@ -17,6 +21,7 @@ import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, envConfig)
 import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.Policy (AccessSchedule, UserPolicy (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (..))
 
@@ -36,6 +41,10 @@ authRoutes =
   , post   [Lit "Users", Capture "id", Lit "ApiKey"]   apiKeyHandler
   , get    [Lit "Users", Capture "id", Lit "Permissions"] getPermissionsHandler
   , post   [Lit "Users", Capture "id", Lit "Permissions"] setPermissionsHandler
+  , get    [Lit "Users", Capture "id", Lit "Policy"]  getPolicyHandler
+  , post   [Lit "Users", Capture "id", Lit "Policy"]  setPolicyHandler
+  , post   [Lit "Users", Capture "id", Lit "Enable"]  (setEnabledHandler True)
+  , post   [Lit "Users", Capture "id", Lit "Disable"] (setEnabledHandler False)
   ]
 
 -- Request bodies ------------------------------------------------------------
@@ -95,15 +104,47 @@ permissionsResponse u = object
   , "IsAdmin"        .= isAdmin u
   ]
 
+-- | Body of @POST /Users/:id/Policy@ (milestone 9). All fields optional;
+-- absent fields keep the current value, explicit null clears a scalar
+-- (@MaxParentalRating@ -> 'Nothing').
+data PolicyPatch = PolicyPatch
+  { ppMaxRating   :: Maybe (Maybe Text)   -- ^ Nothing = absent; Just Nothing = clear
+  , ppBlockedTags :: Maybe [Text]
+  , ppSchedules   :: Maybe [AccessSchedule]
+  } deriving (Eq, Show)
+
+instance FromJSON PolicyPatch where
+  parseJSON = withObject "PolicyPatch" $ \o ->
+    PolicyPatch
+      <$> o .:? "MaxParentalRating"
+      <*> o .:? "BlockedTags"
+      <*> o .:? "AccessSchedules"
+
+-- | Merge a 'PolicyPatch' over an existing 'UserPolicy' (pure, exported for
+-- tests).
+applyPolicyPatch :: UserPolicy -> PolicyPatch -> UserPolicy
+applyPolicyPatch p pp = UserPolicy
+  { policyMaxRating   = case ppMaxRating pp of
+      Nothing  -> policyMaxRating p
+      Just mr  -> mr
+  , policyBlockedTags = fromMaybe (policyBlockedTags p) (ppBlockedTags pp)
+  , policySchedules   = fromMaybe (policySchedules p) (ppSchedules pp)
+  }
+
 -- Handlers ------------------------------------------------------------------
 
 -- | @POST /Users/AuthenticateByName@ with @{\"Username\":\"...\",\"Pw\":\"...\"\}@.
 -- 200 @{\"AccessToken\":\"...\",\"User\":{...}}@ on success (the User JSON is
--- the public shape — no passwordHash), 401 on bad credentials, 400 on a
--- malformed body.
+-- the public shape — no passwordHash), 401 on bad credentials, 403 when the
+-- account is disabled (milestone 9), 400 on a malformed body.
 authenticateHandler :: [(Text, Text)] -> Request -> AppM Response
 authenticateHandler _captures req = do
   ar <- parseBody req
+  -- milestone 9: a disabled account gets a distinct 403, not a generic 401
+  users <- listUsers
+  case find (\u -> T.toLower (userName u) == T.toLower (arUsername ar)) users of
+    Just u | not (userEnabled u) -> throwError (Forbidden "user is disabled")
+    _ -> pure ()
   m  <- authenticate (arUsername ar) (arPw ar)
   case m of
     Nothing -> throwError (Unauthorized "invalid username or password")
@@ -197,6 +238,41 @@ setPermissionsHandler captures req = do
   u' <- requireExistingUser i
   pure (jsonResponse (permissionsResponse u'))
 
+-- | @GET /Users/:id/Policy@ — self or admin; 200 with the user's
+-- 'UserPolicy' JSON (@MaxParentalRating@/@BlockedTags@/@AccessSchedules@),
+-- 404 unknown user, 403 wrong user (milestone 9).
+getPolicyHandler :: [(Text, Text)] -> Request -> AppM Response
+getPolicyHandler captures req = do
+  i <- captureId captures
+  requireSelfOrAdmin403 req i
+  u <- requireExistingUser i
+  pure (jsonResponse (userPolicy u))
+
+-- | @POST /Users/:id/Policy@ with a partial body
+-- @{\"MaxParentalRating\"?: ...|null, \"BlockedTags\"?: [...], \"AccessSchedules\"?: [...]}@
+-- merged over the current policy — self or admin; 200 with the updated
+-- policy, 404 unknown user, 400 bad JSON (milestone 9).
+setPolicyHandler :: [(Text, Text)] -> Request -> AppM Response
+setPolicyHandler captures req = do
+  i <- captureId captures
+  requireSelfOrAdmin403 req i
+  u <- requireExistingUser i
+  pp <- parseBody req
+  let pol = applyPolicyPatch (userPolicy u) pp
+  _ <- setPolicy i pol
+  pure (jsonResponse pol)
+
+-- | @POST /Users/:id/Enable@ / @POST /Users/:id/Disable@ — self or admin
+-- (admin required for other users); 200 @{\"enabled\": bool}@, 404 unknown
+-- user (milestone 9).
+setEnabledHandler :: Bool -> [(Text, Text)] -> Request -> AppM Response
+setEnabledHandler en captures req = do
+  i <- captureId captures
+  requireSelfOrAdmin403 req i
+  _ <- requireExistingUser i
+  _ <- setEnabled i en
+  pure (jsonResponse (object ["enabled" .= en]))
+
 -- NOTE: @GET /Sessions@ used to live here (listing live auth tokens);
 -- milestone 6c moves it to "FMS.Modules.Sessions", where it returns the
 -- Jellyfin-shaped active playback sessions instead.
@@ -244,6 +320,20 @@ requireAdmin req = do
   case mUser of
     Just u | isAdmin u -> pure ()
     Just _  -> throwError (Unauthorized "admin privileges required")
+    Nothing
+      | configRequireAuth cfg -> throwError (Unauthorized "authentication required")
+      | otherwise             -> pure ()
+
+-- | Milestone 9: like 'requireSelfOrAdmin', but a present non-matching
+-- credential gets 403 Forbidden (used by the Policy/Enable/Disable routes,
+-- where the task specifies 403 for a wrong user).
+requireSelfOrAdmin403 :: Request -> Text -> AppM ()
+requireSelfOrAdmin403 req targetId = do
+  cfg <- asks envConfig
+  mUser <- currentUser req
+  case mUser of
+    Just u | isAdmin u || userId u == targetId -> pure ()
+    Just _  -> throwError (Forbidden "self or admin required")
     Nothing
       | configRequireAuth cfg -> throwError (Unauthorized "authentication required")
       | otherwise             -> pure ()

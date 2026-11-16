@@ -21,6 +21,7 @@ data MediaMetadata = MediaMetadata
   , metaTags           :: [Text]              -- ^ all <tag> elements (milestone 4h)
   , metaYear           :: Maybe Int           -- ^ <year>
   , metaRating         :: Maybe Double        -- ^ <rating>
+  , metaOfficialRating :: Maybe Text          -- ^ <mpaa> (milestone 9); absent in old metadata.json
   , metaRuntimeMinutes :: Maybe Int           -- ^ <runtime> in minutes
   , metaProviderIds    :: HashMap Text Text   -- ^ <tmdbid> -> "tmdb", <imdbid> -> "imdb"
   , metaSource         :: Text                -- ^ provenance, e.g. "nfo"
@@ -36,6 +37,7 @@ instance ToJSON MediaMetadata where
     , "tags"           .= metaTags m
     , "year"           .= metaYear m
     , "rating"         .= metaRating m
+    , "officialRating" .= metaOfficialRating m
     , "runtimeMinutes" .= metaRuntimeMinutes m
     , "providerIds"    .= metaProviderIds m
     , "source"         .= metaSource m
@@ -52,6 +54,7 @@ instance FromJSON MediaMetadata where
       <*> o .:? "tags" .!= []
       <*> o .:? "year"
       <*> o .:? "rating"
+      <*> o .:? "officialRating"      -- milestone 9; absent in pre-9 metadata.json
       <*> o .:? "runtimeMinutes"
       <*> o .:? "providerIds" .!= HM.empty
       <*> o .:? "source" .!= "unknown"

@@ -63,7 +63,7 @@ libraryRoutes =
 listItemsHandler :: [(Text, Text)] -> Request -> AppM Response
 listItemsHandler _captures req = do
   mUser <- currentUserFromReq req
-  jsonResponse <$> (visibleItems mUser <$> listItems)
+  jsonResponse <$> (listItems >>= visibleItems mUser)
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
 -- query params @search@/@searchTerm@, @sortBy@, @sortOrder@, @startIndex@,
@@ -83,7 +83,7 @@ listItemsHandler _captures req = do
 itemsHandler :: [(Text, Text)] -> Request -> AppM Response
 itemsHandler _captures req = do
   mUser <- currentUserFromReq req
-  items0 <- visibleItems mUser <$> listItems
+  items0 <- listItems >>= visibleItems mUser
   let qparams = queryParams (queryString req)
   (mLookup, filterTokens, fields) <- resolveUserQuery qparams mUser
   -- Milestone 4h: the metadata cache map keyed by itemId. Read straight
@@ -229,7 +229,7 @@ decodeCapture = TE.decodeUtf8 . urlDecode True . TE.encodeUtf8
 showsHandler :: [(Text, Text)] -> Request -> AppM Response
 showsHandler _captures req = do
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items <- listItems >>= visibleItems mUser
   pure (jsonResponse [ object ["Name" .= s, "ItemCount" .= n]
                      | (s, n) <- showsFromItems items ])
 
@@ -240,7 +240,7 @@ episodesHandler :: [(Text, Text)] -> Request -> AppM Response
 episodesHandler captures req = do
   name <- decodeCapture <$> captureName captures
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items <- listItems >>= visibleItems mUser
   let eps = sortEpisodes (filterBySeries (Just name) items)
   pure (jsonResponse eps)
 
@@ -250,7 +250,7 @@ nextUpHandler :: [(Text, Text)] -> Request -> AppM Response
 nextUpHandler captures req = do
   name <- decodeCapture <$> captureName captures
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items <- listItems >>= visibleItems mUser
   case sortEpisodes (filterBySeries (Just name) items) of
     []   -> throwError (NotFound ("no episodes for series " <> name))
     (e : _) -> pure (jsonResponse e)
@@ -300,7 +300,7 @@ boxSetDetailHandler i req = do
     Nothing -> throwError (NotFound ("no library item with id " <> i))
     Just c  -> do
       mUser <- currentUserFromReq req
-      visible <- visibleItems mUser <$> listItems
+      visible <- listItems >>= visibleItems mUser
       if collectionVisibleTo mUser visible c
         then pure (jsonResponse (boxSetItemValue c))
         else throwError (NotFound ("no library item with id " <> i))
@@ -310,7 +310,7 @@ boxSetDetailHandler i req = do
 itemsCountsHandler :: [(Text, Text)] -> Request -> AppM Response
 itemsCountsHandler _captures req = do
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items <- listItems >>= visibleItems mUser
   let counts = toAscList (Map.fromListWith (+) [(itemType i, 1 :: Int) | i <- items])
   pure (jsonResponse (object [ Key.fromText k .= n | (k, n) <- counts ]))
 
@@ -376,7 +376,7 @@ boxSetValuesFor mUser visible = do
 searchHintsHandler :: [(Text, Text)] -> Request -> AppM Response
 searchHintsHandler _captures req = do
   mUser <- currentUserFromReq req
-  items <- visibleItems mUser <$> listItems
+  items <- listItems >>= visibleItems mUser
   let qparams = queryParams (queryString req)
       term = case lookup "searchTerm" qparams of
         Just t  -> t
@@ -405,5 +405,5 @@ specialFeaturesHandler captures req =
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just item -> do
           mUser <- currentUserFromReq req
-          items <- visibleItems mUser <$> listItems
+          items <- listItems >>= visibleItems mUser
           pure (jsonResponse (specialFeaturesOf item items))

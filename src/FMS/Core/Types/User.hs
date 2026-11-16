@@ -8,6 +8,8 @@ import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), 
 import Data.Text (Text)
 import qualified Data.Text as T
 
+import FMS.Core.Types.Policy (UserPolicy, emptyUserPolicy)
+
 -- | A user account (docs/todo.org section 8, Jellyfin-style).
 --
 -- JSON comes in two shapes:
@@ -21,6 +23,10 @@ import qualified Data.Text as T
 -- 'Nothing' means access to ALL media folders, @Just ids@ restricts to
 -- those folder ids. 'FromJSON' defaults a missing (or null) field to
 -- 'Nothing', so pre-5d @users.json@ files keep loading.
+--
+-- Milestone 9 (parental controls + enable/disable) added 'userPolicy'
+-- (defaults to 'emptyUserPolicy') and 'userEnabled' (defaults to 'True'),
+-- so pre-9 @users.json@ files keep loading.
 data User = User
   { userId       :: !Text
   , userName     :: !Text
@@ -28,11 +34,14 @@ data User = User
   , isAdmin      :: !Bool
   , apiKeys      :: ![Text]
   , userAllowedFolders :: !(Maybe [Text])  -- ^ milestone 5d; Nothing = all folders
+  , userPolicy   :: !UserPolicy             -- ^ milestone 9; emptyUserPolicy = no restrictions
+  , userEnabled  :: !Bool                   -- ^ milestone 9; False = login rejected with 403
   } deriving (Eq, Show)
 
 -- | Internal (persistence) JSON: all fields, including the password hash.
 -- The @allowedFolders@ key is optional and defaults to null/Nothing, so
 -- old users.json files (written before milestone 5d) still decode.
+-- @policy@ and @enabled@ (milestone 9) default likewise, so pre-9 files load.
 instance FromJSON User where
   parseJSON = withObject "User" $ \o ->
     User
@@ -42,6 +51,8 @@ instance FromJSON User where
       <*> o .: "isAdmin"
       <*> o .: "apiKeys"
       <*> (join <$> o .:? "allowedFolders" .!= Nothing)
+      <*> ((join <$> o .:? "policy") .!= emptyUserPolicy)
+      <*> (o .:? "enabled" .!= True)
 
 -- | Public API JSON: no password hash, just whether one is set. Includes
 -- the per-folder access list (milestone 5d) as @AllowedFolders@.
@@ -52,6 +63,8 @@ instance ToJSON User where
     , "isAdmin"       .= isAdmin u
     , "hasPassword"   .= not (T.null (passwordHash u))
     , "AllowedFolders" .= userAllowedFolders u
+    , "enabled"       .= userEnabled u          -- milestone 9
+    , "Policy"        .= userPolicy u           -- milestone 9
     ]
 
 -- | Internal full JSON (all fields, incl. the password hash) — used by the
@@ -65,4 +78,6 @@ toInternalJSON u = object
   , "isAdmin"        .= isAdmin u
   , "apiKeys"        .= apiKeys u
   , "allowedFolders" .= userAllowedFolders u
+  , "policy"         .= userPolicy u
+  , "enabled"        .= userEnabled u
   ]

@@ -243,8 +243,11 @@ tokenIsValid req =
         (Just tt, Just ut) -> liftIO $ do
           tokens <- readTVarIO tt
           users  <- readTVarIO ut
-          pure (HM.member tok tokens
-                || any (\u -> tok `elem` apiKeys u) (HM.elems users))
+          -- milestone 9: a credential owned by a disabled user is invalid
+          pure (case HM.lookup tok tokens of
+                  Just uid -> maybe False userEnabled (HM.lookup uid users)
+                  Nothing  -> any (\u -> userEnabled u && tok `elem` apiKeys u)
+                                (HM.elems users))
         _ -> pure False
 
 -- | 401 for the auth gate (missing/invalid credential on a protected

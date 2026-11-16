@@ -173,6 +173,7 @@ tmdbResultToMetadata r =
     , metaTags           = []
     , metaYear           = tmdbReleaseYear r
     , metaRating         = tmdbVoteAverage r
+    , metaOfficialRating = Nothing                    -- milestone 9: search results carry no <mpaa>
     , metaRuntimeMinutes = Nothing
     , metaProviderIds    = HM.singleton "tmdb" (T.pack (show (tmdbId r)))
     , metaSource         = "tmdb"

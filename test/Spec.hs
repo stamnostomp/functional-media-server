@@ -17,7 +17,9 @@ import qualified Data.Set as Set
 import Data.SafeCopy (safeGet, safePut)
 import Data.Serialize (runGet, runPut)
 import qualified Data.Text as T
-import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime (..), addUTCTime, getCurrentTime)
+import Data.Time.LocalTime (TimeOfDay (..), timeOfDayToTime)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
@@ -39,6 +41,7 @@ import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2)
+import FMS.Core.Types.Policy (AccessSchedule (..), UserPolicy (..), emptyUserPolicy, itemAllowedByPolicy, ratingAllowed, ratingRank, scheduleAllowsNow, tagsAllowed)
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..)
@@ -51,7 +54,7 @@ import FMS.Core.Types.ServerConfig
   )
 import FMS.Core.Types.User (User(..), toInternalJSON)
 import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
-import FMS.Modules.Auth.Routes (PermissionsRequest (..))
+import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
@@ -738,8 +741,8 @@ main = do
 
   -- users.json persistence roundtrip (internal JSON keeps the hash).
   let ufile = "/tmp/fms-test-users.json"
-      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"] Nothing
-      u2 = User "2" "bob" "hash2" False [] (Just ["1"])
+      u1 = User "1" "admin" "$2y$14$somehash" True ["key1"] Nothing emptyUserPolicy True
+      u2 = User "2" "bob" "hash2" False [] (Just ["1"]) emptyUserPolicy True
       usersMap = HM.fromList [("1", u1), ("2", u2)]
   saveUsers ufile usersMap
   loadedUsers <- loadUsers ufile
@@ -756,7 +759,7 @@ main = do
   -- User JSON shapes: ToJSON is the public one (no passwordHash, has
   -- hasPassword); FromJSON/toInternalJSON are the internal full shape.
   let uj1 = LBS.toStrict (Aeson.encode u1)
-      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing))
+      uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing emptyUserPolicy True))
   check "User ToJSON omits passwordHash" False ("passwordHash" `BSC.isInfixOf` uj1)
   check "User ToJSON has hasPassword:true when a hash is set"
     True ("\"hasPassword\":true" `BSC.isInfixOf` uj1)
@@ -873,6 +876,7 @@ main = do
         , metaTags           = []
         , metaYear           = Just 2020
         , metaRating         = Just 7.5
+        , metaOfficialRating = Nothing
         , metaRuntimeMinutes = Just 95
         , metaProviderIds    = HM.fromList [("tmdb", "42"), ("imdb", "tt1234567")]
         , metaSource         = "nfo"
@@ -887,7 +891,7 @@ main = do
   check "parseMovieNfo on non-movie XML is Left"
     True (isLeftE' (parseMovieNfo (BSC.pack "<tvshow><title>x</title></tvshow>")))
   let sparseMeta = MediaMetadata
-        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing HM.empty "nfo"
+        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing Nothing HM.empty "nfo"
   check "parseMovieNfo with missing fields -> Nothing/empty fields"
     (Right sparseMeta)
     (parseMovieNfo (BSC.pack "<movie><title>Only Title</title></movie>"))
@@ -1762,5 +1766,56 @@ main = do
   check "removeConn of a missing key is identity"
     ([(1, "c1")] :: [(Int, T.Text)])
     (removeConn (9 :: Int) [(1, "c1")])
+
+  -- Milestone 9: parental controls (ratingRank/ratingAllowed/tagsAllowed/
+  -- scheduleAllowsNow/itemAllowedByPolicy) + enable/disable (User defaults,
+  -- PolicyPatch merge, NFO <mpaa>).
+  let pol9 = UserPolicy (Just "PG-13") ["Horror"] [AccessSchedule 0 9 17]
+  check "ratingRank movie ratings" [1,2,3,4,5] (map ratingRank ["G","PG","PG-13","R","NC-17"])
+  check "ratingRank tv ratings" [1,2,2,3,4,5] (map ratingRank ["TV-Y","TV-Y7","TV-G","TV-PG","TV-14","TV-MA"])
+  check "ratingRank is case-insensitive and strips whitespace" 3 (ratingRank " pg-13 ")
+  check "ratingRank of an unknown rating is 99 (most restrictive)" 99 (ratingRank "XXX")
+  check "ratingAllowed: no max allows everything" True (ratingAllowed Nothing (Just "R"))
+  check "ratingAllowed: unrated item passes" True (ratingAllowed (Just "G") Nothing)
+  check "ratingAllowed: within max" True (ratingAllowed (Just "PG-13") (Just "PG"))
+  check "ratingAllowed: above max is blocked" False (ratingAllowed (Just "PG-13") (Just "R"))
+  check "ratingAllowed: equal to max is allowed, case-insensitive" True (ratingAllowed (Just "R") (Just "r"))
+  check "tagsAllowed: no blocked tags" True (tagsAllowed [] ["a","b"])
+  check "tagsAllowed: disjoint sets" True (tagsAllowed ["Horror"] ["Comedy"])
+  check "tagsAllowed: intersection is blocked, case-insensitive" False (tagsAllowed ["horror"] ["Horror","comedy"])
+  let sun10 = UTCTime (fromGregorian 2024 1 7) (timeOfDayToTime (TimeOfDay 10 0 0))  -- 2024-01-07 = Sunday 10:00
+      sun20 = UTCTime (fromGregorian 2024 1 7) (timeOfDayToTime (TimeOfDay 20 0 0))  -- Sunday 20:00
+      mon10 = UTCTime (fromGregorian 2024 1 8) (timeOfDayToTime (TimeOfDay 10 0 0))  -- Monday 10:00
+  check "scheduleAllowsNow: empty schedule always allows" True (scheduleAllowsNow [] sun20)
+  check "scheduleAllowsNow: inside the window" True (scheduleAllowsNow [AccessSchedule 0 9 17] sun10)
+  check "scheduleAllowsNow: outside the window (hour)" False (scheduleAllowsNow [AccessSchedule 0 9 17] sun20)
+  check "scheduleAllowsNow: wrong day" False (scheduleAllowsNow [AccessSchedule 0 9 17] mon10)
+  check "scheduleAllowsNow: any of several windows" True
+    (scheduleAllowsNow [AccessSchedule 1 0 8, AccessSchedule 0 9 17] sun10)
+  check "itemAllowedByPolicy: empty policy allows anything" True (itemAllowedByPolicy emptyUserPolicy Nothing)
+  check "itemAllowedByPolicy: blocked tag" False
+    (itemAllowedByPolicy pol9 (Just sparseMeta { metaTags = ["Horror"] }))
+  check "itemAllowedByPolicy: rating above max" False
+    (itemAllowedByPolicy pol9 (Just sparseMeta { metaOfficialRating = Just "R" }))
+  check "itemAllowedByPolicy: ok item passes" True
+    (itemAllowedByPolicy pol9 (Just sparseMeta { metaTags = ["Comedy"], metaOfficialRating = Just "PG" }))
+  check "User FromJSON of pre-9 JSON (no policy/enabled) gets defaults"
+    (Just (emptyUserPolicy, True))
+    ((\u -> (userPolicy u, userEnabled u)) <$>
+      (Aeson.decode (LBSC.pack "{\"userId\":\"9\",\"userName\":\"old\",\"passwordHash\":\"h\",\"isAdmin\":false,\"apiKeys\":[]}")
+        :: Maybe User))
+  check "UserPolicy JSON roundtrip" (Just pol9) (Aeson.decode (Aeson.encode pol9) :: Maybe UserPolicy)
+  check "PolicyPatch partial decode + applyPolicyPatch merge (absent fields kept)"
+    (UserPolicy (Just "R") ["Horror","Scary"] [AccessSchedule 0 9 17])
+    (applyPolicyPatch (UserPolicy (Just "PG") ["Horror"] [AccessSchedule 0 9 17])
+      (either (const (PolicyPatch Nothing Nothing Nothing)) id
+        (Aeson.eitherDecode (LBSC.pack "{\"MaxParentalRating\":\"R\",\"BlockedTags\":[\"Horror\",\"Scary\"]}"))))
+  check "PolicyPatch explicit null clears the max rating"
+    Nothing
+    (policyMaxRating (applyPolicyPatch pol9 (PolicyPatch (Just Nothing) Nothing Nothing)))
+  check "parseMovieNfo reads <mpaa> into officialRating"
+    (Just (Just "PG-13"))
+    (metaOfficialRating <$> either (const Nothing) Just
+      (parseMovieNfo (BSC.pack "<movie><title>x</title><mpaa>PG-13</mpaa></movie>")))
 
   putStrLn "All tests passed."

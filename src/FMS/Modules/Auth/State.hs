@@ -26,6 +26,7 @@ import System.IO (hPutStrLn, stderr)
 import System.Random (newStdGen, randomRs)
 
 import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.Policy (emptyUserPolicy)
 import FMS.Core.Types.User (User (..), toInternalJSON)
 
 -- | Where the user map is persisted: @stateDir/users.json@ — a bare JSON
@@ -69,7 +70,7 @@ loadOrBootstrapUsers cfg = do
         hPutStrLn stderr "[WARN] FMS_ADMIN_PASSWORD not set: bootstrap admin password is \"admin\" -- set FMS_ADMIN_PASSWORD or change it via POST /Users/1/Password"
       h   <- hashPassword pw
       key <- mintToken
-      let admin = User "1" "admin" h True [key] Nothing
+      let admin = User "1" "admin" h True [key] Nothing emptyUserPolicy True
           users = HM.singleton "1" admin
       saveUsers path users
       pure users

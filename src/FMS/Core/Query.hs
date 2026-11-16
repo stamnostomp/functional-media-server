@@ -15,6 +15,7 @@ module FMS.Core.Query
   , projectFields
   , attachUserData
   , showsFromItems
+  , similarItems
   , sortEpisodes
   , specialFeaturesOf
   , sortItems
@@ -264,6 +265,35 @@ sortByUserDataField sortKey lookupItems items =
     cmpPlayCount x y =
       compare (pc y) (pc x)                 -- descending
       where pc i = maybe 0 udPlayCount (lookupItems (itemId i))
+
+-- | Pure (milestone 4i, Jellyfin =/items/:id/Similar=): items sharing at
+-- least one genre (case-insensitive) with the base item, excluding the
+-- base item itself, ranked by shared-genre count DESC then title ASC,
+-- capped at @limit@ (limit <= 0 means the default 12, applied here).
+-- Items without metadata never match; a base item without metadata
+-- yields []. All item types are considered (Jellyfin mixes types).
+similarItems
+  :: (Text -> Maybe MediaMetadata)  -- ^ itemId -> metadata lookup
+  -> Int                            -- ^ limit (<= 0 -> 12)
+  -> MediaItem                      -- ^ base item
+  -> [MediaItem]                    -- ^ candidate pool
+  -> [MediaItem]
+similarItems lookupMeta limit base allItems =
+  case lookupMeta (itemId base) of
+    Nothing -> []
+    Just bm ->
+      let baseGenres = map T.toCaseFold (metaGenres bm)
+          shared i = case lookupMeta (itemId i) of
+            Nothing -> []
+            Just m  -> filter (`elem` baseGenres) (map T.toCaseFold (metaGenres m))
+          scored = [ (length (shared i), itemTitle i, i)
+                   | i <- allItems
+                   , itemId i /= itemId base
+                   , not (null (shared i))
+                   ]
+          sorted = sortBy (\(a, ta, _) (b, tb, _) -> compare b a <> compare ta tb) scored
+          lim = if limit <= 0 then 12 else limit
+      in take lim (map (\(_, _, i) -> i) sorted)
 
 -- | Sort by @sortBy@ ∈ {title, size, addedAt} — unknown or missing falls
 -- back to title — with direction @sortOrder@ ∈ {asc, desc} (default asc).

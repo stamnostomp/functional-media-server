@@ -7,6 +7,7 @@ module FMS.Modules.Library.Routes
   , ancestorsHandler
   , searchHintsHandler
   , specialFeaturesHandler
+  , similarHandler
   ) where
 
 import Control.Concurrent.STM (TVar, readTVarIO)
@@ -30,7 +31,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -421,3 +422,33 @@ specialFeaturesHandler captures req =
           mUser <- currentUserFromReq req
           items <- listItems >>= visibleItems mUser
           pure (jsonResponse (specialFeaturesOf item items))
+
+-- | @GET \/items\/:id\/Similar@ (milestone 4i, Jellyfin similar-items) —
+-- 404 for an unknown item ('getItemWithAccess' also enforces the
+-- folder + parental policy), otherwise 200 with the envelope
+-- @{\"Items\": [...], \"TotalRecordCount\": n}@ of genre-similar items
+-- (pure 'similarItems' over the metadata cache), restricted to items
+-- visible to the requester. Query param @limit@ (default 12, invalid ->
+-- default).
+similarHandler :: [(Text, Text)] -> Request -> AppM Response
+similarHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          mUser <- currentUserFromReq req
+          items <- listItems >>= visibleItems mUser
+          -- metadata cache via the literal registry key (same comment as
+          -- itemsHandler: importing FMS.Modules.Metadata.Monad would cycle)
+          mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+          metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+          let qparams = queryParams (queryString req)
+              limit = fromMaybe 12 (lookup "limit" qparams >>= readMaybe . T.unpack)
+              sim = similarItems (flip HM.lookup metaMap) limit item items
+          pure (jsonResponse (object
+            [ "Items" .= sim
+            , "TotalRecordCount" .= length sim
+            ]))

@@ -77,7 +77,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO =EnableImages=, image type selection
    - [X] =fields= projection on /items and /items/:id (case-insensitive, id always kept, UserData attachable)
 ** DONE User-scoped queries: =userId=, filters IsPlayed/Unplayed/IsFavorite/IsResumable/IsLiked (ANDed, case-insensitive; 403 for non-admin cross-user userId; UserData attached to items; TotalRecordCount after filters, before pagination)
-** TODO =GET /Items/{id}/Similar=
+** DONE =GET /Items/{id}/Similar= (genre-based via metadata: shared-genre count desc, title asc, self excluded, limit param default 12, envelope {Items,TotalRecordCount})
    - [X] =GET /Items/{id}/SpecialFeatures= (extras in same dir + one level below)
    - [X] =GET /Items/{id}= item detail (alias of =/library/:id=, 404 on unknown)
 ** DONE Ancestors/breadcrumb endpoints (=/Items/{id}/Ancestors=)

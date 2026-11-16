@@ -35,7 +35,7 @@ import System.FilePath ((</>))
 
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Process (runProcessBS, showBS)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
@@ -1933,5 +1933,34 @@ main = do
   missingDevs <- loadDevices "/tmp/fms-test-devices-does-not-exist.json"
   check "loadDevices of a missing file is empty" HM.empty missingDevs
   removeFile devFile
+
+  -- Milestone 4i (/items/:id/Similar): similarItems ranking/exclusion/cap.
+  let si base = mi5 base base  -- id == title, path from title
+      metaWith genres = sparseMeta { metaGenres = genres }
+      simLookup = HM.fromList
+        [ ("1", metaWith ["Action", "Sci-Fi"])
+        , ("2", metaWith ["action", "Drama"])       -- case-insensitive share: Action
+        , ("3", metaWith ["Sci-Fi", "Horror"])       -- shares Sci-Fi only
+        , ("4", metaWith ["Drama"])                  -- no share with base
+        , ("5", metaWith ["Action", "Sci-Fi", "Drama"])  -- shares 2
+        ]
+      simItems = [si "1", si "2", si "3", si "4", si "5", si "6"]
+      -- item 6 has no metadata -> never matches
+  check "similarItems: ranked by shared-genre count desc, self excluded"
+    ["5", "2", "3"]
+    (map itemId (similarItems (flip HM.lookup simLookup) 12 (si "1") simItems))
+  check "similarItems: case-insensitive genre match"
+    True ("2" `elem` map itemId (similarItems (flip HM.lookup simLookup) 12 (si "1") simItems))
+  check "similarItems: tie on shared count breaks by title asc"
+    ["a", "b"]
+    (map itemTitle (similarItems (flip HM.lookup (HM.fromList [("x", metaWith ["G"]), ("a", metaWith ["g"]), ("b", metaWith ["G"])])) 12 (si "x") [si "x", si "b", si "a"]))
+  check "similarItems: base without metadata -> []"
+    [] (map itemId (similarItems (flip HM.lookup simLookup) 12 (si "6") simItems))
+  check "similarItems: item without metadata never matches"
+    False ("6" `elem` map itemId (similarItems (flip HM.lookup simLookup) 12 (si "1") simItems))
+  check "similarItems: limit caps the result"
+    ["5", "2"] (map itemId (similarItems (flip HM.lookup simLookup) 2 (si "1") simItems))
+  check "similarItems: limit <= 0 means default 12"
+    3 (length (similarItems (flip HM.lookup simLookup) 0 (si "1") simItems))
 
   putStrLn "All tests passed."

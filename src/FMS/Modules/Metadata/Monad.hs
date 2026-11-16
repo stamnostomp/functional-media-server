@@ -44,6 +44,7 @@ class Monad m => MonadMetadata m where
   getMetadata     :: Text -> m (Maybe MediaMetadata)
   setMetadata     :: Text -> MediaMetadata -> m ()
   refreshMetadata :: Text -> m (Maybe MediaMetadata)
+  listAllMetadata :: m [MediaMetadata]   -- ^ every stored metadata record (milestone 10a /Genres)
 
 instance MonadMetadata AppM where
   getMetadata itemIdent = do
@@ -51,6 +52,10 @@ instance MonadMetadata AppM where
     case mTv of
       Just tv -> liftIO (HM.lookup itemIdent <$> readTVarIO tv)
       Nothing -> pure Nothing
+
+  listAllMetadata = do
+    tv <- ensureMetadataTVar
+    liftIO (HM.elems <$> readTVarIO tv)
 
   setMetadata itemIdent meta = do
     cfg <- asks envConfig

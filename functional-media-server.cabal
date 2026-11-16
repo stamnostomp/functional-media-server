@@ -72,6 +72,11 @@ library
                       FMS.Modules.Playback.Types
                       FMS.Modules.Playback.Probe
                       FMS.Modules.Playback.Routes
+                      FMS.Modules.Playlists
+                      FMS.Modules.Playlists.Types
+                      FMS.Modules.Playlists.Persistence
+                      FMS.Modules.Playlists.Monad
+                      FMS.Modules.Playlists.Routes
                       FMS.Modules.Sessions
                       FMS.Modules.Sessions.Types
                       FMS.Modules.Sessions.Monad

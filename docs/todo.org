@@ -130,9 +130,10 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Watch history
 
 * 10. Organization endpoints :feature:
-** TODO Genres, studios, persons, tags endpoints (=/Genres=, =/Studios=, =/Persons=)
+** TODO Studios, persons, tags endpoints (=/Studios=, =/Persons=)
+   - [X] =GET /Genres= (derived from stored metadata: Name + ItemCount, sorted)
 ** TODO Box sets (=/Collections=) create/manage
-** TODO Playlists (=/Playlists=) create/manage/items reorder
+** DONE Playlists: =/Playlists= CRUD + =/Playlists/:id/Items= add/remove/list (persisted playlists.json)
 ** TODO Custom metadata fields / tags on items
 
 * 11. Server administration :feature:

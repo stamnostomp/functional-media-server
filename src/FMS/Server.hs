@@ -17,6 +17,7 @@ import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Auth (authModule)
 import FMS.Modules.Library (libraryModule)
 import FMS.Modules.Playback (playbackModule)
+import FMS.Modules.Playlists (playlistsModule)
 import FMS.Modules.Sessions (sessionsModule)
 import FMS.Modules.Hls (hlsModule)
 import FMS.Modules.Images (imagesModule)
@@ -36,7 +37,7 @@ modules =
   [ systemModule, authModule, libraryModule, playbackModule, streamModule
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
-  , metadataModule, userDataModule, sessionsModule
+  , metadataModule, userDataModule, sessionsModule, playlistsModule
   ]
 
 -- | Boot the server: build the environment, run each module's init, then

@@ -56,7 +56,11 @@ import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
+import FMS.Modules.Metadata.Routes (genresFromMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
+import FMS.Modules.Playlists.Monad (addItem, removeItem)
+import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
+import FMS.Modules.Playlists.Types (Playlist (..))
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
   , directPlayable
@@ -932,5 +936,34 @@ main = do
     True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode s1))
       [ "\"Id\":", "\"ItemId\":", "\"UserId\":", "\"UserName\":"
       , "\"PositionSeconds\":", "\"IsPaused\":", "\"StartedAt\":", "\"LastPingAt\":" ])
+
+  -- Genres + Playlists (milestone 10a, docs/todo.org section 10): the
+  -- pure genre grouping, the pure playlist item helpers, the Playlist
+  -- JSON roundtrip, and the playlists.json persistence roundtrip.
+  let gm gs = sparseMeta { metaGenres = gs }
+  check "genresFromMetadata groups, counts per item, sorts by name"
+    [("Action",1),("Drama",2),("Sci-Fi",1)]
+    (genresFromMetadata [gm ["Drama","Action"], gm ["Drama","Sci-Fi"], gm []])
+  check "genresFromMetadata counts a duplicate genre in one item once"
+    [("Action",1)] (genresFromMetadata [gm ["Action","Action"]])
+  check "genresFromMetadata on empty input is []"
+    [] (genresFromMetadata [])
+  check "addItem appends a new item" ["1","2"] (addItem "2" ["1"])
+  check "addItem dedupes an existing item" ["1","2"] (addItem "1" ["1","2"])
+  check "removeItem removes all occurrences" ["1"] (removeItem "2" ["1","2","2"])
+  check "removeItem of an absent item is a no-op" ["1"] (removeItem "x" ["1"])
+  let pl0 = Playlist "p1" "Favs" ["1","2"] t4
+      plMap = HM.fromList [("p1", pl0), ("p2", pl0 { plId = "p2", plName = "Other", plItemIds = [] })]
+      plFile = "/tmp/fms-test-playlists.json"
+  check "Playlist JSON roundtrip" (Just pl0) (Aeson.decode (Aeson.encode pl0) :: Maybe Playlist)
+  check "Playlist JSON uses the PascalCase keys"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode pl0))
+      [ "\"Id\":", "\"Name\":", "\"ItemIds\":", "\"CreatedAt\":" ])
+  savePlaylists plFile plMap
+  loadedPl <- loadPlaylists plFile
+  check "savePlaylists/loadPlaylists roundtrip" plMap loadedPl
+  missingPl <- loadPlaylists "/tmp/fms-test-playlists-does-not-exist.json"
+  check "loadPlaylists of a missing file is empty" HM.empty missingPl
+  removeFile plFile
 
   putStrLn "All tests passed."

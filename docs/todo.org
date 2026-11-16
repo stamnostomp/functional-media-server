@@ -132,7 +132,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Password hashing (bcrypt); self/admin password change
 ** TODO Password policy (min length etc.), forced reset
 ** DONE Sessions + router gate: GET /Sessions lists playback sessions (Sessions module); gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
-** TODO =/Devices=, device capabilities
+** DONE =/Devices= device registry: GET (envelope + deviceId filter), POST upsert (minted id), GET/DELETE /Devices/:id, POST /Devices/:id/Capabilities (merge+dedupe), devices.json persisted
 ** DONE Per-library (per-folder) permissions: User.allowedFolders, GET/POST /Users/:id/Permissions, enforced (401) on all item routes, filtered from lists; persisted in users.json (admin flag DONE)
 ** DONE enabled/disabled users flag: =POST /Users/:id/Enable|Disable=, User.userEnabled; login -> 403 "user is disabled"; disable purges session tokens AND router gate requires enabled owner (stale token -> 401 in strict mode)
 ** DONE Parental controls (basic): =GET/POST /Users/:id/Policy= {MaxParentalRating, BlockedTags, AccessSchedules}; ratingRank ordering (G..NC-17, TV-*), tags block, same-day schedule windows; enforced in visibleItems/getItemWithAccess (403); NFO <mpaa> -> metaOfficialRating

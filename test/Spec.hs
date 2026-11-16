@@ -106,6 +106,8 @@ import FMS.Modules.Playlists.Types (Playlist (..))
 import qualified FMS.Modules.Collections.Monad as CM
 import FMS.Modules.Collections.Persistence (loadCollections, saveCollections)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdFor, boxSetItemValue, isBoxSetId)
+import FMS.Modules.Devices.Persistence (loadDevices, saveDevices)
+import FMS.Modules.Devices.Types (Device (..), upsertDevice)
 import FMS.Modules.Socket (addConn, encodeMessage, parseApiKey, parseApiKeyFromPath, removeConn)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
@@ -1906,5 +1908,30 @@ main = do
   check "parseIdsBody: empty object -> []" (Right []) (parseIdsBody (LBSC.pack "{}"))
   check "parseIdsBody: malformed JSON is Left"
     True (either (const True) (const False) (parseIdsBody (LBSC.pack "{nope")))
+
+  -- Milestone 10c (device registry): upsertDevice + Device JSON + devices.json.
+  let d1 = Device "aa" "Living Room TV" "Jellyfin Web" "10.9" ["Video","Audio"] (Just "1") (Just aNow)
+      d2 = Device "bb" "Phone" "Jellyfin Android" "0.16" [] Nothing Nothing
+      d1' = d1 { devAppVersion = "10.10", devCapabilities = ["Video"] }
+  check "upsertDevice inserts a new device"
+    (Just d1) (HM.lookup "aa" (upsertDevice d1 HM.empty))
+  check "upsertDevice updates an existing device, preserving the id"
+    (Just d1') (HM.lookup "aa" (upsertDevice d1' (upsertDevice d1 (HM.singleton "bb" d2))))
+  check "upsertDevice with an empty id is a no-op (caller mints)"
+    HM.empty (upsertDevice (d1 { devId = "" }) HM.empty)
+  check "Device JSON roundtrip"
+    (Just d1) (Aeson.decode (Aeson.encode d1) :: Maybe Device)
+  check "Device FromJSON defaults for missing optional fields"
+    (Just ("", "", "", "", [], Nothing, Nothing))
+    ((\d -> (devId d, devName d, devAppName d, devAppVersion d, devCapabilities d, devLastUserId d, devLastSeenAt d)) <$>
+      (Aeson.decode (LBSC.pack "{}") :: Maybe Device))
+  let devFile = "/tmp/fms-test-devices.json"
+      devMap = HM.fromList [("aa", d1), ("bb", d2)]
+  saveDevices devFile devMap
+  loadedDevs <- loadDevices devFile
+  check "saveDevices/loadDevices roundtrip" devMap loadedDevs
+  missingDevs <- loadDevices "/tmp/fms-test-devices-does-not-exist.json"
+  check "loadDevices of a missing file is empty" HM.empty missingDevs
+  removeFile devFile
 
   putStrLn "All tests passed."

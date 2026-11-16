@@ -87,6 +87,11 @@ library
                       FMS.Modules.Collections.Persistence
                       FMS.Modules.Collections.Monad
                       FMS.Modules.Collections.Routes
+                      FMS.Modules.Devices
+                      FMS.Modules.Devices.Types
+                      FMS.Modules.Devices.Persistence
+                      FMS.Modules.Devices.Monad
+                      FMS.Modules.Devices.Routes
                       FMS.Modules.Sessions
                       FMS.Modules.Sessions.Types
                       FMS.Modules.Sessions.Monad

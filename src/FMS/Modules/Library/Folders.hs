@@ -8,6 +8,7 @@ module FMS.Modules.Library.Folders
 
 import Control.Exception (SomeException, try)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -33,10 +34,13 @@ loadFolders path = do
   if not exists
     then pure HM.empty
     else do
-      result <- try (LBS.readFile path) :: IO (Either SomeException LBS.ByteString)
+      -- Strict read: the handle is closed before we return, so a
+      -- saveFolders write-open on the same file right after a restart
+      -- cannot hit "resource busy (file is locked)".
+      result <- try (BS.readFile path) :: IO (Either SomeException BS.ByteString)
       pure $ case result of
         Left _      -> HM.empty
-        Right bytes -> fromMaybe HM.empty (Aeson.decode bytes)
+        Right bytes -> fromMaybe HM.empty (Aeson.decode (LBS.fromStrict bytes))
 
 -- | Persist the whole folder map as a bare JSON object.
 saveFolders :: FilePath -> HashMap Text MediaFolder -> IO ()

@@ -140,8 +140,9 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Custom metadata fields / tags on items
 
 * 11. Server administration :feature:
-** TODO Dashboard: server status, active devices/sessions, activity log (=/System/ActivityLog=)
-** TODO Scheduled tasks framework (=/ScheduledTasks=, run on interval/cron): library scan, metadata refresh, cleanup
+** TODO Dashboard: server status, active devices/sessions
+   - [X] =GET /System/ActivityLog= (ring buffer 500 + stateDir/activity.log JSON lines, newest first)
+** DONE Scheduled tasks: =GET /ScheduledTasks=, =POST .../:id/Run=, =POST .../:id/Enable=; 10s scheduler thread; default tasks library-rescan 300s / metadata-refresh 3600s / acid-checkpoint 600s
 ** TODO Server logs endpoint + log levels config
 ** TODO Branding (name, login disclaimer), startup wizard state
 ** TODO Notifications and webhooks (=/Webhooks=) on item added/playback events

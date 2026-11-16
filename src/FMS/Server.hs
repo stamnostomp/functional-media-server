@@ -26,6 +26,7 @@ import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.ServerConfig (ServerConfig (..))
+import FMS.Modules.Admin (adminModule, MonadAdmin (..))
 import FMS.Modules.Auth (authModule)
 import FMS.Modules.Images (imagesModule)
 import FMS.Modules.Library (libraryModule)
@@ -50,7 +51,7 @@ modules =
   [ systemModule, authModule, libraryModule, playbackModule, streamModule
   , transcodeModule
   , hlsModule, subtitlesModule, thumbsModule, imagesModule, statsModule
-  , metadataModule, userDataModule, sessionsModule, playlistsModule
+  , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
   ]
 
 -- | Boot the server: build the environment, register the runtime state
@@ -91,6 +92,7 @@ runServer cfg = do
       app = buildApplication appEnv modules
   warpThread <- forkIO (runSettings settings app)
   tag <- takeMVar shutdownMv
+  _ <- runApp appEnv (logActivity "Server" ("server " <> tag <> " requested"))
   putStrLn ("[INFO] " ++ T.unpack tag ++ " requested: shutting down gracefully")
   killThread warpThread   -- closes the listen socket, drains requests (<= 5s)
   threadDelay 500000      -- let warp release the port before a restart re-binds

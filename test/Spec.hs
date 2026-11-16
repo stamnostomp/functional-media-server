@@ -10,7 +10,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
@@ -100,6 +100,8 @@ import FMS.Modules.Playback.Probe
 import FMS.Modules.Playback.Types (MediaStream(..))
 import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
 import FMS.Modules.Sessions.Types (PlaySession (..))
+import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
+import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..))
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -1119,5 +1121,45 @@ main = do
   check "loadServerConfig applies a partial file over the defaults"
     (4321, "functional-media-server") (scPort partialCfg, scServerName partialCfg)
   removeFile cfgFile
+
+  -- Admin module (milestone 11a, docs/todo.org section 11): the activity
+  -- ring buffer, the task-due predicate, and the JSON roundtrips.
+  aNow <- getCurrentTime
+  let mkEntry i = ActivityEntry i aNow "Test" ("msg " <> T.pack (show i))
+      (n1, b1) = pushActivity 1 [] (mkEntry 0)
+  check "pushActivity assigns the id and bumps the counter"
+    (2, [(mkEntry 0) { aeId = 1 }]) (n1, b1)
+  let (nBig, bBig) = foldl (\(n, b) _ -> pushActivity n b (mkEntry 0)) (1, [])
+                     [1 .. 501 :: Int]
+  check "pushActivity caps the ring buffer at activityLogCap"
+    activityLogCap (length bBig)
+  check "pushActivity drops the oldest entry first"
+    (Just 2) (aeId <$> listToMaybe bBig)
+  check "pushActivity keeps the newest entry last"
+    (Just 501) (aeId <$> listToMaybe (reverse bBig))
+  check "pushActivity counter after 501 pushes"
+    502 nBig
+  let tEnabled  = ScheduledTask "t" "T" 300 True Nothing Nothing
+      tDisabled = tEnabled { stEnabled = False }
+      tRecent   = tEnabled { stLastRun = Just (addUTCTime (-100) aNow) }
+      tOld      = tEnabled { stLastRun = Just (addUTCTime (-400) aNow) }
+      tBoundary = tEnabled { stLastRun = Just (addUTCTime (-300) aNow) }
+  check "taskDue: enabled and never run -> True"  True  (taskDue aNow tEnabled)
+  check "taskDue: disabled -> False"               False (taskDue aNow tDisabled)
+  check "taskDue: last run older than interval -> True" True (taskDue aNow tOld)
+  check "taskDue: last run within interval -> False"    False (taskDue aNow tRecent)
+  check "taskDue: exactly at the interval boundary -> True" True (taskDue aNow tBoundary)
+  let ae = ActivityEntry 7 aNow "TaskRun" "library-rescan: ok: done"
+  check "ActivityEntry JSON roundtrip"
+    (Just ae) (Aeson.decode (Aeson.encode ae) :: Maybe ActivityEntry)
+  check "ActivityEntry JSON uses Id/Time/Type/Message keys"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode ae))
+      ["\"Id\":", "\"Time\":", "\"Type\":", "\"Message\":"])
+  let stk = ScheduledTask "library-rescan" "Library rescan" 300 True (Just aNow) (Just "ok")
+  check "ScheduledTask JSON roundtrip"
+    (Just stk) (Aeson.decode (Aeson.encode stk) :: Maybe ScheduledTask)
+  check "ScheduledTask JSON uses the PascalCase keys"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode stk))
+      ["\"Id\":", "\"Name\":", "\"IntervalSeconds\":", "\"Enabled\":", "\"LastRun\":", "\"LastResult\":"])
 
   putStrLn "All tests passed."

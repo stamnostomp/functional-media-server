@@ -4,32 +4,38 @@ module FMS.Modules.Images
   , isValidImageType
   , resizeArgs
   , imagePathFor
+  , imageTag
+  , imageTagOfFile
+  , selectBackdrop
   ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (forM, unless, when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Aeson (object, (.=))
-import Data.Char (toLower)
+import Data.CaseInsensitive (mk)
+import Data.Char (isDigit, toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (isPrefixOf, nub, sort)
+import Data.List (isPrefixOf, nub, sort, stripPrefix)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Types (hContentType, status200)
+import Network.HTTP.Types (ResponseHeaders, hContentType, status200)
 import Network.Wai
   ( Request, Response, queryString, requestHeaders, responseLBS
   , strictRequestBody
   )
 import System.Directory
   ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
-  , listDirectory, removeFile
+  , getFileSize, getModificationTime, listDirectory, removeFile
   )
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeBaseName, takeDirectory, takeExtension)
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime(..), diffUTCTime)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), delete, get, jsonResponse, post)
@@ -62,6 +68,8 @@ imagesModule = Module
       [ get    [Lit "items", Capture "id", Lit "images"] listImagesHandler
       , get    [Lit "items", Capture "id", Lit "images", Capture "type"]
                getImageHandler
+      , get    [Lit "items", Capture "id", Lit "images", Capture "type", Capture "index"]
+               backdropIndexHandler
       , post   [Lit "items", Capture "id", Lit "images", Capture "type"]
                uploadImageHandler
       , delete [Lit "items", Capture "id", Lit "images", Capture "type"]
@@ -72,6 +80,28 @@ imagesModule = Module
 -- | The per-item image store directory: @stateDir \/ \"images\" \/ \<id\>@.
 imagesDirFor :: FilePath -> Text -> FilePath
 imagesDirFor stateDir i = stateDir </> "images" </> T.unpack i
+
+-- | Pure cache-busting tag for an image: @<size>-<mtimeEpochSeconds>@.
+-- Size alone is not enough (a re-encode can keep the size), so the
+-- modification time (epoch seconds) is included. Deterministic, so
+-- unit-testable on synthetic pairs (milestone 6g).
+imageTag :: Integer -> Int -> Text
+imageTag size epoch = T.pack (show size ++ "-" ++ show epoch)
+
+-- | The 'imageTag' of an actual file: size + mtime epoch seconds.
+imageTagOfFile :: FilePath -> IO Text
+imageTagOfFile path = do
+  size <- getFileSize path
+  mtime <- getModificationTime path
+  let epoch = round (diffUTCTime mtime (UTCTime (fromGregorian 1970 1 1) 0)) :: Int
+  pure (imageTag size epoch)
+
+-- | Pure backdrop selection (milestone 6g): @index@ into the sorted list
+-- of backdrop files; out of range (or negative) -> 'Nothing'.
+selectBackdrop :: [FilePath] -> Int -> Maybe FilePath
+selectBackdrop files n
+  | n < 0 || n >= length files = Nothing
+  | otherwise = Just (sort files !! n)
 
 -- | The path of a stored image: @stateDir \/ \"images\" \/ \<id\> \/ \<type\>\<ext\>@.
 imagePathFor :: FilePath -> Text -> Text -> String -> FilePath
@@ -146,10 +176,11 @@ defaultQuality :: Int
 defaultQuality = 90
 
 -- | @GET \/items\/:id\/images@ — 404 for an unknown item, otherwise 200
--- with a JSON array of the available image type names: the stored files
--- in @stateDir/images/<id>/@ (originals only — resized variants are
--- filtered out by 'isValidImageType'), plus @Thumb@ and @Primary@ when
--- the thumbs cache exists (they fall back to it, see below).
+-- with a JSON array of @{\"Type\": t, \"Tag\"?: tag}@ entries (milestone
+-- 6g): the stored files in @stateDir/images/<id>/@ (originals only —
+-- resized variants are filtered out by 'isValidImageType'), plus @Thumb@
+-- and @Primary@ when the thumbs cache exists. @Tag@ is the cache-busting
+-- 'imageTagOfFile' of the backing file when it exists.
 listImagesHandler :: [(Text, Text)] -> Request -> AppM Response
 listImagesHandler captures req =
   case lookup "id" captures of
@@ -160,8 +191,21 @@ listImagesHandler captures req =
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just _  -> do
           cfg   <- asks envConfig
-          types <- liftIO (listImageTypes (configStateDir cfg) i)
-          pure (jsonResponse types)
+          let stateDir = configStateDir cfg
+          types <- liftIO (listImageTypes stateDir i)
+          entries <- forM types $ \ty -> do
+            mStored <- liftIO (findStoredImage (imagesDirFor stateDir i) ty)
+            mTag <- case mStored of
+              Just (p, _) -> Just <$> liftIO (imageTagOfFile p)
+              Nothing
+                | ty == "Primary" || ty == "Thumb" -> do
+                    let thumb = thumbPathFor stateDir i
+                    ok <- liftIO (doesFileExist thumb)
+                    if ok then Just <$> liftIO (imageTagOfFile thumb) else pure Nothing
+                | otherwise -> pure Nothing
+            pure (object $
+              ["Type" .= ty] ++ [ "Tag" .= t | Just t <- [mTag] ])
+          pure (jsonResponse entries)
 
 -- | The image type names available for an item: stored originals plus
 -- the thumb-cache fallbacks.
@@ -182,11 +226,15 @@ listImageTypes stateDir i = do
 -- | @GET \/items\/:id\/images\/:type@ — serve one image. An invalid type
 -- (not @[A-Za-z]+@) is 400; an unknown item is 404. The stored file
 -- @stateDir/images/<id>/<type>.<ext>@ is served with the content type
--- of its extension; when @maxWidth@ or @maxHeight@ is present the image
--- is resized with ffmpeg into the cached variant
--- @<type>-<w>x<h>.jpg@ (served as @image\/jpeg@; a non-zero ffmpeg exit
--- is a 500). Without a stored file, @Primary@\/@Thumb@ fall back to the
--- cached thumbnail @stateDir/thumbs/<id>.jpg@; anything else is 404.
+-- of its extension, plus an @ETag@ (the 'imageTagOfFile' cache tag,
+-- milestone 6g) and @Cache-Control: public, max-age=86400@ headers. A
+-- @?tag=@ query param is accepted for URL cache-busting but never
+-- changes the status (always 200 when the image exists — documented).
+-- When @maxWidth@ or @maxHeight@ is present the image is resized with
+-- ffmpeg into the cached variant @<type>-<w>x<h>.jpg@ (served as
+-- @image\/jpeg@; a non-zero ffmpeg exit is a 500). Without a stored
+-- file, @Primary@\/@Thumb@ fall back to the cached thumbnail
+-- @stateDir/thumbs/<id>.jpg@; anything else is 404.
 getImageHandler :: [(Text, Text)] -> Request -> AppM Response
 getImageHandler captures req =
   case (lookup "id" captures, lookup "type" captures) of
@@ -205,40 +253,80 @@ getImageHandler captures req =
                   dir      = imagesDirFor stateDir i
               mStored <- liftIO (findStoredImage dir ty)
               case mStored of
-                Just (path, ext) -> do
-                  let qp = queryParams (queryString req)
-                      mW = lookup "maxWidth"  qp >>= readMaybe . T.unpack
-                      mH = lookup "maxHeight" qp >>= readMaybe . T.unpack
-                      q  = fromMaybe defaultQuality
-                           (lookup "quality" qp >>= readMaybe . T.unpack)
-                  if isNothing mW && isNothing mH
-                    then serveImageFile path (contentTypeForExt ext)
-                    else do
-                      let vPath = variantPathFor dir ty mW mH
-                      vExists <- liftIO (doesFileExist vPath)
-                      unless vExists $ do
-                        liftIO (createDirectoryIfMissing True dir)
-                        logInfo ("images: resizing " <> ty <> " for item " <> i)
-                        (ec, _out, err) <- liftIO
-                          (runProcessBS "ffmpeg" (resizeArgs path mW mH q vPath))
-                        case ec of
-                          ExitSuccess -> pure ()
-                          ExitFailure n ->
-                            throwError (InternalError (T.pack
-                              ("ffmpeg image resize failed (exit " ++ show n ++ "): "
-                               ++ take 2000 (showBS (LBS.toStrict err)))))
-                      serveImageFile vPath "image/jpeg"
+                Just (path, ext) -> serveStoredImage dir i ty path ext req
                 Nothing
                   | ty == "Primary" || ty == "Thumb" -> do
                       let thumb = thumbPathFor stateDir i
                       ok <- liftIO (doesFileExist thumb)
                       if ok
-                        then serveImageFile thumb "image/jpeg"
+                        then do
+                          tag <- liftIO (imageTagOfFile thumb)
+                          serveImageFileWithHeaders thumb "image/jpeg"
+                            [(mk "ETag", tagB tag), (mk "Cache-Control", "public, max-age=86400")]
                         else throwError (NotFound
                                ("no image of type " <> ty <> " for item " <> i))
                   | otherwise ->
                       throwError (NotFound
                         ("no image of type " <> ty <> " for item " <> i))
+
+-- | @GET \/items\/:id\/images\/:type\/:index@ — backdrop index selection
+-- (milestone 6g). For @Backdrop@ (case-insensitive) the index selects
+-- among the stored backdrop files (@Backdrop.jpg@, @Backdrop1.jpg@, ...
+-- sorted) via 'selectBackdrop'; out of range -> 404. For any other type,
+-- index 0 behaves exactly like the base route and index > 0 is 404.
+backdropIndexHandler :: [(Text, Text)] -> Request -> AppM Response
+backdropIndexHandler captures req =
+  case (lookup "id" captures, lookup "type" captures, lookup "index" captures) of
+    (Nothing, _, _) -> throwError (BadRequest "missing id capture")
+    (_, Nothing, _) -> throwError (BadRequest "missing type capture")
+    (_, _, Nothing) -> throwError (BadRequest "missing index capture")
+    (Just i, Just ty, Just idxTxt)
+      | not (isValidImageType ty) ->
+          throwError (BadRequest ("invalid image type: " <> ty))
+      | otherwise ->
+          case reads (T.unpack idxTxt) :: [(Int, String)] of
+            [(n, "")] | n >= 0 -> do
+              mItem <- getItemWithAccess req i
+              case mItem of
+                Nothing -> throwError (NotFound ("no library item with id " <> i))
+                Just _ -> do
+                  cfg <- asks envConfig
+                  let stateDir = configStateDir cfg
+                      dir      = imagesDirFor stateDir i
+                  if T.toLower ty == "backdrop"
+                    then do
+                      files <- liftIO (backdropFiles dir)
+                      case selectBackdrop files n of
+                        Just p  -> serveStoredImage dir i ty p (takeExtension p) req
+                        Nothing -> throwError (NotFound
+                          ("no backdrop index " <> T.pack (show n)
+                           <> " for item " <> i))
+                    else
+                      if n == 0
+                        then getImageHandler captures req
+                        else throwError (NotFound
+                          ("no image index " <> T.pack (show n)
+                           <> " of type " <> ty <> " for item " <> i))
+            _ -> throwError (BadRequest "invalid image index")
+
+-- | The stored backdrop originals in @dir@: files named @Backdrop@,
+-- @Backdrop1@, @Backdrop2@, ... (stem @Backdrop@ + optional digits) with
+-- an image extension, excluding resize variants (their base name has a
+-- @-@ and never matches). Sorted for stable index selection.
+backdropFiles :: FilePath -> IO [FilePath]
+backdropFiles dir = do
+  dirExists <- doesDirectoryExist dir
+  if not dirExists
+    then pure []
+    else do
+      entries <- listDirectory dir
+      pure [ dir </> e | e <- sort entries
+           , isBackdropName (takeBaseName e)
+           , map toLower (takeExtension e) `elem` [".jpg", ".jpeg", ".png", ".webp"] ]
+  where
+    isBackdropName b = case stripPrefix "Backdrop" b of
+      Just rest -> null rest || all isDigit rest
+      Nothing   -> False
 
 -- | @POST \/items\/:id\/images\/:type@ — upload raw image bytes (the
 -- request body) as the item's image of @type@. The extension comes from
@@ -339,9 +427,44 @@ removeOtherExts dir stem keepExt = do
     mapM_ (removeFile . (dir </>))
       [ e | e <- entries, takeBaseName e == stem, takeExtension e /= keepExt ]
 
--- | Read a whole image file and serve it with 'responseLBS' and the
--- given Content-Type.
-serveImageFile :: FilePath -> BS.ByteString -> AppM Response
-serveImageFile path contentType = do
+-- | Serve one stored image file @path@ (extension @ext@, type @ty@,
+-- item @i@): ETag (the file's 'imageTagOfFile') + @Cache-Control:
+-- public, max-age=86400@ headers (milestone 6g), and the usual optional
+-- ffmpeg resize into the cached variant when @maxWidth@\/@maxHeight@ is
+-- present.
+serveStoredImage :: FilePath -> Text -> Text -> FilePath -> String -> Request -> AppM Response
+serveStoredImage dir i ty path ext req = do
+  tag <- liftIO (imageTagOfFile path)
+  let qp   = queryParams (queryString req)
+      mW   = lookup "maxWidth"  qp >>= readMaybe . T.unpack
+      mH   = lookup "maxHeight" qp >>= readMaybe . T.unpack
+      q    = fromMaybe defaultQuality (lookup "quality" qp >>= readMaybe . T.unpack)
+      hdrs = [(mk "ETag", tagB tag), (mk "Cache-Control", "public, max-age=86400")]
+  if isNothing mW && isNothing mH
+    then serveImageFileWithHeaders path (contentTypeForExt ext) hdrs
+    else do
+      let vPath = variantPathFor dir ty mW mH
+      vExists <- liftIO (doesFileExist vPath)
+      unless vExists $ do
+        liftIO (createDirectoryIfMissing True dir)
+        logInfo ("images: resizing " <> ty <> " for item " <> i)
+        (ec, _out, err) <- liftIO
+          (runProcessBS "ffmpeg" (resizeArgs path mW mH q vPath))
+        case ec of
+          ExitSuccess -> pure ()
+          ExitFailure n ->
+            throwError (InternalError (T.pack
+              ("ffmpeg image resize failed (exit " ++ show n ++ "): "
+               ++ take 2000 (showBS (LBS.toStrict err)))))
+      serveImageFileWithHeaders vPath "image/jpeg" hdrs
+
+-- | A 'Text' tag as an HTTP header value (ASCII: digits and dash).
+tagB :: Text -> BS.ByteString
+tagB = BSC.pack . T.unpack
+
+-- | Read a whole image file and serve it with 'responseLBS', the given
+-- Content-Type and extra headers.
+serveImageFileWithHeaders :: FilePath -> BS.ByteString -> ResponseHeaders -> AppM Response
+serveImageFileWithHeaders path contentType extra = do
   bs <- liftIO (LBS.readFile path)
-  pure (responseLBS status200 [("Content-Type", contentType)] bs)
+  pure (responseLBS status200 (("Content-Type", contentType) : extra) bs)

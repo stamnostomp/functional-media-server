@@ -91,8 +91,10 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE =GET /Items/{id}/Images/{type}=
    - [X] =GET /items/:id/thumb= (ffmpeg frame at 5s -> cached JPEG in stateDir/thumbs)
    - [X] =GET /items/:id/images= list, =GET/POST/DELETE /items/:id/images/:type= (upload, delete), =?maxWidth/maxHeight/quality== resize via ffmpeg (cached variants), Primary/Thumb fallback to thumb cache
-** TODO Image tags and cache-busting; blurhash placeholders
-** TODO Backdrop selection by index; artist/album/series images
+** TODO blurhash placeholders
+   - [X] image tags + cache-busting: Tag (size-epoch) in /items/:id/images list, ETag + Cache-Control on image responses, ?tag= accepted
+** DONE Backdrop selection by index: =GET /items/:id/images/Backdrop/:index= (sorted Backdrop/Backdrop1... via selectBackdrop, 400/404 paths)
+   - [ ] artist/album/series images
 
 * 6. Playback and streaming :feature:
 ** TODO Direct play

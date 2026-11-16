@@ -87,7 +87,7 @@ import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
-import FMS.Modules.Images (imageExtFor, imagePathFor, isValidImageType, resizeArgs)
+import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isValidImageType, resizeArgs, selectBackdrop)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
@@ -2322,5 +2322,25 @@ main = do
   check "watchMediaFile: media extensions pass, others do not"
     [True, True, False, False]
     (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "cover.jpg"])
+
+  -- Milestone 6g (image cache tags + backdrop index): imageTag format and
+  -- determinism, selectBackdrop bounds/sorting.
+  check "imageTag: <size>-<mtimeEpoch> format"
+    "1234-1717200000" (imageTag 1234 1717200000)
+  check "imageTag: deterministic and size+mtime sensitive"
+    (True, False, False)
+    ( imageTag 10 20 == imageTag 10 20
+    , imageTag 10 20 == imageTag 11 20
+    , imageTag 10 20 == imageTag 10 21 )
+  check "selectBackdrop: picks sorted entry by index"
+    (Just "/d/Backdrop1.jpg")
+    (selectBackdrop ["/d/Backdrop2.jpg", "/d/Backdrop.jpg", "/d/Backdrop1.jpg"] 1)
+  check "selectBackdrop: index 0 is the first sorted file"
+    (Just "/d/Backdrop.jpg") (selectBackdrop ["/d/Backdrop1.jpg", "/d/Backdrop.jpg"] 0)
+  check "selectBackdrop: out of range / negative / empty -> Nothing"
+    [Nothing, Nothing, Nothing]
+    [ selectBackdrop ["/d/Backdrop.jpg"] 1
+    , selectBackdrop ["/d/Backdrop.jpg"] (-1)
+    , selectBackdrop [] 0 ]
 
   putStrLn "All tests passed."

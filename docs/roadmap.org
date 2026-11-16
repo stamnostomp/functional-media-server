@@ -27,8 +27,9 @@ flipping TODO states; tag items with :fix: :improvement: :feature:
 ** TODO Structured error logging with request IDs + JSON error body :improvement:
 ** DONE health endpoint (GET /healthz)
 ** TODO Request tracing/metrics (duration, error rates) :improvement:
-** TODO Graceful shutdown on SIGTERM; finish in-flight requests :improvement:
-** TODO CLI arg + config files (JSON/YAML) + env validation :improvement:
+** DONE Graceful shutdown + restart: POST /System/Shutdown (warp drain, acid checkpoint, exit), POST /System/Restart (re-exec); live RequireAuth via config TVar :improvement:
+** DONE Config file (stateDir/config.json, env overrides) :improvement:
+** TODO Config validation, CLI arg :improvement:
 
 * Milestone 2 — library scanning and stable IDs :feature:
 ** DONE [#A] acid-state persistent library IDs (path-hash IDs are unstable) :fix:

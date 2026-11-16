@@ -7,26 +7,41 @@ import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.Config (Config(..))
+import FMS.Core.Types.ServerConfig
+  ( ServerConfig(..), loadServerConfig, serverConfigFilePath )
 import FMS.Server (runServer)
 
--- | Entry point: configuration comes from env vars (with defaults), then the
--- server runs (docs/roadmap.org milestone 1). Milestone 5b adds
--- FMS_REQUIRE_AUTH (strict auth gate in the router); FMS_ADMIN_PASSWORD is
--- read by the auth module itself when it bootstraps the admin user.
--- Milestone 4c adds MEDIA_TMDB_API_KEY (TMDB remote metadata fallback;
--- empty means the fallback is disabled).
+-- | Entry point (docs/roadmap.org milestone 1, milestone 1b): the server
+-- configuration is loaded from @stateDir/config.json@ (missing file ->
+-- defaults), then the env vars override the file:
+-- MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_REQUIRE_AUTH, FMS_SERVER_NAME
+-- (and MEDIA_TMDB_API_KEY for the remote metadata fallback, milestone 4c).
+-- FMS_ADMIN_PASSWORD is read by the auth module itself when it bootstraps
+-- the admin user.
 main :: IO ()
 main = do
+  mState <- lookupEnv "FMS_STATE_DIR"
+  let stateDir = fromMaybe "./var" mState
+  fileCfg <- loadServerConfig (serverConfigFilePath stateDir)
   mPort  <- lookupEnv "MEDIA_SERVER_PORT"
   mLib   <- lookupEnv "MEDIA_LIBRARY_PATH"
-  mState <- lookupEnv "FMS_STATE_DIR"
   mAuth  <- lookupEnv "FMS_REQUIRE_AUTH"
+  mName  <- lookupEnv "FMS_SERVER_NAME"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
-  let cfg = Config
-        { configLibraryPath = fromMaybe "./media" mLib
-        , configPort        = fromMaybe 8080 (mPort >>= readMaybe)
-        , configStateDir    = fromMaybe "./var" mState
-        , configRequireAuth = map toLower (fromMaybe "false" mAuth) `elem` ["true", "1", "yes"]
+  let sc = fileCfg
+        { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
+        , scLibraryPath = fromMaybe (scLibraryPath fileCfg) mLib
+        , scRequireAuth = case mAuth of
+            Just a  -> map toLower a `elem` ["true", "1", "yes"]
+            Nothing -> scRequireAuth fileCfg
+        , scServerName  = T.pack (fromMaybe (T.unpack (scServerName fileCfg)) mName)
+        }
+      cfg = Config
+        { configLibraryPath = scLibraryPath sc
+        , configPort        = scPort sc
+        , configStateDir    = stateDir
+        , configRequireAuth = scRequireAuth sc
+        , configServerName  = scServerName sc
         , configTmdbApiKey  = T.pack (fromMaybe "" mTmdb)
         }
   runServer cfg

@@ -10,6 +10,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory
@@ -30,6 +31,15 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.Router (isOpenPath, matchSegments, parseTokenHeader)
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
+import FMS.Core.Types.ServerConfig
+  ( ServerConfig (..)
+  , ServerConfigPatch (..)
+  , applyServerConfigPatch
+  , defaultServerConfig
+  , loadServerConfig
+  , mergeServerConfig
+  , saveServerConfig
+  )
 import FMS.Core.Types.User (User(..), toInternalJSON)
 import FMS.Modules.Auth.Monad (hashPassword, verifyPassword)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
@@ -965,5 +975,44 @@ main = do
   missingPl <- loadPlaylists "/tmp/fms-test-playlists-does-not-exist.json"
   check "loadPlaylists of a missing file is empty" HM.empty missingPl
   removeFile plFile
+
+  -- ServerConfig (milestone 1b, docs/todo.org section 1): defaults, JSON
+  -- roundtrip, partial patch decode + merge semantics, file load/save.
+  check "defaultServerConfig values"
+    ("functional-media-server", False, "./media", 8080)
+    ( scServerName defaultServerConfig, scRequireAuth defaultServerConfig
+    , scLibraryPath defaultServerConfig, scPort defaultServerConfig )
+  check "ServerConfig JSON roundtrip"
+    (Just defaultServerConfig)
+    (Aeson.decode (Aeson.encode defaultServerConfig) :: Maybe ServerConfig)
+  check "ServerConfigPatch partial decode: only ServerName set"
+    (Just (ServerConfigPatch (Just "My Media") Nothing Nothing Nothing))
+    (Aeson.decode "{\"ServerName\":\"My Media\"}" :: Maybe ServerConfigPatch)
+  check "ServerConfigPatch empty object decodes to all-Nothing"
+    (Just (ServerConfigPatch Nothing Nothing Nothing Nothing))
+    (Aeson.decode "{}" :: Maybe ServerConfigPatch)
+  let patch = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing)
+            (Aeson.decode "{\"ServerName\":\"My Media\",\"Port\":9999}" :: Maybe ServerConfigPatch)
+      merged = applyServerConfigPatch defaultServerConfig patch
+  check "applyServerConfigPatch overrides set fields, keeps the rest"
+    ("My Media", False, "./media", 9999)
+    (scServerName merged, scRequireAuth merged, scLibraryPath merged, scPort merged)
+  check "mergeServerConfig: the second argument's fields win"
+    (9090, True, "x")
+    ( let m = mergeServerConfig defaultServerConfig
+                (defaultServerConfig { scPort = 9090, scRequireAuth = True, scServerName = "x" })
+      in (scPort m, scRequireAuth m, scServerName m) )
+  let cfgFile = "/tmp/fms-test-serverconfig.json"
+  missingCfg <- loadServerConfig "/tmp/fms-test-serverconfig-does-not-exist.json"
+  check "loadServerConfig of a missing file -> defaults" defaultServerConfig missingCfg
+  saveServerConfig cfgFile (defaultServerConfig { scServerName = "Saved", scPort = 1234 })
+  loadedCfg <- loadServerConfig cfgFile
+  check "saveServerConfig/loadServerConfig roundtrip"
+    ("Saved", 1234) (scServerName loadedCfg, scPort loadedCfg)
+  writeFile cfgFile "{\"Port\": 4321}"
+  partialCfg <- loadServerConfig cfgFile
+  check "loadServerConfig applies a partial file over the defaults"
+    (4321, "functional-media-server") (scPort partialCfg, scServerName partialCfg)
+  removeFile cfgFile
 
   putStrLn "All tests passed."

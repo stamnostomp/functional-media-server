@@ -34,6 +34,7 @@ library
                       FMS.Core.Types.Config
                       FMS.Core.Types.MediaItem
                       FMS.Core.Types.Progress
+                      FMS.Core.Types.ServerConfig
                       FMS.Core.Types.User
                       FMS.Modules.System
                       FMS.Modules.Auth

@@ -10,6 +10,7 @@ module FMS.Core.Router
 
 import Control.Concurrent.STM (TVar, readTVarIO)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (asks)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString as B
 import Data.CaseInsensitive (original)
@@ -33,6 +34,7 @@ import Network.Wai
 import FMS.Core.Module (Module(..), Route(..), Segment(..))
 import FMS.Core.Monad (AppError(..), AppEnv(..), AppM, getState, runApp)
 import FMS.Core.Types.Config (Config(..))
+import FMS.Core.Types.ServerConfig (ServerConfig(..))
 import FMS.Core.Types.User (User(..))
 
 -- | Flatten every module's routes into one WAI 'Application'.
@@ -59,13 +61,26 @@ buildApplication env modules req respond
               Just (route, captures) -> do
                 eres <- runApp env (routeHandler route captures req)
                 respond (cors (either errorResponse id eres))
-      in if configRequireAuth (envConfig env) && not (isOpenPath segs)
-           then do
-             eok <- runApp env (tokenIsValid req)
-             if eok == Right True
-               then dispatch
-               else respond (cors unauthorizedResponse)
-           else dispatch
+      in do
+        ereq <- runApp env requireAuthNow
+        let requireAuth = either (const (configRequireAuth (envConfig env))) id ereq
+        if requireAuth && not (isOpenPath segs)
+          then do
+            eok <- runApp env (tokenIsValid req)
+            if eok == Right True
+              then dispatch
+              else respond (cors unauthorizedResponse)
+          else dispatch
+
+-- | The live require-auth flag (milestone 1b): read the server-config TVar
+-- from the typed registry so @POST /System/Configuration@ can flip it at
+-- runtime; falls back to the static env config when the TVar is absent.
+requireAuthNow :: AppM Bool
+requireAuthNow = do
+  mTv <- getState "system.serverConfig" :: AppM (Maybe (TVar ServerConfig))
+  case mTv of
+    Just tv -> liftIO (scRequireAuth <$> readTVarIO tv)
+    Nothing -> asks (configRequireAuth . envConfig)
 
 -- | Paths that never require a credential, even when 'configRequireAuth'
 -- is on: server info, the health probe, and the two endpoints a client

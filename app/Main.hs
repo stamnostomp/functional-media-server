@@ -43,6 +43,7 @@ main = do
   mPwMin <- lookupEnv "FMS_PASSWORD_MIN_LENGTH"
   mMaxBr <- lookupEnv "FMS_MAX_BITRATE"
   mHwAcc <- lookupEnv "FMS_HWACCEL"
+  mWatch <- lookupEnv "FMS_WATCH"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let sc = fileCfg
         { scPort        = fromMaybe (scPort fileCfg) (mPort >>= readMaybe)
@@ -76,5 +77,8 @@ main = do
             Just n | n > 0 -> n
             _              -> 0   -- missing/invalid/0 -> unlimited (milestone 6f)
         , configHwAccel = maybe "none" (normalizeHwAccel . T.pack) mHwAcc  -- milestone 6f
+        , configWatch = case mWatch of
+            Just v -> map toLower v `elem` ["true", "1", "yes"]
+            Nothing -> False   -- default off (milestone 2d)
         }
   runServer cfg

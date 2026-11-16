@@ -59,6 +59,7 @@ import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
 import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
+import FMS.Modules.Library.Watch (eventsPending, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
 import FMS.Modules.Library.Scan
   ( classifyItem
@@ -2303,6 +2304,23 @@ main = do
       , configRateLimit = Nothing, configLogLevel = "info"
       , configCorsOrigins = ["*"], configSecurityHeaders = True
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
+      , configWatch = False
       } "7" 2)
+
+  -- Milestone 2d (filesystem watching): eventsPending debounce predicate
+  -- and the media-file filter (pure helpers, platform-independent).
+  let wNow = UTCTime (fromGregorian 2024 6 1) 43200  -- 2024-06-01 12:00:00
+      wOld = UTCTime (fromGregorian 2024 6 1) 43000  -- 100s earlier
+  check "eventsPending: event inside the window -> True"
+    True (eventsPending [(wNow, "/m/a.mp4")] wNow 2.0)
+  check "eventsPending: event older than the window -> False"
+    False (eventsPending [(wOld, "/m/a.mp4")] wNow 2.0)
+  check "eventsPending: empty list -> False"
+    False (eventsPending [] wNow 2.0)
+  check "eventsPending: any event inside counts"
+    True (eventsPending [(wOld, "/x"), (wNow, "/m/b.mkv")] wNow 2.0)
+  check "watchMediaFile: media extensions pass, others do not"
+    [True, True, False, False]
+    (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "cover.jpg"])
 
   putStrLn "All tests passed."

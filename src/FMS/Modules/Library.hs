@@ -25,6 +25,7 @@ import FMS.Modules.Library.Routes
   , specialFeaturesHandler
   )
 import FMS.Modules.Library.State (initialLibraryState)
+import FMS.Modules.Library.Watch (startWatcher)
 
 -- | The library module (docs/roadmap.org milestone 2, milestone 2c media
 -- folders). Init opens the acid-state at @configStateDir \/ \"acid-state\"
@@ -45,6 +46,7 @@ libraryModule = Module
       putState libraryAcidKey acid
       initFolders
       rescanLibrary
+      startWatcher   -- milestone 2d: inotify auto-rescan behind FMS_WATCH
       logInfo "library module initialised"
     -- Milestone 4a (docs/todo.org section 4): the Jellyfin-shaped items
     -- query endpoint lives next to the plain /library routes. Milestone

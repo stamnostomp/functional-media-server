@@ -22,4 +22,5 @@ data Config = Config
   , configPasswordMinLength :: !Int      -- ^ minimum password length (env FMS_PASSWORD_MIN_LENGTH, default 0 = disabled; milestone 8b)
   , configMaxBitrate :: !Int             -- ^ server-wide transcode bitrate cap in bps (env FMS_MAX_BITRATE, default 0 = unlimited; milestone 6f)
   , configHwAccel    :: !Text            -- ^ transcode hardware acceleration: none|vaapi|nvenc|qsv|videotoolbox (env FMS_HWACCEL, default \"none\"; milestone 6f)
+  , configWatch      :: !Bool            -- ^ inotify auto-rescan on media changes (env FMS_WATCH, default False; milestone 2d)
   } deriving (Show, Eq)

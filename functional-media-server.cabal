@@ -72,6 +72,7 @@ library
                       FMS.Modules.Metadata.Routes
                       FMS.Modules.Library
                       FMS.Modules.Library.Monad
+                      FMS.Modules.Library.Watch
                       FMS.Modules.Library.Routes
                       FMS.Modules.Library.Scan
                       FMS.Modules.Library.State
@@ -142,6 +143,10 @@ library
                     , process
                     , bcrypt
                     , random
+
+    if os(linux)
+      build-depends:  hinotify
+      cpp-options:    -DFMS_LINUX
 
 test-suite fms-test
     import:           shared

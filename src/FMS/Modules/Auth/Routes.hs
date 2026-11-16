@@ -32,7 +32,6 @@ authRoutes =
   , delete [Lit "Users", Capture "id"]            deleteUserHandler
   , post   [Lit "Users", Capture "id", Lit "Password"] passwordHandler
   , post   [Lit "Users", Capture "id", Lit "ApiKey"]   apiKeyHandler
-  , get    [Lit "Sessions"]                       sessionsHandler
   ]
 
 -- Request bodies ------------------------------------------------------------
@@ -150,23 +149,9 @@ apiKeyHandler captures req = do
   tok <- addApiKey i
   pure (jsonResponse (object ["ApiKey" .= tok]))
 
--- | @GET /Sessions@ — live session tokens: @[{\"Token\",\"UserName\",\"UserId\"}]@.
--- Admin only. (API keys are not sessions and do not appear here.)
-sessionsHandler :: [(Text, Text)] -> Request -> AppM Response
-sessionsHandler _captures req = do
-  requireAdmin req
-  sessions <- listSessions
-  users <- listUsers
-  let idOf name = [userId u | u <- users, userName u == name]
-  pure (jsonResponse
-    [ object
-        [ "Token"    .= tok
-        , "UserName" .= name
-        , "UserId"   .= uid
-        ]
-    | (tok, name) <- sessions
-    , uid <- idOf name
-    ])
+-- NOTE: @GET /Sessions@ used to live here (listing live auth tokens);
+-- milestone 6c moves it to "FMS.Modules.Sessions", where it returns the
+-- Jellyfin-shaped active playback sessions instead.
 
 -- Helpers -------------------------------------------------------------------
 

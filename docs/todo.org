@@ -95,7 +95,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Bitrate limits per user/network; quality options
 ** TODO Session reporting
    - [X] play recording on stream (full 200 or range@0 -> recordPlay), POST /progress, GET /continuewatching, /popular, /new (stats.json persisted)
-   - [ ] =/Sessions=, =POST /Sessions/Playing=, =/Playing/Ping=, =/Playing/Stopped=
+   - [X] =GET /Sessions= (live playback sessions), =POST /Sessions/Playing=, =/Playing/Progress=, =/Playing/Ping=, =/Playing/Stopped= (90s stale expiry)
 ** TODO Playback progress, resume points (="/Users/{id}/Items/{id}/UserData=")
 ** TODO Mark played/unplayed, set favorite/like
 ** TODO Intro skipping via MediaSegments (intro start/end detection)
@@ -115,7 +115,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE API keys (=X-Emby-Token= / =MediaBrowser Token= / =Bearer=), POST /Users/:id/ApiKey, persisted in users.json
 ** DONE Password hashing (bcrypt); self/admin password change
 ** TODO Password policy (min length etc.), forced reset
-** DONE Sessions: GET /Sessions lists live tokens; router gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
+** DONE Sessions + router gate: GET /Sessions lists playback sessions (Sessions module); gate when FMS_REQUIRE_AUTH=true (401 JSON), open paths = /healthz, /System/Info/Public, /Users/Public, /Users/AuthenticateByName
 ** TODO =/Devices=, device capabilities
 ** TODO Per-library permissions per user; enabled/disabled users (admin flag DONE)
 ** TODO Parental controls: rating restrictions, allowed tags, access schedules (basic)

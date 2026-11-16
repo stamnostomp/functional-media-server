@@ -72,6 +72,10 @@ library
                       FMS.Modules.Playback.Types
                       FMS.Modules.Playback.Probe
                       FMS.Modules.Playback.Routes
+                      FMS.Modules.Sessions
+                      FMS.Modules.Sessions.Types
+                      FMS.Modules.Sessions.Monad
+                      FMS.Modules.Sessions.Routes
     build-depends:    base >=4.14 && <5
                     , mtl
                     , transformers

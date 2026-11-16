@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
 import qualified Data.Text as T
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
@@ -67,6 +67,8 @@ import FMS.Modules.Playback.Probe
   , transcoding
   )
 import FMS.Modules.Playback.Types (MediaStream(..))
+import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
+import FMS.Modules.Sessions.Types (PlaySession (..))
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -907,5 +909,28 @@ main = do
       removeFile clip
       removeFile dummy
     _ -> putStrLn "SKIP: ffprobe/ffmpeg not found on PATH -- skipping probe IO test"
+
+  -- Sessions module (milestone 6c, docs/todo.org section 6): the pure
+  -- session-map helpers (upsert/expire) and the PlaySession JSON roundtrip.
+  let t0 = read "2026-01-01 00:00:00 UTC" :: UTCTime
+      s1 = PlaySession "s1" "1" (Just "1") (Just "admin") 0 False t0 t0
+      s2 = PlaySession "s2" "2" Nothing Nothing 12.5 True t0 (addUTCTime (-120) t0)
+      s3 = s1 { psId = "s3", psLastPingAt = addUTCTime (-90) t0 }
+      sessMap = HM.fromList [("s1", s1), ("s2", s2)]
+  check "upsertSession inserts a new session"
+    (Just s1) (HM.lookup "s1" (upsertSession s1 HM.empty))
+  check "upsertSession replaces an existing session in place"
+    (Just 5.0)
+    (psPositionSeconds <$> HM.lookup "s1" (upsertSession (s1 { psPositionSeconds = 5 }) (upsertSession s1 HM.empty)))
+  check "expireSessions drops sessions with last ping older than 90s"
+    ["s1"] (sort (HM.keys (expireSessions t0 90 sessMap)))
+  check "expireSessions keeps a session exactly at the 90s limit"
+    ["s1", "s3"] (sort (HM.keys (expireSessions t0 90 (HM.insert "s3" s3 sessMap))))
+  check "PlaySession JSON roundtrip"
+    (Just s1) (Aeson.decode (Aeson.encode s1) :: Maybe PlaySession)
+  check "PlaySession JSON uses the PascalCase keys"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode s1))
+      [ "\"Id\":", "\"ItemId\":", "\"UserId\":", "\"UserName\":"
+      , "\"PositionSeconds\":", "\"IsPaused\":", "\"StartedAt\":", "\"LastPingAt\":" ])
 
   putStrLn "All tests passed."

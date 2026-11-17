@@ -5,6 +5,7 @@ module FMS.Core.Types.Config
   ) where
 
 import Data.Char (toLower)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -29,6 +30,8 @@ data Config = Config
   , configWatch      :: !Bool            -- ^ inotify auto-rescan on media changes (env FMS_WATCH, default False; milestone 2d)
   , configMaxTranscodes :: !Int         -- ^ max concurrent ffmpeg jobs (env FMS_MAX_TRANSCODES, default 2, <=0 -> 2; milestone 15)
   , configFfmpegTimeoutSec :: !Int      -- ^ kill an ffmpeg job after this many seconds (env FMS_FFMPEG_TIMEOUT, default 30, <=0 -> 30; milestone 15)
+  , configTlsCert :: !(Maybe FilePath)  -- ^ TLS certificate PEM (env FMS_TLS_CERT / --tls-cert; milestone 13d)
+  , configTlsKey  :: !(Maybe FilePath)  -- ^ TLS private key PEM (env FMS_TLS_KEY / --tls-key; milestone 13d)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -69,6 +72,8 @@ validateConfig cfg
       Left "max transcodes must be >= 1"
   | configFfmpegTimeoutSec cfg < 1 =
       Left "ffmpeg timeout must be >= 1 second"
+  | isJust (configTlsCert cfg) /= isJust (configTlsKey cfg) =
+      Left "TLS cert and key must be set together (FMS_TLS_CERT / FMS_TLS_KEY)"
   | otherwise = Right cfg
       { configLogLevel = T.pack logLvl
       , configHwAccel  = normalizeHwAccel (configHwAccel cfg)

@@ -186,7 +186,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Rate limiting
    - [X] per-IP token bucket (FMS_RATE_LIMIT req/min, 429 + JSON error), OPTIONS exempt, refills
    - [ ] per-endpoint limits
-** TODO HTTPS/TLS termination config
+** DONE HTTPS/TLS termination: =FMS_TLS_CERT=/=FMS_TLS_KEY= env or =--tls-cert=/=--tls-key= CLI (warp-tls runTLS, paired-required + file-exists validation, exit 2); plain HTTP -> 426; /Socket upgrades to wss; SupportsHttps/HttpsPort in /System/Info(+Public)
    - [X] security headers (FMS_SECURITY_HEADERS, default on): X-Content-Type-Options nosniff, X-Frame-Options SAMEORIGIN, Referrer-Policy no-referrer (no CSP - inline web client)
 ** TODO Validate all user input; safe Range parsing (see roadmap milestone 3)
 

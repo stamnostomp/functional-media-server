@@ -9,7 +9,7 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:?), (.=))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
@@ -70,11 +70,15 @@ infoPublic :: [(Text, Text)] -> Request -> AppM Response
 infoPublic _captures _req = do
   serverId <- fromMaybe "unknown" <$> (getState "system.id" :: AppM (Maybe Text))
   sc <- currentServerConfig
+  cfg <- asks envConfig
+  let tlsOn = isJust (configTlsCert cfg) && isJust (configTlsKey cfg)  -- milestone 13d
   pure (jsonResponse (object
     [ "ServerName" .= scServerName sc
     , "Version"    .= version
     , "Id"         .= serverId
     , "StartupWizardCompleted" .= scStartupCompleted sc  -- milestone 10b
+    , "SupportsHttps" .= tlsOn
+    , "HttpsPort"     .= (if tlsOn then Just (scPort sc) else Nothing)
     ]))
 
 -- | @GET /System/Info@ — full server info (Jellyfin-shaped): id, name,
@@ -85,6 +89,8 @@ infoHandler _captures _req = do
   serverId <- fromMaybe "unknown" <$> (getState "system.id" :: AppM (Maybe Text))
   sc   <- currentServerConfig
   mods <- fromMaybe [] <$> (getState "system.moduleNames" :: AppM (Maybe [Text]))
+  cfg <- asks envConfig
+  let tlsOn = isJust (configTlsCert cfg) && isJust (configTlsKey cfg)  -- milestone 13d
   pure (jsonResponse (object
     [ "Id"          .= serverId
     , "ServerName"  .= scServerName sc
@@ -94,6 +100,8 @@ infoHandler _captures _req = do
     , "RequireAuth" .= scRequireAuth sc
     , "Modules"     .= mods
     , "StartupWizardCompleted" .= scStartupCompleted sc  -- milestone 10b
+    , "SupportsHttps" .= tlsOn
+    , "HttpsPort"     .= (if tlsOn then Just (scPort sc) else Nothing)
     ]))
 
 -- | @GET /System/Configuration@ — 200 the current 'ServerConfig' JSON.

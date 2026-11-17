@@ -1,9 +1,11 @@
 module Main (main) where
 
 import Control.Applicative ((<|>))
+import Control.Monad (when)
 import Data.Char (toLower)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Text as T
+import System.Directory (doesFileExist)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, stderr, stdout)
@@ -27,8 +29,9 @@ import FMS.Server (runServer)
 -- FMS_REQUIRE_AUTH, FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_RATE_LIMIT,
 -- FMS_LOG_LEVEL, FMS_CORS_ORIGINS, FMS_SECURITY_HEADERS,
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
--- FMS_FOLLOW_SYMLINKS. FMS_ADMIN_PASSWORD is read by the auth module
--- itself when it bootstraps the admin user.
+-- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d).
+-- FMS_ADMIN_PASSWORD is read by the auth module itself when it
+-- bootstraps the admin user.
 main :: IO ()
 main = do
   -- Line-buffer the process output so [INFO]/[ERROR] log lines show up in
@@ -73,6 +76,8 @@ main = do
   mWatch <- lookupEnv "FMS_WATCH"
   mMaxTr <- lookupEnv "FMS_MAX_TRANSCODES"
   mFfTo  <- lookupEnv "FMS_FFMPEG_TIMEOUT"
+  mTlsC  <- lookupEnv "FMS_TLS_CERT"
+  mTlsK  <- lookupEnv "FMS_TLS_KEY"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let -- CLI > env for the value-style options
       portV   = cliInt "port" <|> (mPort >>= readMaybe)
@@ -85,6 +90,8 @@ main = do
       pwMinV  = cliV "password-min-length" <|> mPwMin
       maxBrV  = cliV "max-bitrate" <|> mMaxBr
       hwAccV  = cliV "hwaccel" <|> mHwAcc
+      tlsCV   = cliV "tls-cert" <|> mTlsC
+      tlsKV   = cliV "tls-key" <|> mTlsK
       -- booleans: CLI (true/false) > env > file/default
       boolV cliK mEnv def = fromMaybe (fromMaybe def (envBool mEnv)) (cliBool cliK)
       envBool (Just v) = Just (map toLower v `elem` ["true", "1", "yes"])
@@ -124,10 +131,21 @@ main = do
         , configFfmpegTimeoutSec = case mFfTo >>= readMaybe of
             Just n | n > 0 -> n
             _              -> 30 -- missing/invalid/<=0 -> default 30s (milestone 15)
+        , configTlsCert = tlsCV   -- milestone 13d; both-or-neither checked by validateConfig
+        , configTlsKey  = tlsKV
         }
   cfg <- case validateConfig cfg0 of
     Left err -> do
       hPutStrLn stderr ("config error: " ++ T.unpack err)
       exitWith (ExitFailure 2)
     Right c -> pure c
+  -- Milestone 13d: validateConfig is pure, so the TLS file existence check
+  -- happens here (exit 2 with a clear message when a set file is missing).
+  when (isJust (configTlsCert cfg) || isJust (configTlsKey cfg)) $ do
+    let paths = [ p | Just p <- [configTlsCert cfg, configTlsKey cfg] ]
+    existing <- mapM doesFileExist paths
+    let missing = [ p | (p, ok) <- zip paths existing, not ok ]
+    when (not (null missing)) $ do
+      hPutStrLn stderr ("config error: TLS cert/key file not found: " ++ unwords missing)
+      exitWith (ExitFailure 2)
   runServer cfg

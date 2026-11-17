@@ -63,6 +63,8 @@ parseCliArgs = go []
       , ("hwaccel",             ("hwaccel", True))
       , ("watch",               ("watch", False))
       , ("follow-symlinks",     ("follow-symlinks", False))
+      , ("tls-cert",            ("tls-cert", True))
+      , ("tls-key",             ("tls-key", True))
       ]
 
 -- | ASCII usage text printed by @--help@.
@@ -86,6 +88,8 @@ cliUsage = unlines
   , "  --hwaccel NAME          none|vaapi|nvenc|qsv|videotoolbox (env FMS_HWACCEL)"
   , "  --watch[=BOOL]          inotify auto-rescan (env FMS_WATCH, Linux only)"
   , "  --follow-symlinks[=BOOL] scanner symlink policy (env FMS_FOLLOW_SYMLINKS)"
+  , "  --tls-cert PATH         TLS certificate PEM, enables HTTPS (env FMS_TLS_CERT)"
+  , "  --tls-key PATH          TLS private key PEM (env FMS_TLS_KEY; both required)"
   , "  --help                  show this help and exit"
   , "  --version               show name and version and exit"
   , ""

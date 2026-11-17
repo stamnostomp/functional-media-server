@@ -14,11 +14,13 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Acid (AcidState)
 import Data.Acid.Local (createCheckpointAndClose)
+import Data.Maybe (isJust)
 import Network.Wai (Application, pathInfo)
 import Network.WebSockets (defaultConnectionOptions)
 import qualified Network.Wai.Handler.WebSockets as WS
 import Network.Wai.Handler.Warp
   ( defaultSettings, runSettings, setGracefulShutdownTimeout, setPort )
+import qualified Network.Wai.Handler.WarpTLS as WarpTLS
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs, getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..), exitWith)
@@ -131,7 +133,12 @@ runServer cfg = do
       Left err -> hPutStrLn stderr
         ("[ERROR] module init failed: " ++ T.unpack (moduleName m) ++ ": " ++ show (err :: AppError))
       Right () -> putStrLn ("module loaded: " ++ T.unpack (moduleName m))
-  putStrLn (name ++ " " ++ version ++ " listening on port " ++ show (configPort cfg))
+  -- Milestone 13d: when FMS_TLS_CERT + FMS_TLS_KEY are set, the same app
+  -- (including the /Socket WebSocket upgrade -> wss) is served over TLS
+  -- via warp-tls; otherwise plain HTTP as before.
+  let tlsOn = isJust (configTlsCert cfg) && isJust (configTlsKey cfg)
+  putStrLn (name ++ " " ++ version ++ " listening on port " ++ show (configPort cfg)
+           ++ (if tlsOn then " (https)" else ""))
   let settings = setPort (configPort cfg)
                  $ setGracefulShutdownTimeout (Just 5)
                  $ defaultSettings
@@ -145,7 +152,10 @@ runServer cfg = do
       app req respond
         | map T.toLower (pathInfo req) == ["socket"] = wsApp req respond
         | otherwise = routerApp req respond
-  warpThread <- forkIO (runSettings settings app)
+  warpThread <- forkIO $ case (configTlsCert cfg, configTlsKey cfg) of
+    (Just cert, Just key) ->
+      WarpTLS.runTLS (WarpTLS.tlsSettings cert key) settings app
+    _ -> runSettings settings app
   tag <- takeMVar shutdownMv
   _ <- runApp appEnv (logActivity "Server" ("server " <> tag <> " requested"))
   putStrLn ("[INFO] " ++ T.unpack tag ++ " requested: shutting down gracefully")

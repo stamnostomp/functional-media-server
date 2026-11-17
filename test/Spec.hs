@@ -2310,6 +2310,7 @@ main = do
       , configCorsOrigins = ["*"], configSecurityHeaders = True
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
+      , configTlsCert = Nothing, configTlsKey = Nothing
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2410,6 +2411,7 @@ main = do
         , configCorsOrigins = ["*"], configSecurityHeaders = True
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
+        , configTlsCert = Nothing, configTlsKey = Nothing
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -2489,5 +2491,16 @@ main = do
     [True, True]
     [ isLeft' (validateConfig (cfg1d { configMaxTranscodes = 0 }))
     , isLeft' (validateConfig (cfg1d { configFfmpegTimeoutSec = 0 })) ]
+
+  -- Milestone 13d (HTTPS/TLS termination, docs/todo.org section 13):
+  -- CLI flags for --tls-cert/--tls-key and the both-or-neither validation.
+  check "parseCliArgs: --tls-cert/--tls-key in both forms"
+    (Right [("tls-cert", "/c.pem"), ("tls-key", "/k.pem")])
+    (parseCliArgs ["--tls-cert", "/c.pem", "--tls-key=/k.pem"])
+  check "validateConfig: only one of TLS cert/key -> Left; both -> ok; neither -> ok"
+    [True, False, False]
+    [ isLeft' (validateConfig (cfg1d { configTlsCert = Just "/c.pem" }))
+    , isLeft' (validateConfig (cfg1d { configTlsCert = Just "/c.pem", configTlsKey = Just "/k.pem" }))
+    , isLeft' (validateConfig cfg1d) ]
 
   putStrLn "All tests passed."

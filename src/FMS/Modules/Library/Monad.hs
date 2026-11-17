@@ -30,7 +30,6 @@ import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.Directory
   ( createDirectory
   , createDirectoryIfMissing
-  , getFileSize
   , getModificationTime
   , removeDirectory
   , removeDirectoryRecursive
@@ -45,7 +44,7 @@ import FMS.Modules.Library.Folders
   ( defaultFolders, foldersFilePath, loadFolders, nextFolderId, saveFolders )
 import FMS.Modules.Library.Scan
   ( groupVersions, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
-  , walkWithLoops
+  , pooledMapIO, statFile, walkWithLoops
   )
 import FMS.Modules.Library.State
   ( LibraryState
@@ -172,6 +171,7 @@ instance MonadLibrary AppM where
 scanFoldersAndApply
   :: [MediaFolder] -> Bool -> AppM ([FilePath], Int, Int, Int, [FilePath], Int)
 scanFoldersAndApply folders follow = do
+    cfg <- asks envConfig
     let isVideo p = "video" `T.isPrefixOf` mimeFor p
     perFolder <- forM folders $ \f -> do
       emitScanProgress "Scanning"
@@ -179,10 +179,11 @@ scanFoldersAndApply folders follow = do
         , ("Folder",   toJSON (folderName f))
         ]
       (files, loops) <- liftIO (walkWithLoops follow (folderPath f))
-      stats <- forM (filter isMediaFile files) $ \p -> liftIO $ do
-        s <- getFileSize p
-        t <- getModificationTime p
-        pure (p, s, t)
+      -- Parallel scan (perf): the per-file stat (size + mtime) runs on a
+      -- bounded pool of configScanWorkers threads; results keep the input
+      -- order. Everything below (acid updates, diff, item construction)
+      -- stays sequential.
+      stats <- liftIO (pooledMapIO (configScanWorkers cfg) statFile (filter isMediaFile files))
       pure (stats, loops, folderId f)
     let scannedStats = concat [ ss | (ss, _, _) <- perFolder ]
         allLoops     = concat [ ls | (_, ls, _) <- perFolder ]

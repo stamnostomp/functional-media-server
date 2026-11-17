@@ -17,9 +17,13 @@ module FMS.Modules.Library.Scan
   , versionRank
   , groupVersions
   , itemFromGroup
+  , chunksOf
+  , statFile
+  , pooledMapIO
   ) where
 
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (foldM, forM)
 import Data.Char (isAlpha, isDigit, isUpper, toLower)
 import Data.Either (partitionEithers)
@@ -368,3 +372,40 @@ scanDirectory :: Bool -> FilePath -> IO [FilePath]
 scanDirectory follow root = do
   files <- walk follow root
   pure (filter isMediaFile files)
+
+-- Parallel scan stat phase (parallel library scanning): the per-file IO
+-- (size + mtime) is mapped over a bounded pool of worker threads, while
+-- every later phase (acid updates, diff, item construction) stays
+-- sequential in the Monad layer.
+
+-- | Pure: split a list into chunks of at most @n@ elements, preserving
+-- order. @n <= 0@ is treated as 1 (one element per chunk is NOT assumed —
+-- the whole list becomes a single chunk, the safe degenerate case);
+-- an empty list yields []. Exported for tests.
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf n xs
+  | null xs   = []
+  | n <= 0    = [xs]
+  | otherwise = go xs
+  where
+    go []       = []
+    go ys       = let (c, rest) = splitAt n ys in c : go rest
+
+-- | IO: stat one file: @(path, size, mtime)@.
+statFile :: FilePath -> IO (FilePath, Integer, UTCTime)
+statFile p = do
+  s <- getFileSize p
+  t <- getModificationTime p
+  pure (p, s, t)
+
+-- | IO: map an IO action over a list with a bounded pool of @workers@
+-- threads. The list is split into @workers@ chunks ('chunksOf') and the
+-- chunks are processed by 'mapConcurrently' (one thread per chunk), so
+-- at most @workers@ threads are alive at once and the RESULT ORDER
+-- matches the input order ('mapConcurrently' preserves order, and the
+-- chunks are concatenated in order). @workers <= 1@ degenerates to the
+-- plain sequential 'mapM' behaviour.
+pooledMapIO :: Int -> (a -> IO b) -> [a] -> IO [b]
+pooledMapIO workers f xs
+  | workers <= 1 = mapM f xs
+  | otherwise    = concat <$> mapConcurrently (mapM f) (chunksOf workers xs)

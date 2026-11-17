@@ -81,6 +81,7 @@ cliUsage = unlines
   , "  --tmdb-api-key KEY      TMDB API key (env MEDIA_TMDB_API_KEY)"
   , "  --rate-limit N          requests/min per IP (env FMS_RATE_LIMIT, 0 = off)"
   , "  (env FMS_RATE_LIMIT_AUTH  POST /AuthenticateByName requests/min per IP, default 10, 0 = off)"
+  , "  (env FMS_SCAN_WORKERS     parallel scan stat workers, default 4, min 1 = sequential)"
   , "  --log-level LEVEL       debug|info|warn|error (env FMS_LOG_LEVEL)"
   , "  --cors-origins LIST     comma-separated origins (env FMS_CORS_ORIGINS)"
   , "  --no-security-headers   disable X-Content-Type-Options etc. (env FMS_SECURITY_HEADERS)"

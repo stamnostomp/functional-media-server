@@ -27,7 +27,7 @@ import FMS.Server (runServer)
 --
 -- Env vars: MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR,
 -- FMS_REQUIRE_AUTH, FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_RATE_LIMIT,
--- FMS_RATE_LIMIT_AUTH,
+-- FMS_RATE_LIMIT_AUTH, FMS_SCAN_WORKERS,
 -- FMS_LOG_LEVEL, FMS_CORS_ORIGINS, FMS_SECURITY_HEADERS,
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
 -- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d),
@@ -71,6 +71,7 @@ main = do
   mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
   mRate  <- lookupEnv "FMS_RATE_LIMIT"
   mRateAuth <- lookupEnv "FMS_RATE_LIMIT_AUTH"
+  mScanW <- lookupEnv "FMS_SCAN_WORKERS"
   mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
   mCors  <- lookupEnv "FMS_CORS_ORIGINS"
   mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
@@ -148,12 +149,14 @@ main = do
         , configTmdbBaseUrl = T.pack (fromMaybe "https://api.themoviedb.org/3" mTmdbBase)
         , configTmdbImageBaseUrl = T.pack (fromMaybe "https://image.tmdb.org/t/p" mTmdbImgBase)
         , configTmdbImageSize = T.pack (fromMaybe "w500" mTmdbImgSize)
+        , configScanWorkers = fromMaybe 4 (mScanW >>= readMaybe)  -- raw value; validateConfig rejects negatives (exit 2), 0 clamped to 1 below
         }
-  cfg <- case validateConfig cfg0 of
+  cfg0v <- case validateConfig cfg0 of
     Left err -> do
       hPutStrLn stderr ("config error: " ++ T.unpack err)
       exitWith (ExitFailure 2)
     Right c -> pure c
+  let cfg = cfg0v { configScanWorkers = max 1 (configScanWorkers cfg0v) }  -- 0 -> 1 (sequential)
   -- Milestone 13d: validateConfig is pure, so the TLS file existence check
   -- happens here (exit 2 with a clear message when a set file is missing).
   when (isJust (configTlsCert cfg) || isJust (configTlsKey cfg)) $ do

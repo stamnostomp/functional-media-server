@@ -67,7 +67,8 @@ import FMS.Modules.Library.Monad (scanProgressData, withScanLock)
 import FMS.Modules.Library.Watch (eventsPending, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
-  ( classifyItem
+  ( chunksOf
+  , classifyItem
   , diffScan
   , extraTypeFor
   , isCircular
@@ -78,7 +79,9 @@ import FMS.Modules.Library.Scan
   , groupVersions
   , normalizeVersionTitle
   , planRescan
+  , pooledMapIO
   , scanDirectory
+  , statFile
   , versionRank
   , walk
   , walkWithLoops
@@ -2574,7 +2577,7 @@ main = do
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
-      , configFetchImages = False, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+      , configFetchImages = False, configScanWorkers = 4, configTmdbBaseUrl = "https://api.themoviedb.org/3"
       , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
       } "7" 2)
 
@@ -2697,7 +2700,7 @@ main = do
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
-        , configFetchImages = False, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+        , configFetchImages = False, configScanWorkers = 4, configTmdbBaseUrl = "https://api.themoviedb.org/3"
         , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
         }
       badPort p = cfg1d { configPort = p }
@@ -3078,5 +3081,33 @@ main = do
     [ isLeft' (validateConfig (cfg1d { configRateLimitAuth = Just (-1) }))
     , isLeft' (validateConfig (cfg1d { configRateLimitAuth = Just 0 }))
     , isLeft' (validateConfig cfg1d) ]
+
+  -- Parallel scan: chunksOf + pooledMapIO order/size behaviour
+  check "chunksOf: exact division, remainder, empty, n<=0 -> single chunk"
+    ([[1,2,3],[4,5,6]], [[1,2,3],[4,5,6],[7]], [], [[1,2]], [[1,2,3,4,5]])
+    ( chunksOf 3 ([1..6] :: [Int]), chunksOf 3 ([1..7] :: [Int]), chunksOf 3 ([] :: [Int])
+    , chunksOf 0 ([1,2] :: [Int]), chunksOf (-2) ([1..5] :: [Int]) )
+  check "validateConfig rejects negative scan workers, accepts 0 and 4"
+    [True, False, False]
+    [ isLeft' (validateConfig (cfg1d { configScanWorkers = -1 }))
+    , isLeft' (validateConfig (cfg1d { configScanWorkers = 0 }))
+    , isLeft' (validateConfig (cfg1d { configScanWorkers = 4 })) ]
+  do let poolDir = "/tmp/fms-test-pooled-scan"
+     resetDir poolDir
+     createDirectoryIfMissing True poolDir
+     let poolPaths = [ poolDir </> ("f" ++ show n ++ ".bin") | n <- [1 .. 40 :: Int] ]
+     mapM_ (\(n, p) -> BS.writeFile p (BS.replicate n 65)) (zip [1 .. 40 :: Int] poolPaths)
+     pooled1 <- pooledMapIO 1 statFile poolPaths
+     pooled8 <- pooledMapIO 8 statFile poolPaths
+     pooled0 <- pooledMapIO 0 statFile poolPaths
+     check "pooledMapIO: 40 files, workers 1/8/0 all return input order, sizes > 0"
+       (True, True, True, True)
+       ( map (\(p, _, _) -> p) pooled1 == poolPaths
+       , map (\(p, _, _) -> p) pooled8 == poolPaths
+       , map (\(p, _, _) -> p) pooled0 == poolPaths
+       , all (\(_, s, _) -> s > 0) pooled8 )
+     check "pooledMapIO: stat sizes match the written byte counts"
+       (map (\(_, s, _) -> s) pooled8) (map (fromIntegral :: Int -> Integer) [1 .. 40 :: Int])
+     removeDirectoryRecursive poolDir
 
   putStrLn "All tests passed."

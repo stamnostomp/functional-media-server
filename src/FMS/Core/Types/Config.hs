@@ -37,6 +37,7 @@ data Config = Config
   , configTmdbBaseUrl :: !Text          -- ^ TMDB v3 API base (env FMS_TMDB_BASE_URL, default https://api.themoviedb.org/3)
   , configTmdbImageBaseUrl :: !Text     -- ^ TMDB image CDN base (env FMS_TMDB_IMAGE_BASE_URL, default https://image.tmdb.org/t/p)
   , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
+  , configScanWorkers :: !Int            -- ^ parallel worker threads for the per-file stat phase of a library scan (env FMS_SCAN_WORKERS, default 4, min 1 = sequential)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -75,6 +76,8 @@ validateConfig cfg
       Left "max bitrate must be >= 0"
   | maybe False (< 0) (configRateLimitAuth cfg) =
       Left "auth rate limit must be >= 0"
+  | configScanWorkers cfg < 0 =
+      Left "scan workers must be >= 0"
   | configMaxTranscodes cfg < 1 =
       Left "max transcodes must be >= 1"
   | configFfmpegTimeoutSec cfg < 1 =

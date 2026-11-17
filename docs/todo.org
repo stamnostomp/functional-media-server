@@ -198,7 +198,7 @@ flipped to DONE in the same commit as the code that implements it.
 * 15. Performance and robustness :improvement:
 ** TODO Lazy streaming of large files; memory monitoring
 ** TODO Metadata and file-stat caching with invalidation
-** TODO Parallel scanning; in-memory index refresh without restart
+** DONE Parallel scanning: per-file stat phase of a library scan runs on a bounded FMS_SCAN_WORKERS pool (default 4, 0 -> 1 sequential, negative rejected exit 2) via order-preserving pooledMapIO (async mapConcurrently); walk/diff/acid updates stay sequential; identical item sets for 1 vs 8 workers (m18h); in-memory index refresh without restart still open
 ** DONE ffmpeg process management: QSemN slot registry "ffmpeg.slots" (FMS_MAX_TRANSCODES, default 2) with 5s grace -> 503 "too many concurrent transcodes", bracket_ release on disconnect; FMS_FFMPEG_TIMEOUT (default 30s) killer thread in runProcessBSTimeout/runProcessStreamBSTimeout + -rw_timeout for network URLs; transcode/HLS/DASH all throttled
 
 * 16. Testing, packaging, ops :techdebt:

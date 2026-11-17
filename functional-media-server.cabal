@@ -158,6 +158,7 @@ library
                     , process
                     , bcrypt
                     , random
+                    , async
 
     if os(linux)
       build-depends:  hinotify

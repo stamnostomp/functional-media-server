@@ -36,7 +36,7 @@ import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
 import FMS.Core.Cli (parseCliArgs)
-import FMS.Core.Module (Segment (..), get, post)
+import FMS.Core.Module (Module (..), Route (..), Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
@@ -46,7 +46,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
 import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
-import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3, simpleItemJson)
@@ -164,7 +164,7 @@ import FMS.Modules.Sessions.Types (PlaySession (..), SessionCapabilities (..), a
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
 import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..), countsByType, uptimeSeconds)
 import FMS.Modules.ApiDocs (methodText, routeToPath, routesToOpenApi, segmentToPathPiece)
-import FMS.Modules.Web (contentTypeFor, safeUiPath, webPageHtml)
+import FMS.Modules.Web (contentTypeFor, dashboardBeforeCapture, dashboardPageHtml, safeUiPath, webModule, webPageHtml)
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -867,6 +867,27 @@ main = do
   check "isOpenPath Users/1 is False" False (isOpenPath ["Users", "1"])
   check "isOpenPath System/Info is False" False (isOpenPath ["System", "Info"])
   check "isOpenPath library is False" False (isOpenPath ["library"])
+  check "isOpenPath dashboard (exact-case open list, milestone 19b)" True (isOpenPath ["dashboard"])
+  check "isOpenPath Dashboard (admin API stays protected)" False (isOpenPath ["Dashboard"])
+  check "isOpenPath dashboard/ extra segment is False" False (isOpenPath ["dashboard", "x"])
+  check "openPathsExact contains only dashboard" [["dashboard"]] openPathsExact
+  -- milestone 19b: firstMatch tries an exact-case pass before the
+  -- case-insensitive one, so /dashboard (page) vs /Dashboard (API) resolve
+  let rApi = get [Lit "Dashboard"] undefined
+      rPage = get [Lit "dashboard"] undefined
+  check "firstMatch: /dashboard -> exact page route"
+    [Just [Lit "dashboard"]] [fmap (routePattern . fst) (firstMatch [rApi, rPage] "GET" ["dashboard"])]
+  check "firstMatch: /Dashboard -> exact API route"
+    [Just [Lit "Dashboard"]] [fmap (routePattern . fst) (firstMatch [rApi, rPage] "GET" ["Dashboard"])]
+  check "firstMatch: /DASHBOARD -> case-insensitive fallback (first route)"
+    [Just [Lit "Dashboard"]] [fmap (routePattern . fst) (firstMatch [rApi, rPage] "GET" ["DASHBOARD"])]
+  check "firstMatch: case-variant literal not shadowed by capture (/Items)"
+    [Just [Lit "items"]] [fmap (routePattern . fst) (firstMatch [get [Lit "items"] undefined, get [Capture "file"] undefined] "GET" ["Items"])]
+  check "matchSegmentsExact: lit is case-sensitive, capture binds original"
+    [ matchSegmentsExact [Lit "dashboard"] ["Dashboard"]
+    , matchSegmentsExact [Lit "dashboard"] ["dashboard"]
+    , matchSegmentsExact [Capture "id"] ["AbC"] ]
+    [Nothing, Just [], Just [("id", "AbC")]]
   check "isOpenPath [] is False" False (isOpenPath [])
 
   -- parseTokenHeader: X-Emby-Token, MediaBrowser Token="...", Bearer, and
@@ -3408,4 +3429,22 @@ main = do
     (map (BSC.unpack . contentTypeFor)
       [ "index.html", "elm.js", "STAMNO.CSS", "a.png", "a.JPG", "a.svg"
       , "a.json", "favicon.ico", "a.js.map", "a.bin" ])
+  -- milestone 19b: built-in admin dashboard page
+  let dash = LBSC.unpack dashboardPageHtml
+      dashMarkers =
+        [ "<title>/dashboard</title>", "api('/Dashboard')", "api('/Sessions')"
+        , "api('/Plugins')", "api('/System/Memory')", "X-Emby-Token"
+        , "/Users/AuthenticateByName", "/ScheduledTasks/", "/Plugins/"
+        , "/library/rescan", "/Library/Refresh", "/api-docs", "localStorage"
+        , "setInterval(refresh, 10000)" ]
+  check "dashboardPageHtml: contains all required markers"
+    (map (\m -> m `isInfixOf` dash) dashMarkers) (replicate (length dashMarkers) True)
+  check "dashboardPageHtml: ASCII only (no bytes > 127)"
+    [BS.all (<= 127) (LBS.toStrict dashboardPageHtml)] [True]
+  check "dashboardBeforeCapture: webModule has Lit dashboard before Capture file"
+    [dashboardBeforeCapture (moduleRoutes webModule)] [True]
+  check "dashboardBeforeCapture: reversed order is False"
+    [dashboardBeforeCapture (reverse (moduleRoutes webModule))] [False]
+  check "dashboardBeforeCapture: no dashboard route is False"
+    [dashboardBeforeCapture [get [Capture "file"] undefined, get [] undefined]] [False]
   putStrLn "All tests passed."

@@ -2,8 +2,10 @@ module FMS.Core.Router
   ( buildApplication
   , firstMatch
   , matchSegments
+  , matchSegmentsExact
   , isOpenPath
   , openPaths
+  , openPathsExact
   , parseTokenHeader
   , tokenFromRequest
   , parseCorsOrigins
@@ -122,8 +124,10 @@ buildApplication env modules req0 respond0 = do
                 -- (/Items, /Videos/...); literal segments now compare
                 -- case-insensitively in 'matchSegments' and 'isOpenPath'
                 -- lowercases internally, so raw segments are passed through
-                -- (captures keep their original case; no two routes differ
-                -- only by case -- verified by route audit)
+                -- (captures keep their original case). Milestone 19b:
+                -- 'firstMatch' tries an exact-case pass first, so the one
+                -- case-only collision (/dashboard page vs /Dashboard API)
+                -- resolves deterministically.
                 segs   = pathInfo req
                 dispatch =
                   case firstMatch routes (requestMethod req) segs of
@@ -245,10 +249,21 @@ openPaths =
   , ["Branding", "Configuration"]
   ]
 
+-- | Milestone 19b: open paths that compare CASE-SENSITIVELY. The admin
+-- dashboard page @/dashboard@ must be reachable without a token (it shows
+-- a login form and posts to /Users/AuthenticateByName itself), while the
+-- aggregate API @/Dashboard@ (admin-only, same segments modulo case) must
+-- stay protected -- so this list is NOT case-folded like 'openPaths'.
+openPathsExact :: [[Text]]
+openPathsExact = [["dashboard"]]
+
 -- | Is this concrete request path in the open list? Pure, exported for
--- tests. Milestone 17a: compared case-insensitively (see 'normalizeSegments').
+-- tests. Milestone 17a: 'openPaths' compare case-insensitively (see
+-- 'normalizeSegments'); 'openPathsExact' compare exactly.
 isOpenPath :: [Text] -> Bool
-isOpenPath segs = normalizeSegments segs `elem` map normalizeSegments openPaths
+isOpenPath segs =
+  segs `elem` openPathsExact
+  || normalizeSegments segs `elem` map normalizeSegments openPaths
 
 -- | Milestone 17a: case-fold path segments (jellyfin-web uses PascalCase
 -- paths like /Items while the routes are registered lowercase).
@@ -340,12 +355,45 @@ unauthorizedResponse reqId =
 -- | First route matching method + path segments; captures bound as pairs.
 firstMatch :: [Route] -> Method -> [Text] -> Maybe (Route, [(Text, Text)])
 firstMatch routes meth segs =
-  listToMaybe
-    [ (r, caps)
-    | r <- routes
-    , routeMethod r == meth
-    , Just caps <- [matchSegments (routePattern r) segs]
-    ]
+  -- Milestone 19b: among all case-insensitive matches (first-match-wins
+  -- order preserved), prefer one that also matches EXACTLY case-sensitively.
+  -- This resolves /dashboard (web page) vs /Dashboard (admin API) -- the
+  -- only two routes differing only by case -- deterministically, without
+  -- letting a bare capture route shadow case-variant literal routes
+  -- (e.g. GET /Items must still hit [Lit \"items\"], not the web capture).
+  case [ m | m@(r, _) <- matches, isExactPattern (routePattern r) segs ] of
+    (m : _) -> Just m
+    []      -> listToMaybe matches
+  where
+    matches =
+      [ (r, caps)
+      | r <- routes
+      , routeMethod r == meth
+      , Just caps <- [matchSegments (routePattern r) segs]
+      ]
+
+-- | Does the pattern match the segments with every literal EXACTLY
+-- (case-sensitive)? Capture-only patterns are NOT exact (they would make
+-- the preference pass vacuous); a pattern qualifies only if it has at
+-- least one literal and all its literals match with identical case.
+isExactPattern :: [Segment] -> [Text] -> Bool
+isExactPattern pat segs = go pat segs False
+  where
+    go [] [] hasLit = hasLit
+    go (Lit l : rest) (s : ss) _ = l == s && go rest ss True
+    go (Capture _ : rest) (_ : ss) hasLit = go rest ss hasLit
+    go _ _ _ = False
+
+-- | Like 'matchSegments' but literal segments compare EXACTLY (case
+-- sensitive); captures still bind the original segment. Used by the
+-- exact-first pass of 'firstMatch'.
+matchSegmentsExact :: [Segment] -> [Text] -> Maybe [(Text, Text)]
+matchSegmentsExact [] [] = Just []
+matchSegmentsExact (Lit l : rest) (s : segs)
+  | l == s = matchSegmentsExact rest segs
+matchSegmentsExact (Capture name : rest) (s : segs) =
+  ((name, s) :) <$> matchSegmentsExact rest segs
+matchSegmentsExact _ _ = Nothing
 
 -- | Match a route pattern against concrete path segments, collecting the
 -- captures. Literal segments compare case-insensitively (milestone 17a);

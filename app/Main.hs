@@ -27,7 +27,7 @@ import FMS.Server (runServer)
 --
 -- Env vars: MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR,
 -- FMS_REQUIRE_AUTH, FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_RATE_LIMIT,
--- FMS_RATE_LIMIT_AUTH, FMS_SCAN_WORKERS,
+-- FMS_RATE_LIMIT_AUTH, FMS_SCAN_WORKERS, FMS_MAX_BODY_BYTES,
 -- FMS_LOG_LEVEL, FMS_CORS_ORIGINS, FMS_SECURITY_HEADERS,
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
 -- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d),
@@ -72,6 +72,7 @@ main = do
   mRate  <- lookupEnv "FMS_RATE_LIMIT"
   mRateAuth <- lookupEnv "FMS_RATE_LIMIT_AUTH"
   mScanW <- lookupEnv "FMS_SCAN_WORKERS"
+  mMaxBody <- lookupEnv "FMS_MAX_BODY_BYTES"
   mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
   mCors  <- lookupEnv "FMS_CORS_ORIGINS"
   mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
@@ -150,6 +151,7 @@ main = do
         , configTmdbImageBaseUrl = T.pack (fromMaybe "https://image.tmdb.org/t/p" mTmdbImgBase)
         , configTmdbImageSize = T.pack (fromMaybe "w500" mTmdbImgSize)
         , configScanWorkers = fromMaybe 4 (mScanW >>= readMaybe)  -- raw value; validateConfig rejects negatives (exit 2), 0 clamped to 1 below
+        , configMaxBodyBytes = fromMaybe 10485760 (mMaxBody >>= readMaybe)  -- default 10 MiB; 0 = unlimited; negative rejected by validateConfig (exit 2)
         }
   cfg0v <- case validateConfig cfg0 of
     Left err -> do

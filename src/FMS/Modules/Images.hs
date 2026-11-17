@@ -48,13 +48,12 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeBaseName, takeDirectory, takeExtension)
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), diffUTCTime)
-import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig, getState, putState)
 import FMS.Core.Blurhash (encodeBlurhash)
 import FMS.Core.Process (runProcessBS, runProcessBSTimeout, showBS)
-import FMS.Core.Query (queryParams)
+import FMS.Core.Query (parseBoundedInt, queryParams)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
 import FMS.Modules.Thumbs (thumbPathFor)
@@ -485,9 +484,11 @@ serveStoredImage :: FilePath -> Text -> Text -> FilePath -> String -> Request ->
 serveStoredImage dir i ty path ext req = do
   tag <- liftIO (imageTagOfFile path)
   let qp   = queryParams (queryString req)
-      mW   = lookup "maxwidth"  qp >>= readMaybe . T.unpack
-      mH   = lookup "maxheight" qp >>= readMaybe . T.unpack
-      q    = fromMaybe defaultQuality (lookup "quality" qp >>= readMaybe . T.unpack)
+      -- hardening: numeric resize params are clamped (width/height to
+      -- [1, 8192], quality to [1, 100]) so no value can cause absurd work
+      mW   = lookup "maxwidth"  qp >>= parseBoundedInt 1 8192 1
+      mH   = lookup "maxheight" qp >>= parseBoundedInt 1 8192 1
+      q    = fromMaybe defaultQuality (lookup "quality" qp >>= parseBoundedInt 1 100 defaultQuality)
       hdrs = [(mk "ETag", tagB tag), (mk "Cache-Control", "public, max-age=86400")]
   if isNothing mW && isNothing mH
     then serveImageFileWithHeaders path (contentTypeForExt ext) hdrs

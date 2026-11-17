@@ -11,6 +11,7 @@ module FMS.Core.Router
   , securityHeaders
   , normalizeSegments
   , errorBody
+  , exceedsMaxBody
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
@@ -18,9 +19,11 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BSC
 import Data.CaseInsensitive (original)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (intercalate)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -28,14 +31,15 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
-  ( Header, Method, ResponseHeaders, mkStatus
+  ( Header, Method, ResponseHeaders, hContentLength, mkStatus
   , status204, status401
   )
 import Network.Socket (SockAddr (..), hostAddressToTuple)
+import Text.Read (readMaybe)
 import Network.Wai
   ( Application, Request, Response
-  , mapResponseHeaders, pathInfo, remoteHost, requestHeaders, requestMethod
-  , responseLBS
+  , getRequestBodyChunk, mapResponseHeaders, pathInfo, remoteHost
+  , requestHeaders, requestMethod, responseLBS, setRequestBodyChunks
   )
 
 import FMS.Core.Module (Module(..), Route(..), Segment(..))
@@ -68,52 +72,78 @@ import FMS.Core.Types.User (User(..))
 -- * Otherwise the first route matching method + path segments wins; the
 --   handler runs inside 'runApp', and 'AppError' maps to 400/401/404/429/500.
 buildApplication :: AppEnv -> [Module] -> Application
-buildApplication env modules req respond0 = do
+buildApplication env modules req0 respond0 = do
   ereqId <- runApp env nextRequestId
   let cfg     = envConfig env
       reqId   = either (const (requestIdHex 0)) id ereqId
-      origin  = lookup "origin" (requestHeaders req)
+      origin  = lookup "origin" (requestHeaders req0)
       -- milestone 13b: CORS allow-origin is computed from configCorsOrigins
       -- + the request Origin; security headers when configSecurityHeaders
       corsH   = allowedOriginsHeader (configCorsOrigins cfg) (TE.decodeUtf8 <$> origin)
                 ++ corsBaseHeaders
       secH    = if configSecurityHeaders cfg then securityHeaders else []
       respond resp = respond0 (withRequestId reqId (mapResponseHeaders ((secH ++ corsH) ++) resp))
+  -- Input-validation hardening (section 14): cap the request body at
+  -- configMaxBodyBytes (0 = unlimited) BEFORE any handler reads it.
+  -- Content-Length is checked first for an early 413; otherwise the body
+  -- is read with a hard cap (early abort) and re-attached to the request
+  -- so handlers can still read it via strictRequestBody.
+  let maxBody = configMaxBodyBytes cfg
+  (req, tooBig) <-
+    if requestMethod req0 == "OPTIONS" || maxBody <= 0
+      then pure (req0, False)
+      else case lookup hContentLength (requestHeaders req0) >>= readMaybe . BSC.unpack of
+        Just len | exceedsMaxBody maxBody len -> pure (req0, True)
+        _ -> do
+          r <- readCappedBody maxBody (getRequestBodyChunk req0)
+          case r of
+            Left ()  -> pure (req0, True)
+            Right bs -> do
+              -- re-attach the already-read body: serve it once, then EOF
+              ref <- newIORef [bs]
+              pure (setRequestBodyChunks
+                      (atomicModifyIORef' ref (\cs -> case cs of
+                          (c : rest) -> (rest, c)
+                          []         -> ([], B.empty)))
+                      req0, False)
   if requestMethod req == "OPTIONS"
     then respond (mapResponseHeaders (("Access-Control-Max-Age", "600") :) (responseLBS status204 [] ""))
-    else do
-      elim <- runApp env (rateLimitExceeded req)
-      case elim of
-        Right (Just retryAfter) ->
-          respond (rateLimitedResponse reqId retryAfter)
-        _ -> do
-          let routes = concatMap moduleRoutes modules
-              -- milestone 17a: jellyfin-web calls PascalCase paths
-              -- (/Items, /Videos/...); literal segments now compare
-              -- case-insensitively in 'matchSegments' and 'isOpenPath'
-              -- lowercases internally, so raw segments are passed through
-              -- (captures keep their original case; no two routes differ
-              -- only by case -- verified by route audit)
-              segs   = pathInfo req
-              dispatch =
-                case firstMatch routes (requestMethod req) segs of
-                  Nothing -> respond (errorResponse reqId (NotFound "404 Not Found"))
-                  Just (route, captures) -> do
-                    eres <- runApp env (routeHandler route captures req)
-                    case eres of
-                      Left err ->
-                        putStrLn ("[ERROR] request " ++ T.unpack reqId ++ ": " ++ show err)
-                      Right _ -> pure ()
-                    respond (either (errorResponse reqId) id eres)
-          ereq <- runApp env requireAuthNow
-          let requireAuth = either (const (configRequireAuth (envConfig env))) id ereq
-          if requireAuth && not (isOpenPath segs)
-            then do
-              eok <- runApp env (tokenIsValid req)
-              if eok == Right True
+    else if tooBig
+      then respond (errorResponse reqId (PayloadTooLarge
+               ("request body exceeds " <> T.pack (show maxBody) <> " bytes")))
+      else do
+        elim <- runApp env (rateLimitExceeded req)
+        case elim of
+          Right (Just retryAfter) ->
+            respond (rateLimitedResponse reqId retryAfter)
+          _ -> do
+            let routes = concatMap moduleRoutes modules
+                -- milestone 17a: jellyfin-web calls PascalCase paths
+                -- (/Items, /Videos/...); literal segments now compare
+                -- case-insensitively in 'matchSegments' and 'isOpenPath'
+                -- lowercases internally, so raw segments are passed through
+                -- (captures keep their original case; no two routes differ
+                -- only by case -- verified by route audit)
+                segs   = pathInfo req
+                dispatch =
+                  case firstMatch routes (requestMethod req) segs of
+                    Nothing -> respond (errorResponse reqId (NotFound "404 Not Found"))
+                    Just (route, captures) -> do
+                      eres <- runApp env (routeHandler route captures req)
+                      case eres of
+                        Left err ->
+                          putStrLn ("[ERROR] request " ++ T.unpack reqId ++ ": " ++ show err)
+                        Right _ -> pure ()
+                      respond (either (errorResponse reqId) id eres)
+            ereq <- runApp env requireAuthNow
+            let requireAuth = either (const (configRequireAuth (envConfig env))) id ereq
+            if requireAuth && not (isOpenPath segs)
+              then do
+                eok <- runApp env (tokenIsValid req)
+                if eok == Right True
                 then dispatch
                 else respond (unauthorizedResponse reqId)
-            else dispatch
+              else dispatch
 
 -- | Mint the next request id: a global counter TVar in the registry,
 -- rendered as 16-char hex ('requestIdHex'). The TVar is created on first
@@ -370,6 +400,28 @@ securityHeaders =
   , ("X-Frame-Options", "SAMEORIGIN")
   , ("Referrer-Policy", "no-referrer")
   ]
+
+-- | Pure (input-validation hardening): does a body of @len@ bytes exceed
+-- the cap @maxBody@? @maxBody <= 0@ means unlimited (never exceeds).
+-- Exported for tests.
+exceedsMaxBody :: Int -> Int -> Bool
+exceedsMaxBody maxBody len = maxBody > 0 && len > maxBody
+
+-- | Read a request body stream with a hard cap: 'Left ()' as soon as more
+-- than @maxBytes@ have been read (early abort, so an oversized upload is
+-- never fully buffered), else 'Right' the whole body.
+readCappedBody :: Int -> IO B.ByteString -> IO (Either () B.ByteString)
+readCappedBody maxBytes body = go B.empty
+  where
+    go acc = do
+      chunk <- body
+      if B.null chunk
+        then pure (Right acc)
+        else do
+          let acc' = B.append acc chunk
+          if B.length acc' > maxBytes
+            then pure (Left ())
+            else go acc'
 
 -- | The ONE error body shape (error model, docs/todo.org section 2):
 -- @{\"error\": msg, \"status\": <http status int>, \"requestId\": id}@.

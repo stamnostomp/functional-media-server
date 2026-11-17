@@ -32,6 +32,10 @@ module FMS.Core.Query
   , specialFeaturesOf
   , sortItems
   , paginate
+  , clampNonNegative
+  , clampStartIndex
+  , clampLimit
+  , parseBoundedInt
   , applyItemQuery
   , viewsFromFolders
   , nextUpEpisodes
@@ -490,6 +494,35 @@ paginate mStart mLimit xs =
        Nothing -> drop start xs
        Just l  -> take l (drop start xs)
 
+-- Input-validation hardening (docs/todo.org section 14): pure clamps for
+-- numeric query params, so no request can cause absurd work. Exported for
+-- tests.
+
+-- | Pure: clamp to >= 0.
+clampNonNegative :: Int -> Int
+clampNonNegative = max 0
+
+-- | Pure: @startIndex@ clamp — absent -> 0, negative -> 0.
+clampStartIndex :: Maybe Int -> Int
+clampStartIndex = maybe 0 clampNonNegative
+
+-- | Pure: @limit@ clamp — absent -> default 100; present -> clamped to
+-- [1, 1000]. (Callers with their own default wrap it:
+-- @clampLimit (Just \<$> m)@ keeps 'Nothing' -> 100; use
+-- @clampLimit (Just (fromMaybe d m))@ to keep a custom default.)
+clampLimit :: Maybe Int -> Int
+clampLimit Nothing  = 100
+clampLimit (Just n) = min 1000 (max 1 n)
+
+-- | Pure: parse a numeric query value, clamped to [lo, hi]; an
+-- unparseable value yields the default (never 'Nothing', so callers can
+-- rely on a sane int). Whitespace is stripped first.
+parseBoundedInt :: Int -> Int -> Int -> Text -> Maybe Int
+parseBoundedInt lo hi def t =
+  case readMaybe (T.unpack (T.strip t)) of
+    Just n  -> Just (min hi (max lo n))
+    Nothing -> Just def
+
 -- | Apply the Jellyfin-shaped items query (docs/todo.org section 4) to a
 -- list of items: search, then the @libraryId@ folder filter (milestone
 -- 2c), then the @type@ and @series@ filters (milestone 4d), then the
@@ -520,6 +553,8 @@ applyItemQuery params items =
         Just s | isUserDataSortKey s -> years
         _                            -> sortItems (get "sortBy") (get "sortOrder") years
       total    = length sorted
+      -- hardening: clamp explicit numeric params (negative start -> 0,
+      -- limit -> [1, 1000]); absent limit keeps the paginate default
       start    = get "startIndex" >>= readMaybe . T.unpack
       limit    = get "limit" >>= readMaybe . T.unpack
-  in (total, paginate start limit sorted)
+  in (total, paginate (clampNonNegative <$> start) (min 1000 . max 1 <$> limit) sorted)

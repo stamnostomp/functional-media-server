@@ -37,7 +37,7 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import Control.Monad.Reader (asks)
 import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -140,7 +140,7 @@ itemsQueryResponse mUser qparams = do
       items = case (mLookup, lookup "sortby" qparams) of
         (Just lk, Just s) | isUserDataSortKey s -> sortByUserDataField s lk itemsU
         _                                       -> itemsU
-      startIndex = fromMaybe (0 :: Int) (lookup "startindex" qparams >>= readMaybe . T.unpack)
+      startIndex = clampStartIndex (lookup "startindex" qparams >>= readMaybe . T.unpack)
   -- Milestone 4n: the "exclusive" filter (items in NO collection) and
   -- image tags (EnableImages/imageType) on the rendered item JSON.
   cm <- collectionsMap
@@ -508,7 +508,7 @@ searchHintsHandler _captures req = do
       term = case lookup "searchterm" qparams of
         Just t  -> t
         Nothing -> fromMaybe "" (lookup "term" qparams)
-      limit = fromMaybe (20 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
+      limit = clampLimit (Just (fromMaybe 20 (lookup "limit" qparams >>= readMaybe . T.unpack)))
   -- Milestone 4n: search people too -- read the metadata cache via the
   -- literal registry key (same cycle-avoidance pattern as itemsQueryResponse).
   mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
@@ -592,7 +592,7 @@ similarHandler captures req =
           mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
           metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
           let qparams = queryParams (queryString req)
-              limit = fromMaybe 12 (lookup "limit" qparams >>= readMaybe . T.unpack)
+              limit = clampLimit (Just (fromMaybe 12 (lookup "limit" qparams >>= readMaybe . T.unpack)))
               sim = similarItems (flip HM.lookup metaMap) limit item items
           pure (jsonResponse (object
             [ "Items" .= sim

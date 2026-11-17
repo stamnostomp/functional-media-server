@@ -39,13 +39,13 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, imageBlurHashesValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
 import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
-import FMS.Core.Router (allowedOriginsHeader, errorBody, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3)
@@ -2578,7 +2578,7 @@ main = do
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
-      , configFetchImages = False, configScanWorkers = 4, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+      , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
       , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
       } "7" 2)
 
@@ -2701,7 +2701,7 @@ main = do
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
-        , configFetchImages = False, configScanWorkers = 4, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+        , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
         , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
         }
       badPort p = cfg1d { configPort = p }
@@ -3112,18 +3112,18 @@ main = do
      removeDirectoryRecursive poolDir
 
   -- Error model: one body shape {"error","status","requestId"} everywhere
-  check "statusForError maps all 7 AppError constructors to 400/401/403/404/429/503/500"
-    [400, 401, 403, 404, 429, 503, 500]
+  check "statusForError maps all 8 AppError constructors to 400/401/403/404/429/503/413/500"
+    [400, 401, 403, 404, 429, 503, 413, 500]
     [ statusForError (BadRequest "x"), statusForError (Unauthorized "x")
     , statusForError (Forbidden "x"), statusForError (NotFound "x")
     , statusForError (TooManyRequests "x"), statusForError (ServiceUnavailable "x")
-    , statusForError (InternalError "x") ]
+    , statusForError (PayloadTooLarge "x"), statusForError (InternalError "x") ]
   check "errorMessage extracts the message of each constructor"
-    ["m1", "m2", "m3", "m4", "m5", "m6", "m7"]
+    ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"]
     [ errorMessage (BadRequest "m1"), errorMessage (Unauthorized "m2")
     , errorMessage (Forbidden "m3"), errorMessage (NotFound "m4")
     , errorMessage (TooManyRequests "m5"), errorMessage (ServiceUnavailable "m6")
-    , errorMessage (InternalError "m7") ]
+    , errorMessage (PayloadTooLarge "m7"), errorMessage (InternalError "m8") ]
   let eb = LBS.toStrict (Aeson.encode (errorBody "boom" 404 "00ff"))
   check "errorBody has exactly error+status+requestId with correct values"
     (True, True, True, True)
@@ -3133,5 +3133,27 @@ main = do
     , case errorBody "boom" 404 "00ff" of
         Aeson.Object o -> length (KeyMap.keys o) == 3
         _              -> False )
+
+  -- Input-validation hardening: numeric clamps + body-size cap (pure)
+  check "clampNonNegative / clampStartIndex / clampLimit matrices"
+    ([0, 0, 7], [0, 0, 5], [100, 1, 1, 1000, 42])
+    ( [clampNonNegative (-3), clampNonNegative 0, clampNonNegative 7]
+    , [clampStartIndex Nothing, clampStartIndex (Just (-9)), clampStartIndex (Just 5)]
+    , [clampLimit Nothing, clampLimit (Just 0), clampLimit (Just (-5))
+      , clampLimit (Just 99999999), clampLimit (Just 42)] )
+  check "parseBoundedInt: normal, clamped lo/hi, unparseable/empty -> default, whitespace"
+    [Just 5, Just 1, Just 1000, Just 100, Just 3, Just 100]
+    [ parseBoundedInt 1 1000 100 "5", parseBoundedInt 1 1000 100 "0"
+    , parseBoundedInt 1 1000 100 "99999999", parseBoundedInt 1 1000 100 "abc"
+    , parseBoundedInt 1 1000 100 "  3  ", parseBoundedInt 1 1000 100 "" ]
+  check "exceedsMaxBody: cap logic (0 = unlimited)"
+    [True, False, False, True, False]
+    [ exceedsMaxBody 100 101, exceedsMaxBody 100 100, exceedsMaxBody 0 999999999
+    , exceedsMaxBody 10485760 11000000, exceedsMaxBody (-1) 5 ]
+  check "validateConfig rejects negative max body bytes, accepts 0 and 10 MiB"
+    [True, False, False]
+    [ isLeft' (validateConfig (cfg1d { configMaxBodyBytes = -1 }))
+    , isLeft' (validateConfig (cfg1d { configMaxBodyBytes = 0 }))
+    , isLeft' (validateConfig (cfg1d { configMaxBodyBytes = 10485760 })) ]
 
   putStrLn "All tests passed."

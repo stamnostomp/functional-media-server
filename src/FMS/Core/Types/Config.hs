@@ -38,6 +38,7 @@ data Config = Config
   , configTmdbImageBaseUrl :: !Text     -- ^ TMDB image CDN base (env FMS_TMDB_IMAGE_BASE_URL, default https://image.tmdb.org/t/p)
   , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
   , configScanWorkers :: !Int            -- ^ parallel worker threads for the per-file stat phase of a library scan (env FMS_SCAN_WORKERS, default 4, min 1 = sequential)
+  , configMaxBodyBytes :: !Int           -- ^ max request body size in bytes; larger bodies get 413 (env FMS_MAX_BODY_BYTES, default 10485760 = 10 MiB; 0 = unlimited)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -78,6 +79,8 @@ validateConfig cfg
       Left "auth rate limit must be >= 0"
   | configScanWorkers cfg < 0 =
       Left "scan workers must be >= 0"
+  | configMaxBodyBytes cfg < 0 =
+      Left "max body bytes must be >= 0"
   | configMaxTranscodes cfg < 1 =
       Left "max transcodes must be >= 1"
   | configFfmpegTimeoutSec cfg < 1 =

@@ -44,6 +44,7 @@ data AppError
   | Forbidden Text      -- ^ milestone 5e; maps to HTTP 403
   | TooManyRequests Text  -- ^ milestone 14a rate limiting; maps to HTTP 429
   | ServiceUnavailable Text -- ^ milestone 15 ffmpeg slot exhaustion; maps to HTTP 503
+  | PayloadTooLarge Text  -- ^ input-validation hardening: body over FMS_MAX_BODY_BYTES; maps to HTTP 413
   | InternalError Text
   deriving (Show, Eq)
 
@@ -57,6 +58,7 @@ statusForError e = case e of
   NotFound _       -> 404
   TooManyRequests _ -> 429
   ServiceUnavailable _ -> 503
+  PayloadTooLarge _ -> 413
   InternalError _  -> 500
 
 -- | Milestone (error model): the human-readable message of an 'AppError'.
@@ -69,6 +71,7 @@ errorMessage e = case e of
   NotFound m       -> m
   TooManyRequests m -> m
   ServiceUnavailable m -> m
+  PayloadTooLarge m -> m
   InternalError m  -> m
 
 -- | Read-only environment plus the typed state registry that modules use to

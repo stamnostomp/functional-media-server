@@ -10,24 +10,35 @@ module FMS.Modules.Metadata.Routes
   , studiosFromMetadata
   , personsFromMetadata
   , tagsFromMetadata
+  , refreshAllHandler
+  , remoteSearchHandler
+  , unmatchedHandler
+  , unmatchedItems
+  , tmdbResultToSearchHit
   ) where
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (eitherDecode, object, (.=))
+import Control.Monad.Reader (asks)
+import Data.Aeson (Value, eitherDecode, object, (.=))
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.List (nub, sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.Wai (Request, Response, strictRequestBody)
+import Network.Wai (Request, Response, queryString, strictRequestBody)
 
 import FMS.Core.Module (jsonResponse)
-import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig)
+import FMS.Core.Query (queryParams)
+import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Modules.Auth.Monad (getItemWithAccess, requireAdmin)
-import FMS.Modules.Metadata.Monad (MonadMetadata (..))
+import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
+import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie, tmdbSearchTv)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), refreshAllMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata)
 
 -- | @GET \/items\/:id\/metadata@ — the library item merged with its
@@ -158,3 +169,79 @@ personsFromMetadata = countMetadataField metaPersons
 -- | Pure (milestone 4h): tags, see 'genresFromMetadata'.
 tagsFromMetadata :: [MediaMetadata] -> [(Text, Int)]
 tagsFromMetadata = countMetadataField metaTags
+
+-- Milestone 4m (docs/todo.org section 3): library-wide refresh, remote
+-- search and the unmatched queue. The routes are registered in
+-- "FMS.Modules.Library" (literal segments BEFORE [Lit "items", Capture "id"])
+-- because the library module precedes the metadata module in the route
+-- table; the handlers live here.
+
+-- | @POST \/Library\/Refresh?replaceAll=true|false@ — refresh the metadata
+-- of every library item (admin-only, like the other admin mutations of
+-- milestone 16). 200 @{\"refreshed\": n, \"replaceAll\": bool}@.
+refreshAllHandler :: [(Text, Text)] -> Request -> AppM Response
+refreshAllHandler _captures req = do
+  requireAdmin req  -- milestone 16
+  let replaceAll = case lookup "replaceall" (queryParams (queryString req)) of
+        Just v  -> T.toLower (T.strip v) `elem` ["true", "1", "yes"]
+        Nothing -> False
+  n <- refreshAllMetadata replaceAll
+  pure (jsonResponse (object ["refreshed" .= n, "replaceAll" .= replaceAll]))
+
+-- | @GET \/Items\/RemoteSearch?searchTerm=..&type=movie|tv@ — remote
+-- (TMDB) search, answered as a Jellyfin 'RemoteSearchResult' array.
+-- Any authenticated user may call it (read-only); 400 on an empty
+-- @searchTerm@ or when no TMDB key is configured; a TMDB transport
+-- error is logged and answered as an empty array (graceful).
+remoteSearchHandler :: [(Text, Text)] -> Request -> AppM Response
+remoteSearchHandler _captures req = do
+  let qp = queryParams (queryString req)
+  case lookup "searchterm" qp of
+    Just t | not (T.null (T.strip t)) -> do
+      cfg <- asks envConfig
+      let apiKey = configTmdbApiKey cfg
+      if T.null apiKey
+        then throwError (BadRequest "MEDIA_TMDB_API_KEY not set")
+        else do
+          let isTv  = maybe False (\v -> T.toLower (T.strip v) == "tv") (lookup "type" qp)
+              typeName = if isTv then ("Series" :: Text) else "Movie"
+              search = if isTv then tmdbSearchTv apiKey t else tmdbSearchMovie apiKey t
+          eres <- liftIO search
+          case eres of
+            Left err -> do
+              logErr ("metadata: tmdb search failed: " <> T.pack err)
+              pure (jsonResponse ([] :: [Value]))
+            Right results ->
+              pure (jsonResponse (map (tmdbResultToSearchHit typeName) results))
+    _ -> throwError (BadRequest "missing or empty searchTerm")
+
+-- | Pure (milestone 4m): map one TMDB hit to a Jellyfin-shaped
+-- RemoteSearchResult object (PascalCase keys).
+tmdbResultToSearchHit :: Text -> TmdbResult -> Value
+tmdbResultToSearchHit typeName r = object
+  [ "Id"             .= T.pack (show (tmdbId r))
+  , "Name"           .= tmdbTitle r
+  , "Type"           .= typeName
+  , "ProductionYear" .= tmdbReleaseYear r
+  , "ProviderIds"    .= object ["Tmdb" .= tmdbId r]
+  , "Overview"       .= tmdbOverview r
+  ]
+
+-- | @GET \/Items\/Unmatched@ — the identify/failures queue (milestone 4m):
+-- items visible to the requester that have NO metadata record yet.
+-- 200 @{\"Items\": [...], \"TotalRecordCount\": n}@.
+unmatchedHandler :: [(Text, Text)] -> Request -> AppM Response
+unmatchedHandler _captures req = do
+  mUser <- currentUserFromReq req
+  items <- visibleItems mUser =<< listItems
+  metaMap <- listAllMetadataMap
+  let unmatched = unmatchedItems (`HM.member` metaMap) items
+  pure (jsonResponse (object
+    [ "Items" .= unmatched
+    , "TotalRecordCount" .= length unmatched
+    ]))
+
+-- | Pure (milestone 4m): the items whose id does NOT satisfy the
+-- has-metadata predicate (the unmatched queue).
+unmatchedItems :: (Text -> Bool) -> [MediaItem] -> [MediaItem]
+unmatchedItems hasMeta = filter (not . hasMeta . itemId)

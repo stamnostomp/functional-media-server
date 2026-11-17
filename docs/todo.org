@@ -61,13 +61,13 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Remote providers (partial): TMDB fallback via MEDIA_TMDB_API_KEY (m4c), NFO wins; other providers (TvMaze etc.) not implemented
    - [X] TMDB movie search (MEDIA_TMDB_API_KEY; NFO-wins fallback; 10s timeout; graceful on failure)
    - [ ] OMDb, TVDB, AniDB, MusicBrainz, AudioDB
-** TODO Provider search + identify + auto-match on scan
+** DONE Provider search: =GET /Items/RemoteSearch?searchTerm=&type=movie|tv= (TMDB movie+tv search, RemoteSearchResult shape); manual identify-apply not implemented
 ** DONE Rate limiting: per-IP token bucket FMS_RATE_LIMIT req/min -> 429 + JSON error, X-Request-Id on all responses (m14a) with exponential backoff; cache API errors
 ** TODO Download images on scan: primary, backdrop, logo, thumb, banner, art, disc, menu
 ** DONE Chapter images: =GET /items/:id/Chapters= (ffprobe -show_chapters with named chapters, else 10 evenly spaced fallback; {Index,StartPositionTicks,Name?,ImageTag}) + =GET /items/:id/Chapters/:index/Image= (ffmpeg -ss frame, cached JPEG under stateDir/chapters/, ?version= support)
-** TODO Metadata refresh (manual + scheduled), "replace all metadata" option
+** DONE Metadata refresh: manual per-item POST /items/:id/metadata[/refresh] (admin), scheduled task metadata-refresh (m11a), library-wide =POST /Library/Refresh?replaceAll== (admin, clears then refreshes all) (m4m)
 ** DONE Manual metadata editing with field locking: =POST /items/:id/metadata= (applyManualPatch; lockedFields skip locked fields), refresh merges via applyProviderMerge so locked fields survive NFO/TMDB refresh; persisted in metadata.json
-** TODO Identify/failures queue: items with no match, reported in UI/API
+** DONE Identify/failures queue: =GET /Items/Unmatched= (items without metadata, requester-visible) (m4m)
 
 * 4. Items API :feature:
 ** TODO =GET /Items= with filters: exclusive

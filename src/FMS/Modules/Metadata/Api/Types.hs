@@ -1,5 +1,6 @@
 module FMS.Modules.Metadata.Api.Types
   ( TmdbResult(..)
+  , releaseYear
   ) where
 
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))

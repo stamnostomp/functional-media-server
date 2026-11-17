@@ -106,11 +106,11 @@ import FMS.Modules.Library.State
   , UpdateItemMeta(..)
   , initialLibraryState
   )
-import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, tmdbSearchUrl)
+import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, parseTmdbTvResults, tmdbSearchTvUrl, tmdbSearchUrl)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata)
+import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
@@ -1028,6 +1028,45 @@ main = do
       isLeftStr (Right _) = False
   check "parseTmdbResults on invalid JSON is Left"
     True (isLeftStr (parseTmdbResults (LBS.fromStrict (BSC.pack "not json"))))
+
+  -- Milestone 4m: TV search URL + parser, RemoteSearch hit mapping, and
+  -- the unmatched queue predicate.
+  check "tmdbSearchTvUrl is the /search/tv endpoint with the encoded query"
+    True ("https://api.themoviedb.org/3/search/tv?api_key=TESTKEY&query=a%20b"
+            == tmdbSearchTvUrl "TESTKEY" "a b")
+  let tvFixture = LBS.fromStrict (BSC.pack (unlines
+        [ "{\"page\":1,\"results\":["
+        , "  {\"id\":1399,\"name\":\"Game of Thrones\",\"overview\":\"Seven noble families fight.\",\"first_air_date\":\"2011-04-17\",\"vote_average\":8.4},"
+        , "  {\"id\":1402,\"name\":\"The Wire\",\"first_air_date\":\"2002-06-02\"}"
+        , "]}"
+        ]))
+  check "parseTmdbTvResults maps name/first_air_date onto TmdbResult"
+    (Right [ TmdbResult 1399 "Game of Thrones" (Just "Seven noble families fight.") (Just 2011) (Just 8.4)
+           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing ])
+    (parseTmdbTvResults tvFixture)
+  check "parseTmdbTvResults on invalid JSON is Left"
+    True (isLeftStr (parseTmdbTvResults (LBS.fromStrict (BSC.pack "nope"))))
+  let hit = tmdbResultToSearchHit "Movie" (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433))
+      hitRaw = LBS.toStrict (Aeson.encode hit)
+  check "tmdbResultToSearchHit emits the Jellyfin RemoteSearchResult keys (PascalCase)"
+    [True, True, True, True, True, True]
+    (map (`BSC.isInfixOf` hitRaw)
+      [ "\"Id\":\"550\"", "\"Name\":\"Fight Club\"", "\"Type\":\"Movie\""
+      , "\"ProductionYear\":1999", "\"ProviderIds\":{\"Tmdb\":550}", "\"Overview\":\"An insomniac" ])
+  check "tmdbResultToSearchHit type=tv -> Series"
+    True ("\"Type\":\"Series\"" `BSC.isInfixOf`
+            LBS.toStrict (Aeson.encode (tmdbResultToSearchHit "Series" (TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing))))
+  let mkU i = MediaItem
+        { itemId = i, itemTitle = "t" <> i, itemPath = "/" ++ T.unpack i ++ ".mp4"
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = t4m, itemFolder = "1"
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+      t4m = read "2026-01-01 00:00:00 UTC" :: UTCTime
+      uItems4m = [mkU "1", mkU "2", mkU "3"]
+  check "unmatchedItems keeps only items without metadata"
+    ["2", "3"] (map (T.unpack . itemId) (unmatchedItems (== "1") uItems4m))
+  check "unmatchedItems with all matched -> []"
+    ([] :: [MediaItem]) (unmatchedItems (const True) uItems4m)
   check "parseTmdbResults on a non-object body is Left"
     True (isLeftStr (parseTmdbResults (LBS.fromStrict (BSC.pack "[1,2]"))))
   check "parseTmdbResults without a results key is Left"

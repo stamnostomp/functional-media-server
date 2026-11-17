@@ -3,14 +3,17 @@ module FMS.Modules.Metadata.Monad
   , metadataStateKey
   , metadataFilePath
   , loadMetadataIntoState
+  , refreshAllMetadata
   ) where
 
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Exception (SomeException, try)
+import Control.Monad (foldM, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import qualified Data.ByteString as BS
 import Data.HashMap.Strict (HashMap)
+import Data.Maybe (isJust)
 import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -20,7 +23,7 @@ import System.FilePath ((</>), takeDirectory)
 import FMS.Core.Monad (AppEnv (..), AppM, MonadLog (..), getState, putState)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Modules.Library (MonadLibrary (..))
+import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
@@ -87,6 +90,26 @@ instance MonadMetadata AppM where
           -- Milestone 4c: no usable NFO -> remote provider fallback (TMDB),
           -- keyed by the item's title, only when an API key is configured.
           Nothing -> refreshFromTmdb itemIdent item
+
+-- | Milestone 4m (docs/todo.org section 3): refresh the metadata of EVERY
+-- library item sequentially (NFO first, TMDB fallback -- the same path as
+-- 'refreshMetadata'). When @replaceAll@ is True the whole metadata map is
+-- cleared and persisted empty first, so stale records vanish too. Returns
+-- the number of items for which a refresh found metadata.
+refreshAllMetadata :: Bool -> AppM Int
+refreshAllMetadata replaceAll = do
+  cfg <- asks envConfig
+  when replaceAll $ do
+    tv <- ensureMetadataTVar
+    liftIO (atomically (writeTVar tv HM.empty))
+    liftIO (saveMetadata (metadataFilePath cfg) HM.empty)
+  items <- listItems
+  foldM step 0 items
+  where
+    step :: Int -> MediaItem -> AppM Int
+    step acc item = do
+      m <- refreshMetadata (itemId item)
+      pure (acc + (if isJust m then 1 else 0))
 
 -- | Milestone 4k: merge a freshly parsed provider record over the stored
 -- one so that fields the user locked (the old record's 'metaLockedFields')

@@ -9,7 +9,7 @@ import Data.Acid (openLocalStateFrom)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
-import FMS.Core.Module (Module(..), Segment(..), get)
+import FMS.Core.Module (Module(..), Segment(..), get, post)
 import FMS.Core.Monad (MonadLog(..), envConfig, putState)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Library.Monad (MonadLibrary(..), initFolders, libraryAcidKey)
@@ -25,6 +25,7 @@ import FMS.Modules.Library.Routes
   , specialFeaturesHandler
   )
 import FMS.Modules.Library.State (initialLibraryState)
+import FMS.Modules.Metadata.Routes (refreshAllHandler, remoteSearchHandler, unmatchedHandler)
 import FMS.Modules.Library.Watch (startWatcher)
 
 -- | The library module (docs/roadmap.org milestone 2, milestone 2c media
@@ -57,6 +58,11 @@ libraryModule = Module
   , moduleRoutes = libraryRoutes
       ++ [ get [Lit "items"] (\captures req -> itemsHandler captures req)
          , get [Lit "items", Lit "Counts"] itemsCountsHandler
+         -- milestone 4m: literal segments BEFORE the [items, Capture "id"]
+         -- capture route (first match wins); handlers live in Metadata.Routes
+         , get [Lit "items", Lit "RemoteSearch"] remoteSearchHandler
+         , get [Lit "items", Lit "Unmatched"] unmatchedHandler
+         , post [Lit "Library", Lit "Refresh"] refreshAllHandler
          , get [Lit "items", Capture "id"] itemDetailHandler
          , get [Lit "items", Capture "id", Lit "Ancestors"] ancestorsHandler
          , get [Lit "items", Capture "id", Lit "SpecialFeatures"] specialFeaturesHandler

@@ -93,7 +93,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE =GET /Items/{id}/Images/{type}=
    - [X] =GET /items/:id/thumb= (ffmpeg frame at 5s -> cached JPEG in stateDir/thumbs)
    - [X] =GET /items/:id/images= list, =GET/POST/DELETE /items/:id/images/:type= (upload, delete), =?maxWidth/maxHeight/quality== resize via ffmpeg (cached variants), Primary/Thumb fallback to thumb cache
-** TODO blurhash placeholders
+** DONE blurhash placeholders: pure encoder FMS.Core.Blurhash (cross-validated vs official woltapp reference vector), ffmpeg rawvideo pixel extraction, stateDir/blurhashes.json cache keyed by image tag, ImageBlurHashes on item JSON (list + detail, respects enableImages=false and fields=) (m18b)
    - [X] image tags + cache-busting: Tag (size-epoch) in /items/:id/images list, ETag + Cache-Control on image responses, ?tag= accepted
 ** DONE Backdrop selection by index: =GET /items/:id/images/Backdrop/:index= (sorted Backdrop/Backdrop1... via selectBackdrop, 400/404 paths)
    - [ ] artist/album/series images

@@ -37,13 +37,13 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import Control.Monad.Reader (asks)
 import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
-import FMS.Modules.Images (findStoredImage, imageTagOfFile, imagesDirFor, listImageTypes)
+import FMS.Modules.Images (blurhashPairsForItem, findStoredImage, imageTagOfFile, imagesDirFor, listImageTypes)
 import FMS.Modules.Library.Folders (validateFolderPath)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
@@ -152,13 +152,22 @@ itemsQueryResponse mUser qparams = do
       enableImages = lookup "enableimages" qparams /= Just "false"
       mImageType = lookup "imagetype" qparams
   cfg <- asks envConfig
-  let renderItem i = do
+  -- blurhash placeholders follow the same enableImages switch, and
+  -- additionally the fields= projection: ImageBlurHashes is attached
+  -- only when no fields param was given or it lists ImageBlurHashes.
+  let wantBlur = null fields || "imageblurhashes" `elem` map T.toLower fields
+      renderItem i = do
         let base = projectFields fields (attachUserData mLookup i (toJSON i))
         if not enableImages
           then pure base
           else do
             pairs <- imageTagPairsFor cfg (itemId i)
-            pure (attachImageTags mImageType pairs base)
+            let v1 = attachImageTags mImageType pairs base
+            if not wantBlur
+              then pure v1
+              else do
+                hpairs <- blurhashPairsForItem cfg (itemId i)
+                pure (attachImageBlurHashes hpairs v1)
   pageWithTags <- mapM renderItem pageE
   pure (jsonResponse (object
     [ "Items" .= (pageWithTags ++ map (projectFields fields) boxVals)
@@ -390,7 +399,12 @@ itemDetailHandler captures req =
                 else do
                   cfg <- asks envConfig
                   pairs <- imageTagPairsFor cfg (itemId item)
-                  pure (jsonResponse (attachImageTags (lookup "imagetype" qparams) pairs base))
+                  let v1 = attachImageTags (lookup "imagetype" qparams) pairs base
+                  if not (null fields) && "imageblurhashes" `notElem` map T.toLower fields
+                    then pure (jsonResponse v1)
+                    else do
+                      hpairs <- blurhashPairsForItem cfg (itemId item)
+                      pure (jsonResponse (attachImageBlurHashes hpairs v1))
 
 -- | Milestone 7: @GET \/items\/boxset-<colId>@ — the collection's BoxSet
 -- pseudo-item JSON; 404 when the collection does not exist or is not

@@ -7,6 +7,8 @@ module FMS.Core.Query
   , imageTagsValue
   , backdropImageTagsValue
   , attachImageTags
+  , imageBlurHashesValue
+  , attachImageBlurHashes
   , filterByFolder
   , filterByParent
   , filterByType
@@ -107,6 +109,21 @@ imageTagsValue pairs = object [ Key.fromText ty .= tag | (ty, tag) <- pairs ]
 backdropImageTagsValue :: [(Text, Text)] -> Value
 backdropImageTagsValue pairs =
   toJSON [ tag | (ty, tag) <- pairs, T.toLower ty == "backdrop" ]
+
+-- | @ImageBlurHashes@ object: @{type: hash}@ pairs, skipping empty
+-- hashes (types whose blurhash could not be computed).
+imageBlurHashesValue :: [(Text, Text)] -> Value
+imageBlurHashesValue pairs =
+  object [ Key.fromText ty .= h | (ty, h) <- pairs, not (T.null h) ]
+
+-- | Merge blurhash placeholders into an item JSON object: adds
+-- @ImageBlurHashes@ when there is at least one non-empty hash;
+-- non-object values pass through unchanged.
+attachImageBlurHashes :: [(Text, Text)] -> Value -> Value
+attachImageBlurHashes pairs v = case v of
+  Object o | any (not . T.null . snd) pairs ->
+    Object (KeyMap.insert "ImageBlurHashes" (imageBlurHashesValue pairs) o)
+  _ -> v
 
 -- | Merge image tags into an item JSON object: adds @ImageTags@ (all
 -- pairs, or only the requested @imageType@ when given) and

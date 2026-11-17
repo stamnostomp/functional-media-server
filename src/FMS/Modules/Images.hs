@@ -10,21 +10,28 @@ module FMS.Modules.Images
   , imageTag
   , imageTagOfFile
   , selectBackdrop
+  , blurhashForStoredImage
+  , blurhashPairsForItem
   ) where
 
 import Control.Monad (forM, unless, when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (object, (.=))
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
+import qualified Data.Aeson as Aeson
 import Data.CaseInsensitive (mk)
 import Data.Char (isDigit, toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HM
 import Data.List (isPrefixOf, nub, sort, stripPrefix)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
+import Data.Word (Word8)
 import qualified Data.Text as T
 import Network.HTTP.Types (ResponseHeaders, hContentType, status200)
 import Network.Wai
@@ -42,8 +49,9 @@ import Data.Time.Clock (UTCTime(..), diffUTCTime)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
-import FMS.Core.Process (runProcessBS, showBS)
+import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig, getState, putState)
+import FMS.Core.Blurhash (encodeBlurhash)
+import FMS.Core.Process (runProcessBS, runProcessBSTimeout, showBS)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
@@ -471,3 +479,125 @@ serveImageFileWithHeaders :: FilePath -> BS.ByteString -> ResponseHeaders -> App
 serveImageFileWithHeaders path contentType extra = do
   bs <- liftIO (LBS.readFile path)
   pure (responseLBS status200 (("Content-Type", contentType) : extra) bs)
+
+-- Blurhash placeholders (Jellyfin BaseItemDto.ImageBlurHashes parity).
+-- Pure encoder lives in "FMS.Core.Blurhash"; here we extract 32x32
+-- RGB24 pixels with ffmpeg and cache the computed hash per image file
+-- in @stateDir/blurhashes.json@, keyed by absolute path and invalidated
+-- by the existing image tag (size-mtime).
+
+-- | Registry key for the in-memory blurhash cache TVar.
+blurhashCacheKey :: Text
+blurhashCacheKey = "images.blurhash"
+
+-- | One cache entry: the image tag the hash was computed for, and the
+-- hash itself.
+data BlurhashEntry = BlurhashEntry
+  { bhTag  :: !Text
+  , bhHash :: !Text
+  } deriving (Eq, Show)
+
+instance ToJSON BlurhashEntry where
+  toJSON e = object ["tag" .= bhTag e, "hash" .= bhHash e]
+
+instance FromJSON BlurhashEntry where
+  parseJSON = withObject "BlurhashEntry" $ \o ->
+    BlurhashEntry <$> o .: "tag" <*> o .: "hash"
+
+blurhashCacheFile :: Config -> FilePath
+blurhashCacheFile cfg = configStateDir cfg </> "blurhashes.json"
+
+-- | Strictly load the persisted blurhash cache; a missing or malformed
+-- file yields an empty map.
+loadBlurhashCache :: Config -> IO (HashMap FilePath BlurhashEntry)
+loadBlurhashCache cfg = do
+  let path = blurhashCacheFile cfg
+  exists <- doesFileExist path
+  if not exists
+    then pure HM.empty
+    else do
+      raw <- BS.readFile path
+      pure (fromMaybe HM.empty (Aeson.decode (LBS.fromStrict raw)))
+
+-- | Persist the cache (strict write).
+saveBlurhashCache :: Config -> HashMap FilePath BlurhashEntry -> IO ()
+saveBlurhashCache cfg m =
+  BS.writeFile (blurhashCacheFile cfg) (LBS.toStrict (Aeson.encode m))
+
+-- | The blurhash cache TVar, created lazily (the ensureUserDataTVar
+-- pattern); the persisted JSON is loaded on first use.
+ensureBlurhashTVar :: AppM (TVar (HashMap FilePath BlurhashEntry))
+ensureBlurhashTVar = do
+  mTv <- getState blurhashCacheKey
+  case mTv of
+    Just tv -> pure tv
+    Nothing -> do
+      cfg <- asks envConfig
+      m <- liftIO (loadBlurhashCache cfg)
+      tv <- liftIO (newTVarIO m)
+      putState blurhashCacheKey tv
+      pure tv
+
+-- | Extract 32x32 RGB24 pixels from an image file with ffmpeg
+-- (@-f rawvideo -pix_fmt rgb24 pipe:1@, captured as raw bytes via
+-- "FMS.Core.Process"). 'Nothing' when ffmpeg fails or the output is
+-- not exactly 32*32*3 bytes.
+blurhashPixels :: FilePath -> IO (Maybe [Word8])
+blurhashPixels path = do
+  (ec, out, _err) <- runProcessBSTimeout 15 "ffmpeg"
+    [ "-hide_banner", "-loglevel", "error", "-i", path
+    , "-vf", "scale=32:32", "-f", "rawvideo", "-pix_fmt", "rgb24"
+    , "pipe:1"
+    ]
+  case ec of
+    ExitSuccess | LBS.length out == 32 * 32 * 3 ->
+      pure (Just (BS.unpack (LBS.toStrict out)))
+    _ -> pure Nothing
+
+-- | The blurhash of an image file (4x3 components), or 'Nothing' when
+-- the pixels cannot be extracted.
+blurhashForImageFile :: FilePath -> IO (Maybe String)
+blurhashForImageFile path = do
+  mPx <- blurhashPixels path
+  pure (encodeBlurhash 32 32 4 3 <$> mPx)
+
+-- | The blurhash of a stored item image, using the cache: when the
+-- cached entry's tag matches the file's current 'imageTagOfFile' the
+-- cached hash is returned; otherwise the hash is recomputed, cached
+-- and persisted. 'Nothing' (and no caching) when ffmpeg cannot read
+-- the file.
+blurhashForStoredImage :: Config -> FilePath -> AppM (Maybe Text)
+blurhashForStoredImage cfg path = do
+  tag <- liftIO (imageTagOfFile path)
+  tv  <- ensureBlurhashTVar
+  mCached <- liftIO (HM.lookup path <$> readTVarIO tv)
+  case mCached of
+    Just e | bhTag e == tag -> pure (Just (bhHash e))
+    _ -> do
+      mHash <- liftIO (blurhashForImageFile path)
+      case mHash of
+        Nothing -> pure Nothing
+        Just h  -> do
+          let hT = T.pack h
+              entry = BlurhashEntry tag hT
+          liftIO $ atomically $ modifyTVar' tv (HM.insert path entry)
+          m <- liftIO (readTVarIO tv)
+          liftIO (saveBlurhashCache cfg m)
+          pure (Just hT)
+
+-- | The @(imageType, blurhash)@ pairs for every stored image of an
+-- item (@stateDir/images/<itemId>@); types whose hash could not be
+-- computed are skipped.
+blurhashPairsForItem :: Config -> Text -> AppM [(Text, Text)]
+blurhashPairsForItem cfg i = do
+  let stateDir = configStateDir cfg
+      dir = imagesDirFor stateDir i
+  types <- liftIO (listImageTypes stateDir i)
+  pairs <- forM types $ \ty -> do
+    mF <- liftIO (findStoredImage dir ty)
+    case mF of
+      Just (fp, _) -> do
+        mh <- blurhashForStoredImage cfg fp
+        pure (ty, mh)
+      Nothing -> pure (ty, Nothing)
+  pure [ (ty, h) | (ty, Just h) <- pairs ]

@@ -25,6 +25,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  FMS
                       FMS.Server
+                      FMS.Core.Blurhash
                       FMS.Core.Monad
                       FMS.Core.Module
                       FMS.Core.Router

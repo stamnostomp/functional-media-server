@@ -17,6 +17,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
 import Data.SafeCopy (safeGet, safePut)
 import Data.Serialize (runGet, runPut)
+import Data.Word (Word8)
 import qualified Data.Text as T
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime (..), addUTCTime, getCurrentTime)
@@ -38,7 +39,8 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageTags, attachUserData, backdropImageTagsValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachUserData, backdropImageTagsValue, imageBlurHashesValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
@@ -686,6 +688,55 @@ main = do
     ["1", "3"] (map (T.unpack . itemId) (notInAnyCollection (== "2") items4n))
   check "notInAnyCollection with all collected -> []"
     ([] :: [MediaItem]) (notInAnyCollection (const True) items4n)
+
+  -- Blurhash encoder (FMS.Core.Blurhash): base83 roundtrip, output
+  -- shape, and attach helpers.
+  check "base83 roundtrip for 0..6888 (2 chars, full range)"
+    True (all (\v -> base83Decode (base83Encode v 2) == v) [0 .. 6888])
+  check "base83 roundtrip for 3-char stride sample"
+    True (all (\v -> base83Decode (base83Encode v 3) == v) [0, 977 .. 571786])
+  check "base83 alphabet is the exact 0-9A-Za-z+symbols string"
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"
+    base83Alphabet
+  let gray8 = replicate (8 * 8 * 3) 128 :: [Word8]
+      hGray = encodeBlurhash 8 8 4 3 gray8
+  check "uniform gray 8x8 4x3: hash length is 1+1+4+2*(12-1) = 28"
+    28 (length hGray)
+  check "uniform gray 8x8 4x3: decodeBlurhashSize is (4,3)"
+    (Just (4, 3)) (decodeBlurhashSize hGray)
+  check "4x3 size flag: first char is base83 of 21"
+    (base83Encode 21 1) (take 1 hGray)
+  check "black vs white solid images give different hashes"
+    True (encodeBlurhash 8 8 4 3 (replicate 192 0)
+            /= encodeBlurhash 8 8 4 3 (replicate 192 255))
+  let grad w h = [ fromIntegral ((x * 37 + y * 11) `mod` 256 :: Int)
+                 | y <- [0 .. h - 1], x <- [0 .. w - 1], _ <- [1 .. 3 :: Int] ] :: [Word8]
+  check "4x3 vs 8x6 gradient images give different hashes"
+    True (encodeBlurhash 4 3 4 3 (grad 4 3) /= encodeBlurhash 8 6 4 3 (grad 8 6))
+  check "encodeBlurhash rejects bad pixel count (returns empty)"
+    "" (encodeBlurhash 8 8 4 3 (replicate 10 0))
+  -- 32x32 deterministic LCG image, cross-validated against the official
+  -- woltapp/blurhash reference algorithm (Python transcription).
+  let lcgPix n = go 12345 n
+        where
+          go _ 0 = []
+          go s k = let s' = (s * 1103515245 + 12345) `mod` 2147483648
+                       b = fromIntegral ((s' `div` 65536) `mod` 256) :: Word8
+                   in b : go s' (k - 1)
+  check "32x32 LCG image 4x3 matches reference implementation vector"
+    "L7HetU-M+I;B?dkl#8RE$kq}VgcC" (encodeBlurhash 32 32 4 3 (lcgPix (32 * 32 * 3)))
+  let bhPairs = [("Primary", "LEHV6nWB2yk8pyo0adR*.7kCMdnj"), ("Backdrop", ""), ("Logo", "L00000fQfQfQ")]
+      bhRaw = LBS.toStrict (Aeson.encode (imageBlurHashesValue bhPairs))
+  check "imageBlurHashesValue skips empty hashes"
+    [True, False, True]
+    (map (`BSC.isInfixOf` bhRaw)
+      [ "\"Primary\":\"LEHV6nWB2yk8pyo0adR*.7kCMdnj\"", "\"Backdrop\"", "\"Logo\":\"L00000fQfQfQ\"" ])
+  check "attachImageBlurHashes adds ImageBlurHashes to an item object"
+    [True, True]
+    (map (`BSC.isInfixOf` LBS.toStrict (Aeson.encode (attachImageBlurHashes bhPairs baseItem)))
+      [ "\"ImageBlurHashes\":", "\"Primary\":\"LEHV6nWB2yk8pyo0adR*.7kCMdnj\"" ])
+  check "attachImageBlurHashes with all-empty hashes leaves value unchanged"
+    baseItem (attachImageBlurHashes [("Primary", "")] baseItem)
 
   -- sortItems: title asc by default, size desc, addedAt, unknown -> title.
   check "sortItems default is title asc"

@@ -239,6 +239,7 @@ toMediaStream fmtDur ps =
     , msDurationSeconds = case psDuration ps of
         Just d  -> Just d
         Nothing -> fmtDur
+    , msIsDefault       = False
     }
 
 -- | @video@/@audio@/@subtitle@ -> "Video"/"Audio"/"Subtitle"; anything

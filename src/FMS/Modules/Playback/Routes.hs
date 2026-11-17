@@ -2,13 +2,14 @@ module FMS.Modules.Playback.Routes
   ( playbackRoutes
   , playbackInfoHandler
   , mediaStreamsHandler
+  , deviceProfilesHandler
   ) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (FromJSON(..), eitherDecode, object, withObject, (.:?), (.=))
+import Data.Aeson (FromJSON(..), Value, eitherDecode, object, withObject, (.:?), (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.Wai (Request, Response, queryString, strictRequestBody)
@@ -35,8 +36,11 @@ import FMS.Modules.Playback.Probe
   )
 import FMS.Modules.Playback.Types
   ( MediaSource(..)
-  , MediaStream
+  , MediaStream(..)
   , PlaybackResponse(..)
+  , defaultDeviceProfile
+  , markDefaultStreams
+  , selectStreams
   )
 import FMS.Modules.Transcode (effectiveBitrateCap)
 
@@ -44,12 +48,23 @@ import FMS.Modules.Transcode (effectiveBitrateCap)
 -- @POST /items/:id/PlaybackInfo@ (the Jellyfin playback-decision
 -- endpoint; milestone 6f: the optional body @{MaxStreamingBitrate?,
 -- AudioStreamIndex?, SubtitleStreamIndex?, MaxWidth?}@ is honoured,
--- parse errors fall back to defaults) and @GET /items/:id/MediaStreams@.
+-- parse errors fall back to defaults; milestone 6i: the body stream
+-- indexes are resolved against the probed streams and echoed back),
+-- @GET /items/:id/MediaStreams@, and (milestone 6i)
+-- @GET /DeviceProfiles@.
 playbackRoutes :: [Route]
 playbackRoutes =
-  [ post [Lit "items", Capture "id", Lit "PlaybackInfo"] playbackInfoHandler
+  [ get  [Lit "DeviceProfiles"] deviceProfilesHandler
+  , post [Lit "items", Capture "id", Lit "PlaybackInfo"] playbackInfoHandler
   , get  [Lit "items", Capture "id", Lit "MediaStreams"] mediaStreamsHandler
   ]
+
+-- | @GET /DeviceProfiles@ -- the static default device profile list
+-- (milestone 6i, docs/todo.org section 6). Jellyfin returns a bare array
+-- of profiles; we serve the single 'defaultDeviceProfile'.
+deviceProfilesHandler :: [(Text, Text)] -> Request -> AppM Response
+deviceProfilesHandler _captures _req =
+  pure (jsonResponse ([defaultDeviceProfile] :: [Value]))
 
 -- | The optional @POST /items/:id/PlaybackInfo@ body (milestone 6f).
 -- All fields optional; unknown keys (e.g. @MaxWidth@) are accepted and
@@ -128,14 +143,25 @@ playbackInfoHandler captures req =
                     [ "/stream/", i, "/transcode?version=0"
                     , maybe "" (\b -> "&maxBitrate=" <> T.pack (show b)) cap ])
                   else Nothing
+              -- milestone 6i: resolve the requested audio/subtitle
+              -- stream indexes against the probed streams of the
+              -- primary source, mark the chosen ones IsDefault, and
+              -- echo the EFFECTIVE indexes back. Documented: stream
+              -- selection does not change PlayMethod here -- the
+              -- decision stays container/bitrate-driven (milestone
+              -- 6f); burning in a subtitle is out of scope for 6i.
+              (mAudio, mSub) = selectStreams (pirAudioIndex pir) (pirSubtitleIndex pir)
+                               (mediaStreams source0)
+              source0' = source0
+                { mediaStreams = markDefaultStreams mAudio mSub (mediaStreams source0) }
           pure (jsonResponse PlaybackResponse
-            { mediaSources        = source0 : others
+            { mediaSources        = source0' : others
             , playSessionId       = sid
             , playMethod          = method
             , maxStreamingBitrate = cap
             , transcodingUrl      = tUrl
-            , audioStreamIndex    = pirAudioIndex pir
-            , subtitleStreamIndex = pirSubtitleIndex pir
+            , audioStreamIndex    = msIndex <$> mAudio
+            , subtitleStreamIndex = msIndex <$> mSub
             })
 
 -- | Build the 'MediaSource' for an item from the probe result: the

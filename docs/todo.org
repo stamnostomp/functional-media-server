@@ -104,12 +104,12 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE =POST /Items/{id}/PlaybackInfo= (m6a/m6f): MediaSources (multi-version), MediaStreams via ffprobe, PlayMethod DirectPlay/Transcode, bitrate caps, TranscodingUrl
    - [X] POST /items/:id/PlaybackInfo -> MediaSources with ffprobe MediaStreams + DirectPlay/DirectStream/Transcoding + PlaySessionId; GET /items/:id/MediaStreams
    - [ ] per-client profile in the request body
-** TODO Client device profiles (=/DeviceProfiles=, playback profiles per codec/container)
+** DONE Client device profiles: =GET /DeviceProfiles= (static Jellyfin-shaped Default profile: DirectPlay Video/Audio/Subtitle + Transcoding mp4/h264/aac); PlaybackInfo honors AudioStreamIndex/SubtitleStreamIndex, echoes effective indexes, marks IsDefault on streams (m6i)
 ** DONE Transcoding via ffmpeg: /stream/:id/transcode (libx264/aac fMP4 stream), HLS, DASH; hwaccel + bitrate cap + slot limit
    - [X] =GET /stream/:id/transcode=: on-the-fly ffmpeg -> fragmented MP4, streamed
    - [X] HLS: =/videos/:id/main.m3u8= + =/videos/:id/:seg= (ffmpeg vod playlist, cached in stateDir/hls)
    - [X] DASH: =GET /videos/:id/dash.mpd= (ffmpeg -f dash, cached under stateDir/dash/<id>-<version>/) + =/videos/:id/dash/:seg= (sanitized, init video/mp4, chunks video/iso.segment, ?version= + maxBitrate cap)
-** TODO Audio/subtitle stream selection, codec profiles and levels
+** DONE Audio/subtitle stream selection in PlaybackInfo (m6i); codec profiles/levels partially via directPlay* lists; transcode stream-mapping params (audio/subtitle index on /transcode) not implemented
 ** DONE Hardware acceleration behind config: =FMS_HWACCEL= (none|vaapi|nvenc|qsv|videotoolbox; unknown -> none) adds -hwaccel + matching h264_* encoder in transcodeArgsWith, libx264 fallback
 ** DONE Bitrate limits: =FMS_MAX_BITRATE= server cap + per-user Policy MaxStreamingBitrate + client ?maxBitrate=/body MaxStreamingBitrate; effectiveBitrateCap = min of set caps; PlaybackInfo decides PlayMethod DirectPlay/Transcode + TranscodingUrl; /stream/:id/transcode?maxBitrate=N applies -b:v/-maxrate/-bufsize
 ** DONE Session reporting: /Sessions Playing/Progress/Ping/Stopped + GET /Sessions (m6c), socket + webhook broadcasts

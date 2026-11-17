@@ -135,7 +135,13 @@ import FMS.Modules.Playback.Probe
   , probeFile
   , transcoding
   )
-import FMS.Modules.Playback.Types (MediaStream(..))
+import FMS.Modules.Playback.Types
+  ( MediaStream(..)
+  , PlaybackResponse(..)
+  , defaultDeviceProfile
+  , markDefaultStreams
+  , selectStreams
+  )
 import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
 import FMS.Modules.Sessions.Types (PlaySession (..))
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
@@ -1133,9 +1139,9 @@ main = do
   check "containerFromExtension no extension -> unknown" "unknown" (T.unpack (containerFromExtension "/a/b/noext"))
 
   -- The decision matrix (default client profile).
-  let vcodec c = MediaStream 0 "Video"   c Nothing Nothing Nothing Nothing Nothing Nothing
-      acodec c = MediaStream 1 "Audio"   c Nothing Nothing Nothing Nothing Nothing Nothing
-      sub    c = MediaStream 2 "Subtitle" c Nothing Nothing Nothing Nothing Nothing Nothing
+  let vcodec c = MediaStream 0 "Video"   c Nothing Nothing Nothing Nothing Nothing Nothing False
+      acodec c = MediaStream 1 "Audio"   c Nothing Nothing Nothing Nothing Nothing Nothing False
+      sub    c = MediaStream 2 "Subtitle" c Nothing Nothing Nothing Nothing Nothing Nothing False
   check "directPlayable mp4 h264+aac is True"
     True (directPlayable "mp4" [vcodec "h264", acodec "aac"])
   check "directPlayable mp4 hevc+ac3 is False (ac3 not in the audio list)"
@@ -1160,6 +1166,64 @@ main = do
     True (directPlayable "webm" [vcodec "vp9", acodec "opus"])
   check "directPlayable mp4 with unknown video codec is False"
     False (directPlayable "mp4" [vcodec "wmv3", acodec "aac"])
+
+  -- Milestone 6i: device profile + audio/subtitle stream selection
+  -- (docs/todo.org section 6).
+  let ms6i i t c = MediaStream i t c Nothing Nothing Nothing Nothing Nothing Nothing False
+      streams6i =
+        [ ms6i 0 "Video" "h264"
+        , ms6i 1 "Audio" "aac"
+        , ms6i 2 "Audio" "ac3"
+        , ms6i 3 "Subtitle" "subrip"
+        , ms6i 4 "Subtitle" "ass"
+        ]
+      selIdx (mA, mS) = (msIndex <$> mA, msIndex <$> mS)
+      profRaw = LBS.toStrict (Aeson.encode defaultDeviceProfile)
+  check "defaultDeviceProfile JSON shape (Name + 3 profile arrays)"
+    [True, True, True, True]
+    (map (`BSC.isInfixOf` profRaw)
+      [ "\"Name\":\"Default\"", "\"DirectPlayProfiles\":", "\"TranscodingProfiles\":", "\"SubtitleProfiles\":[]" ])
+  check "defaultDeviceProfile video entry covers mp4/h264/aac and subtitle srt"
+    [True, True, True, True]
+    (map (`BSC.isInfixOf` profRaw)
+      [ "\"Container\":\"mp4,", "\"VideoCodec\":\"h264,", "\"AudioCodec\":\"aac,", "\"Container\":\"srt," ])
+  check "defaultDeviceProfile transcode entry is mp4/h264/aac"
+    [True, True, True]
+    (map (`BSC.isInfixOf` profRaw)
+      [ "\"TranscodingProfiles\":", "\"Container\":\"mp4\"", "\"VideoCodec\":\"h264\"" ])
+  check "selectStreams by index (audio 2, subtitle 4)"
+    (Just 2, Just 4) (selIdx (selectStreams (Just 2) (Just 4) streams6i))
+  check "selectStreams audio falls back to first audio when index unmatched"
+    (Just 1, Nothing) (selIdx (selectStreams (Just 99) Nothing streams6i))
+  check "selectStreams no request -> first audio, no subtitle"
+    (Just 1, Nothing) (selIdx (selectStreams Nothing Nothing streams6i))
+  check "selectStreams negative index means none (Jellyfin -1 convention)"
+    (Nothing, Nothing) (selIdx (selectStreams (Just (-1)) (Just (-1)) streams6i))
+  check "selectStreams subtitle has NO fallback when unmatched"
+    (Just 1, Nothing) (selIdx (selectStreams Nothing (Just 99) streams6i))
+  check "selectStreams empty stream list -> (Nothing, Nothing)"
+    (Nothing, Nothing) (selIdx (selectStreams (Just 1) (Just 3) []))
+  let (mA6i, mS6i) = selectStreams (Just 2) (Just 4) streams6i
+  check "markDefaultStreams marks chosen audio+subtitle, nothing else"
+    [False, False, True, False, True]
+    (map msIsDefault (markDefaultStreams mA6i mS6i streams6i))
+  check "markDefaultStreams with no selection marks nothing"
+    [False, False, False, False, False]
+    (map msIsDefault (markDefaultStreams Nothing Nothing streams6i))
+  check "MediaStream JSON carries IsDefault key"
+    True ("\"IsDefault\":false" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (ms6i 0 "Video" "h264")))
+  let pr6iRaw = LBS.toStrict (Aeson.encode
+        (PlaybackResponse [] "sess" "DirectPlay" Nothing Nothing (Just 1) (Just 3)))
+  check "PlaybackResponse echoes AudioStreamIndex/SubtitleStreamIndex when set"
+    [True, True, True]
+    (map (`BSC.isInfixOf` pr6iRaw)
+      [ "\"AudioStreamIndex\":1", "\"SubtitleStreamIndex\":3", "\"PlayMethod\":\"DirectPlay\"" ])
+  let pr6iRawN = LBS.toStrict (Aeson.encode
+        (PlaybackResponse [] "sess" "Transcode" (Just 8000000) (Just "/stream/1/transcode?version=0") Nothing Nothing))
+  check "PlaybackResponse omits stream indexes when Nothing, keeps bitrate/url"
+    [False, False, True, True]
+    (map (`BSC.isInfixOf` pr6iRawN)
+      [ "\"AudioStreamIndex\"", "\"SubtitleStreamIndex\"", "\"MaxStreamingBitrate\":8000000", "\"TranscodingUrl\":\"/stream/1/transcode?version=0\"" ])
 
   -- IO test of the real ffprobe round trip, guarded by ffprobe/ffmpeg
   -- availability: skip gracefully when they are not on PATH.
@@ -1628,7 +1692,7 @@ main = do
 
   -- Embedded subtitle streams (milestone 3f, docs/todo.org section 7).
   let mkStream i t c l =
-        MediaStream i t c l Nothing Nothing Nothing Nothing Nothing
+        MediaStream i t c l Nothing Nothing Nothing Nothing Nothing False
       probeStreams =
         [ mkStream 0 "Video" "h264" Nothing
         , mkStream 1 "Audio" "aac" (Just "eng")

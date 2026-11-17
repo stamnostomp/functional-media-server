@@ -22,6 +22,7 @@ import System.FilePath ((</>))
 import Text.Read (readMaybe)
 
 import FMS (version)
+import FMS.Core.Memory (currentRssOrZero, readMemSamples)
 import FMS.Core.Module (Module (..), Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, getState, putState)
 import FMS.Core.Query (paginate, queryParams)
@@ -59,6 +60,7 @@ systemModule = Module
       , post [Lit "Branding", Lit "Configuration"] brandingPostHandler
       , get  [Lit "System", Lit "Logs"] logsListHandler
       , get  [Lit "System", Lit "Logs", Lit "Log"] logsLogHandler
+      , get  [Lit "System", Lit "Memory"] memoryHandler   -- memory monitoring (todo section 15)
       , get  [Lit "healthz"] healthz
       ]
   }
@@ -297,6 +299,21 @@ logsLogHandler _captures req = do
   pure (jsonResponse (object
     [ "Items" .= page
     , "TotalRecordCount" .= total
+    ]))
+
+-- | @GET /System/Memory@ (admin) — 200 @{\"Samples\": [{\"Timestamp\": t,
+-- \"RssBytes\": b}, ...], \"CurrentRssBytes\": n}@ from the sampler ring
+-- buffer ("system.mem"); CurrentRssBytes is a live read (0 when RSS is
+-- unavailable, e.g. non-Linux). Samples are oldest-first.
+memoryHandler :: [(Text, Text)] -> Request -> AppM Response
+memoryHandler _captures req = do
+  requireAdmin req  -- milestone 16
+  (samples, _warn) <- readMemSamples
+  cur <- currentRssOrZero
+  pure (jsonResponse (object
+    [ "Samples" .= [ object ["Timestamp" .= t, "RssBytes" .= rss]
+                   | (t, rss) <- samples ]
+    , "CurrentRssBytes" .= cur
     ]))
 
 -- | @GET /healthz@ — liveness probe.

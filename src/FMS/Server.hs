@@ -29,6 +29,7 @@ import System.IO (hPutStrLn, stderr)
 import System.Process (CreateProcess (..), createProcess, proc)
 
 import FMS (name, version)
+import FMS.Core.Memory (startMemorySampler)
 import FMS.Core.Module (Module(..))
 import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
 import FMS.Core.Process (ffmpegSlotsKey)
@@ -117,6 +118,9 @@ runServer cfg = do
     putState "system.startedAt" startedAt
     putState "system.moduleNames" (map moduleName modules)
     putState "system.shutdown" shutdownMv
+    -- Memory monitoring (todo section 15): fork the RSS sampler daemon
+    -- (no-op when FMS_MEMORY_SAMPLE_SECS=0).
+    startMemorySampler
     -- Milestone 11b: the server log ring buffer (read by
     -- GET /System/Logs/Log under "system.logbuf"; also created lazily by
     -- the MonadLog instance).

@@ -102,6 +102,8 @@ runApp env (AppM m) =
 -- | Minimal logging capability for modules.
 class Monad m => MonadLog m where
   logInfo :: Text -> m ()
+  logWarn :: Text -> m ()
+  logWarn = logErr  -- default: treat warn as error (AppM overrides)
   logErr  :: Text -> m ()
 
 -- | Milestone 11b: the AppM logging instance appends every entry to the
@@ -109,6 +111,7 @@ class Monad m => MonadLog m where
 -- prints to stdout/stderr when 'logLevelAllows' (configLogLevel) passes.
 instance MonadLog AppM where
   logInfo t = logWith "info" t
+  logWarn t = logWith "warn" t
   logErr  t = logWith "error" t
 
 logWith :: Text -> Text -> AppM ()

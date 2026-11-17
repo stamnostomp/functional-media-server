@@ -39,6 +39,8 @@ data Config = Config
   , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
   , configScanWorkers :: !Int            -- ^ parallel worker threads for the per-file stat phase of a library scan (env FMS_SCAN_WORKERS, default 4, min 1 = sequential)
   , configMaxBodyBytes :: !Int           -- ^ max request body size in bytes; larger bodies get 413 (env FMS_MAX_BODY_BYTES, default 10485760 = 10 MiB; 0 = unlimited)
+  , configMemoryWarnMb :: !Int           -- ^ RSS warn threshold in MB (env FMS_MEMORY_WARN_MB, default 1024; memory monitoring)
+  , configMemorySampleSecs :: !Int       -- ^ RSS sampling interval in seconds (env FMS_MEMORY_SAMPLE_SECS, default 30; 0 = disabled)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -81,6 +83,10 @@ validateConfig cfg
       Left "scan workers must be >= 0"
   | configMaxBodyBytes cfg < 0 =
       Left "max body bytes must be >= 0"
+  | configMemoryWarnMb cfg < 0 =
+      Left "memory warn threshold must be >= 0 MB"
+  | configMemorySampleSecs cfg < 0 =
+      Left "memory sample seconds must be >= 0"
   | configMaxTranscodes cfg < 1 =
       Left "max transcodes must be >= 1"
   | configFfmpegTimeoutSec cfg < 1 =

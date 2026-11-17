@@ -41,6 +41,7 @@ import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
+import FMS.Core.Memory (parseProcStatusRss, trimRing)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
@@ -2580,6 +2581,7 @@ main = do
       , configTlsCert = Nothing, configTlsKey = Nothing
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
       , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+      , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2703,6 +2705,7 @@ main = do
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
         , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+        , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -3155,5 +3158,39 @@ main = do
     [ isLeft' (validateConfig (cfg1d { configMaxBodyBytes = -1 }))
     , isLeft' (validateConfig (cfg1d { configMaxBodyBytes = 0 }))
     , isLeft' (validateConfig (cfg1d { configMaxBodyBytes = 10485760 })) ]
+
+  -- Memory monitoring (todo section 15): /proc/self/status VmRSS parsing
+  -- (pure, platform-independent) + the ring-buffer trim.
+  let procOk = unlines
+        [ "Name:\tfms"
+        , "State:\tS (sleeping)"
+        , "VmPeak:\t  99999 kB"
+        , "VmRSS:\t  12345 kB"
+        , "VmHWM:\t  23456 kB"
+        , "Threads:\t7"
+        ]
+  check "parseProcStatusRss: VmRSS line -> kB * 1024 bytes"
+    [Just 12641280, Nothing, Nothing, Just 0]
+    [ parseProcStatusRss procOk
+    , parseProcStatusRss "Name:\tfms\nThreads:\t7\n"
+    , parseProcStatusRss "total garbage\nno colons here"
+    , parseProcStatusRss "VmRSS:\t0 kB\n" ]
+  check "parseProcStatusRss: multiple lines picks the VmRSS one, extra spaces tolerated"
+    [Just 1024, Just 2048]
+    [ parseProcStatusRss "VmSize:\t  10 kB\nVmRSS:   1   kB\nVmData:\t20 kB\n"
+    , parseProcStatusRss "VmRSS:\t\t2 kB\n" ]
+  check "trimRing: cap keeps the newest tail, oversized cap and empty unchanged"
+    (([3, 4, 5], [1, 2, 3], [], [7], []) :: ([Int], [Int], [Int], [Int], [Int]))
+    ( trimRing 3 [1, 2, 3, 4, 5]
+    , trimRing 10 [1, 2, 3]
+    , trimRing 5 []
+    , trimRing 1 [7]
+    , trimRing 0 [7] )
+  check "validateConfig: negative memory warn/sample rejected, zero sample allowed (disabled)"
+    [True, True, False, False]
+    [ isLeft' (validateConfig (cfg1d { configMemoryWarnMb = -1 }))
+    , isLeft' (validateConfig (cfg1d { configMemorySampleSecs = -5 }))
+    , isLeft' (validateConfig (cfg1d { configMemorySampleSecs = 0 }))
+    , isLeft' (validateConfig (cfg1d { configMemoryWarnMb = 0, configMemorySampleSecs = 30 })) ]
 
   putStrLn "All tests passed."

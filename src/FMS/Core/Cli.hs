@@ -83,6 +83,8 @@ cliUsage = unlines
   , "  (env FMS_RATE_LIMIT_AUTH  POST /AuthenticateByName requests/min per IP, default 10, 0 = off)"
   , "  (env FMS_SCAN_WORKERS     parallel scan stat workers, default 4, min 1 = sequential)"
   , "  (env FMS_MAX_BODY_BYTES   max request body bytes, 413 when exceeded; default 10485760, 0 = off)"
+  , "  (env FMS_MEMORY_WARN_MB   RSS warn threshold in MB; default 1024)"
+  , "  (env FMS_MEMORY_SAMPLE_SECS  RSS sample interval s; default 30, 0 = off)"
   , "  --log-level LEVEL       debug|info|warn|error (env FMS_LOG_LEVEL)"
   , "  --cors-origins LIST     comma-separated origins (env FMS_CORS_ORIGINS)"
   , "  --no-security-headers   disable X-Content-Type-Options etc. (env FMS_SECURITY_HEADERS)"

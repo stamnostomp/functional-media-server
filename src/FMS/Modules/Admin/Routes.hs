@@ -12,6 +12,7 @@ import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Network.Wai (Request, Response, strictRequestBody)
 
+import FMS.Core.Memory (currentRssOrZero)
 import FMS.Core.Module (Route, Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, getState)
 import FMS.Modules.Admin.Monad (MonadAdmin (..))
@@ -50,13 +51,18 @@ dashboardHandler _captures req = do
       serverJson = case toJSON sc of
         Object o -> Object (KeyMap.insert (Key.fromText "UptimeSeconds") (toJSON uptime) o)
         v        -> v
+  -- memory monitoring (todo section 15): current RSS (0 when unavailable)
+  rss <- currentRssOrZero
+  let serverJson' = case serverJson of
+        Object o -> Object (KeyMap.insert (Key.fromText "MemoryUsageBytes") (toJSON rss) o)
+        v        -> v
   items    <- listItems
   sessions <- listSessions
   devices  <- listDevices
   activity <- listActivity
   tasks    <- listTasks
   pure (jsonResponse (object
-    [ "Server"         .= serverJson
+    [ "Server"         .= serverJson'
     , "Library"        .= object
         [ "TotalItems" .= length items
         , "Counts"     .= countsByType items

@@ -5,28 +5,38 @@ module FMS.Modules.Transcode
   , effectiveBitrateCap
   , hwEncoderFor
   , normalizeHwAccel  -- re-exported from FMS.Core.Types.Config
+  , burnInFilter
+  , spliceBeforeF
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.QSemN (QSemN)
-import Control.Exception (bracket_)
+import Control.Exception (SomeException, bracket_, try)
+import Control.Monad (when)
 import Control.Monad.Except (throwError)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.ByteString.Builder (Builder, byteString)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.List (elemIndex)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseStream)
+import System.Directory (listDirectory)
+import System.FilePath (takeDirectory)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
-import FMS.Core.Monad (AppError(..), AppM, acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
+import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessStreamBSTimeout)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Types.Config (Config(..), normalizeHwAccel)
 import FMS.Core.Types.Policy (UserPolicy(..))
 import FMS.Core.Types.User (User(..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess)
+import FMS.Modules.Playback.Probe (probeFile)
+import FMS.Modules.Subtitles (embeddedSubtitleSources, pickSubtitles)
 
 -- | The transcode module (docs/roadmap.org milestone 3b, docs/todo.org
 -- section 6): @GET /stream/:id/transcode@ pipes the library item through
@@ -107,13 +117,89 @@ transcodeArgsWith hwaccel mBitrate path =
         [ "-b:v", show bps, "-maxrate", show bps, "-bufsize", show (2 * bps) ]
       _ -> []
 
+-- | Pure (Jellyfin-compat burn-in, todo): the ffmpeg @-vf@ value for
+-- subtitle burn-in. External sidecar: @subtitles=<path>@; embedded
+-- stream: @subtitles=<mediaPath>:si=<n>@. The path is escaped for the
+-- filter graph (backslash-escapes @\\ : ' , [ ]@); @mExtra@ chains an
+-- extra filter after a comma. 'Nothing' when the path is empty.
+burnInFilter :: FilePath -> Maybe Int -> Maybe Text -> Maybe Text
+burnInFilter path mSi mExtra
+  | null path = Nothing
+  | otherwise = Just (T.pack (base ++ siPart ++ extraPart))
+  where
+    base = "subtitles=" ++ concatMap escChar path
+    escChar c
+      | c `elem` ("\\:,'[]" :: String) = ['\\', c]
+      | otherwise                      = [c]
+    siPart    = maybe "" (\n -> ":si=" ++ show n) mSi
+    extraPart = maybe "" (\e -> "," ++ T.unpack e) mExtra
+
+-- | Pure: splice extra output-option args (e.g. @[\"-vf\", f]@) into an
+-- ffmpeg arg list right before the output-format marker @-f@ (hence
+-- before the output URL @pipe:1@); appended at the end when no @-f@ is
+-- present. Used to add the burn-in filter to 'transcodeArgsWith' output
+-- without changing that function.
+spliceBeforeF :: [String] -> [String] -> [String]
+spliceBeforeF extra args =
+  case break (== "-f") args of
+    (before, rest) -> before ++ extra ++ rest
+
+-- | Decide the burn-in @-vf@ filter for a transcode request (todo
+-- burn-in). Only when the query asks for it (@burnIn=1@/true, e.g. set by
+-- PlaybackInfo when the client requested SubtitleDeliveryMethod=BurnIn):
+-- an external sidecar subtitle next to the media file is preferred;
+-- otherwise the embedded subtitle stream index (query @subtitleIndex@ /
+-- @subtitleStreamIndex@, default 0) is used when the ffprobe probe shows
+-- such a stream. Best-effort fallback: when no usable subtitle target
+-- exists the filter is skipped with a warn log, and the transcode runs
+-- without a filter (never a 500).
+burnInFilterForQ :: FilePath -> [(Text, Text)] -> AppM (Maybe Text)
+burnInFilterForQ mediaPath qparams
+  | not burnIn = pure Nothing
+  | otherwise = do
+      entries <- liftIO (try (listDirectory (takeDirectory mediaPath))
+                        :: IO (Either SomeException [FilePath]))
+      let sidecar = case entries of
+            Right es -> case pickSubtitles mediaPath es of
+              (s : _) -> Just s
+              []      -> Nothing
+            Left _   -> Nothing
+      case sidecar of
+        Just s  -> pure (burnInFilter s Nothing Nothing)
+        Nothing -> do
+          probed <- liftIO (probeFile mediaPath)
+          -- the subtitles filter's :si= counts SUBTITLE streams only, so
+          -- map the requested (ffprobe-absolute) index to its position
+          -- in the subtitle-stream list; a small index is also accepted
+          -- as already relative
+          let embList = case probed of
+                Right (_c, streams) -> [ i | (i, _c, _l) <- embeddedSubtitleSources streams ]
+                Left _              -> []
+              idx = fromMaybe 0 mSubIdxQ
+              si = case elemIndex idx embList of
+                Just p  -> p
+                Nothing -> if idx >= 0 && idx < length embList then idx else -1
+          if si >= 0
+            then pure (burnInFilter mediaPath (Just si) Nothing)
+            else do
+              logWarn ("transcode: burnIn requested but no subtitle source for "
+                       <> T.pack mediaPath <> " -- transcoding without filter")
+              pure Nothing
+  where
+    burnIn = case lookup "burnin" qparams of
+      Just v  -> v == "1" || T.toLower v == "true"
+      Nothing -> False
+    mSubIdxQ = (lookup "subtitleindex" qparams <|> lookup "subtitlestreamindex" qparams)
+               >>= \v -> readMaybe (T.unpack v)
+
 -- | @GET /stream/:id/transcode@ — 404 for a missing item, otherwise 200
 -- @video/mp4@ streamed from ffmpeg's stdout. No Content-Length: the
 -- length is unknown until ffmpeg finishes, so warp uses chunked
 -- transfer encoding. Milestone 6f: the effective bitrate cap is the min
 -- of the requesting user's policy cap, the @?maxBitrate=@ query param
 -- (invalid values are ignored, documented) and the server-wide
--- FMS_MAX_BITRATE; the encoder/hwaccel comes from FMS_HWACCEL.
+-- FMS_MAX_BITRATE; the encoder/hwaccel comes from FMS_HWACCEL. Burn-in
+-- (todo): @?burnIn=1[&subtitleIndex=N]@ adds a @-vf subtitles=...@ filter.
 transcodeHandler :: [(Text, Text)] -> Request -> AppM Response
 transcodeHandler captures req =
   case lookup "id" captures of
@@ -136,10 +222,15 @@ transcodeHandler captures req =
               -- invalid maxBitrate is ignored (documented), not a 400
               clientCap = lookup "maxbitrate" qparams >>= \v -> readMaybe (T.unpack v)
               cap = effectiveBitrateCap policyCap clientCap (configMaxBitrate cfg)
-              -- milestone 15: ffmpeg's own read timeout for network inputs
+          -- burn-in (todo): ?burnIn=1 adds a -vf subtitles=... filter
+          mBurnFilter <- burnInFilterForQ path qparams
+          when (isJust mBurnFilter) $
+            logInfo ("transcode: burn-in filter " <> fromMaybe "" mBurnFilter)
+          let -- milestone 15: ffmpeg's own read timeout for network inputs
               -- (before -i), on top of the killer-thread guard below
               args = ffmpegTimeoutArgs (configFfmpegTimeoutSec cfg) path
-                     ++ transcodeArgsWith (configHwAccel cfg) cap path
+                     ++ spliceBeforeF (maybe [] (\f -> ["-vf", T.unpack f]) mBurnFilter)
+                          (transcodeArgsWith (configHwAccel cfg) cap path)
           -- milestone 15: take an ffmpeg slot (5s grace) or answer 503
           mRelease <- acquireFfmpegSlot
           pure (responseStream status200

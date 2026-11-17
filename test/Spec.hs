@@ -108,7 +108,7 @@ import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embe
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Dash (dashArgs, dashArgsWith, dashDirFor, isValidDashSegName)
-import FMS.Modules.Transcode (effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, transcodeArgs, transcodeArgsWith)
+import FMS.Modules.Transcode (burnInFilter, effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, spliceBeforeF, transcodeArgs, transcodeArgsWith)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
   , GetIdByPath(..)
@@ -155,6 +155,7 @@ import FMS.Modules.Playback.Types
   ( MediaStream(..)
   , PlaybackResponse(..)
   , defaultDeviceProfile
+  , deviceProfileAllows
   , markDefaultStreams
   , selectStreams
   )
@@ -3344,4 +3345,43 @@ main = do
     , isUnderDir "/st/images/1" "/st/images/1"
     , isUnderDir "/st/images/1" "/st/images/12/a.jpg"
     , isUnderDir "/st/images/1" "/st/images/1/sub/b.png" ]
+
+  -- Jellyfin-compat batch (todo): deviceProfileAllows (PlaybackInfo
+  -- DeviceProfile) + burn-in filter arg builders (transcode).
+  let dpRestrict = Aeson.object
+        [ "DirectPlayProfiles" Aeson..= [ Aeson.object
+            [ "Type" Aeson..= ("Video" :: T.Text), "Container" Aeson..= ("mp4" :: T.Text) ] ] ]
+      dpCodec = Aeson.object
+        [ "DirectPlayProfiles" Aeson..= [ Aeson.object
+            [ "Type" Aeson..= ("Video" :: T.Text), "Container" Aeson..= ("mp4,mkv" :: T.Text)
+            , "VideoCodec" Aeson..= ("h265" :: T.Text) ] ] ]
+  check "deviceProfileAllows: default profile allows mp4/h264 + mkv/hevc, rejects avi/xvid"
+    [True, True, False]
+    [ deviceProfileAllows defaultDeviceProfile "mp4" "h264"
+    , deviceProfileAllows defaultDeviceProfile "mkv" "hevc"
+    , deviceProfileAllows defaultDeviceProfile "avi" "xvid" ]
+  check "deviceProfileAllows: client profile narrows container (no codec list -> any codec)"
+    [True, False]
+    [ deviceProfileAllows dpRestrict "mp4" "h264"
+    , deviceProfileAllows dpRestrict "mkv" "h264" ]
+  check "deviceProfileAllows: codec list enforced; missing list falls back to default"
+    [False, True, True]
+    [ deviceProfileAllows dpCodec "mp4" "h264"
+    , deviceProfileAllows dpCodec "mkv" "h265"
+    , deviceProfileAllows (Aeson.object []) "mp4" "h264" ]
+  check "burnInFilter: external, embedded si, path escaping, empty path, extra chain"
+    [ Just "subtitles=/m/a.srt"
+    , Just "subtitles=/m/v.mkv:si=2"
+    , Just "subtitles=/m/it\\'s\\:weird.srt"
+    , Nothing
+    , Just "subtitles=/m/a.ass,scale=320:240" ]
+    [ burnInFilter "/m/a.srt" Nothing Nothing
+    , burnInFilter "/m/v.mkv" (Just 2) Nothing
+    , burnInFilter "/m/it's:weird.srt" Nothing Nothing
+    , burnInFilter "" Nothing Nothing
+    , burnInFilter "/m/a.ass" Nothing (Just "scale=320:240") ]
+  check "spliceBeforeF: inserts before -f, appends when no -f marker"
+    (["-i", "x", "-vf", "subtitles=/a", "-f", "mp4", "pipe:1"], ["-i", "x", "-vf", "f"])
+    ( spliceBeforeF ["-vf", "subtitles=/a"] ["-i", "x", "-f", "mp4", "pipe:1"]
+    , spliceBeforeF ["-vf", "f"] ["-i", "x"] )
   putStrLn "All tests passed."

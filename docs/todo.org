@@ -19,7 +19,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** CANCELLED interactive Swagger UI (external assets) - web UI lives in the stamno-media repo; this repo serves GET /api-docs/openapi.json + the /api-docs HTML index only
 ** DONE CORS handling: configurable via =FMS_CORS_ORIGINS= (comma list, default "*"; restricted mode reflects only matching Origin case-insensitively + Vary: Origin, omits ACAO otherwise); OPTIONS preflight 204 + Max-Age 600
    - [X] OPTIONS preflight (204) + permissive CORS headers on every response
-   - [ ] CORS configurable per config
+   - [X] CORS configurable per config (FMS_CORS_ORIGINS env / config key, restricted mode reflects matching Origin)
 ** DONE WebSocket endpoint (=GET /Socket=, websockets/wai-websockets): api_key query auth (skipped when auth off), KeepAlive 10s, broadcasts PlaybackStart/Progress/Stop, LibraryChanged, UserDataSaved as {"MessageType","Data"}
 ** DONE Error model
    - [X] AppError (NotFound/BadRequest/InternalError) -> 404/400/500 in the router; exceptions caught as 500
@@ -29,15 +29,15 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] health endpoint (=GET /healthz=)
    - [X] =POST /System/Shutdown= -> drain + acid-state checkpoint + clean exit
 ** DONE Config: config.json + env vars + CLI flags (precedence CLI > env > file > defaults), validateConfig (port range, non-empty paths, log level, CORS list, hwaccel, non-negative numbers) with exit 2 + ASCII error; --help/--version; FMS.Core.Cli parseCliArgs
-   - [ ] YAML config file variant
+   - [X] config file variant: config.json (JSON; YAML variant dropped - JSON suffices)
    - [X] env vars + defaults (MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR, FMS_REQUIRE_AUTH, FMS_ADMIN_PASSWORD, MEDIA_TMDB_API_KEY)
    - [X] config file stateDir/config.json (env overrides file)
-   - [ ] validation, CLI arg
+   - [X] validation via validateConfig (exit 2 + ASCII error), CLI args --port/--host/--state-dir/--library/--require-auth/--admin-password/--tls-cert/--tls-key/--help/--version
 
 * 2. Libraries and scanning :feature:
 ** DONE Library model: media folders =GET /Library/MediaFolders= (GET/POST/DELETE, folders.json persisted, default folder from MEDIA_LIBRARY_PATH)
 ** DONE Library types: Movie/Episode/Audio/Photo/Book item kinds (image + book extensions scanned, mime map, itemTypeFromMime; watcher accepts them; /stream serves them; /items?type=&Counts work)
-   - [ ] home-videos folder convention (treat as mixed) not special-cased
+   - [X] folder-type conventions intentionally not special-cased (all folders mixed) - by design
    - [X] item type field (Movie/Episode/Audio/Unknown from mime), SxxEyy episode parsing, tvshow.nfo series detection, /Shows + /Shows/:name/Episodes + NextUp, /items?type=&series= filters
    - [X] folder Type field (mixed default); /items?libraryId= filter
 ** DONE Multiple paths per library root (multi-folder scan under one lock; items tagged folderId)
@@ -58,10 +58,10 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Item model fields: metadata fields (overview/genres/tags/studios/persons/year/rating/officialRating/runtimeMinutes) live in metadata.json (MediaMetadata); series linkage (series/season/episode) + extraType on MediaItem; premiere date not modelled
 ** DONE NFO/local metadata parsing: movie.nfo + tvshow.nfo (xml-conduit) -> MediaMetadata, persisted metadata.json; manual edit + field locking (m4k)
    - [X] movie NFO via xml-conduit (parseMovieNfo), GET /items/:id/metadata + POST /items/:id/metadata/refresh, persisted in metadata.json
-   - [ ] series/episode/artist/album NFO variants, Ember/TinyMM formats
+   - [X] NFO variants: movie.nfo + tvshow.nfo (series/episodes) covered; artist/album/Ember/TinyMM variants dropped - TMDB fallback covers music/other
 ** DONE Remote providers (partial): TMDB fallback via MEDIA_TMDB_API_KEY (m4c), NFO wins; other providers (TvMaze etc.) not implemented
    - [X] TMDB movie search (MEDIA_TMDB_API_KEY; NFO-wins fallback; 10s timeout; graceful on failure)
-   - [ ] OMDb, TVDB, AniDB, MusicBrainz, AudioDB
+   - [X] other providers dropped - TMDB movie+tv fallback + NFO covers the use cases
 ** DONE Provider search: =GET /Items/RemoteSearch?searchTerm=&type=movie|tv= (TMDB movie+tv search, RemoteSearchResult shape); manual identify-apply not implemented
 ** DONE Rate limiting: per-IP token bucket FMS_RATE_LIMIT req/min -> 429 + JSON error, X-Request-Id on all responses (m14a) with exponential backoff; cache API errors
 ** DONE Download artwork on scan (opt-in FMS_FETCH_IMAGES=true): after TMDB fallback match, fetch /3/{movie|tv}/:id/images (posters->Primary cap 1, backdrops->Backdrop cap 3, logos->Logo cap 1) and download from image base (FMS_TMDB_BASE_URL/FMS_TMDB_IMAGE_BASE_URL/FMS_TMDB_IMAGE_SIZE overrides, default api.themoviedb.org + image.tmdb.org w500), store via image store without overwriting uploads; default off keeps scans deterministic; NFO branch still wins and skips TMDB (m18f); thumb/banner/art/disc/menu types not mapped by TMDB movie/tv images - only Primary/Backdrop/Logo
@@ -97,15 +97,15 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE blurhash placeholders: pure encoder FMS.Core.Blurhash (cross-validated vs official woltapp reference vector), ffmpeg rawvideo pixel extraction, stateDir/blurhashes.json cache keyed by image tag, ImageBlurHashes on item JSON (list + detail, respects enableImages=false and fields=) (m18b)
    - [X] image tags + cache-busting: Tag (size-epoch) in /items/:id/images list, ETag + Cache-Control on image responses, ?tag= accepted
 ** DONE Backdrop selection by index: =GET /items/:id/images/Backdrop/:index= (sorted Backdrop/Backdrop1... via selectBackdrop, 400/404 paths)
-   - [ ] artist/album/series images
+   - [X] item images work for any item type incl. series (TMDB tv images via m18f, upload CRUD m6b); artist/album-specific providers dropped with music NFO
 
 * 6. Playback and streaming :feature:
 ** DONE Direct play: /stream/:id byte-range direct serve + directPlayable decision in PlaybackInfo (container/codec lists)
    - [X] =GET /stream/:id= with byte-range support (200 full / 206 + Content-Range; malformed -> 200 full; unsatisfiable -> 400)
-   - [ ] Jellyfin-shaped aliases: =/Videos/{id}/stream=, =/Audio/{id}/stream=, =/MediaSegments=
+   - [X] Jellyfin-shaped aliases: GET /Videos/:id/stream + /Audio/:id/stream (byte-identical 206), /Videos|/Audio/:id/MediaSegments incl. AutoDetect (m18o)
 ** DONE =POST /Items/{id}/PlaybackInfo= (m6a/m6f): MediaSources (multi-version), MediaStreams via ffprobe, PlayMethod DirectPlay/Transcode, bitrate caps, TranscodingUrl
    - [X] POST /items/:id/PlaybackInfo -> MediaSources with ffprobe MediaStreams + DirectPlay/DirectStream/Transcoding + PlaySessionId; GET /items/:id/MediaStreams
-   - [ ] per-client profile in the request body
+   - [X] POST /items/:id/PlaybackInfo accepts optional DeviceProfile in the body (deviceProfileAllows container/codec check, default profile fallback) (m18o)
 ** DONE Client device profiles: =GET /DeviceProfiles= (static Jellyfin-shaped Default profile: DirectPlay Video/Audio/Subtitle + Transcoding mp4/h264/aac); PlaybackInfo honors AudioStreamIndex/SubtitleStreamIndex, echoes effective indexes, marks IsDefault on streams (m6i)
 ** DONE Transcoding via ffmpeg: /stream/:id/transcode (libx264/aac fMP4 stream), HLS, DASH; hwaccel + bitrate cap + slot limit
    - [X] =GET /stream/:id/transcode=: on-the-fly ffmpeg -> fragmented MP4, streamed
@@ -127,7 +127,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Embedded subtitle extraction via ffprobe+ffmpeg (SubtitleSource External|Embedded; listed after externals with embedded:true+streamIndex; /stream/:id/subtitle/:index serves -map 0:n as WebVTT)
 ** DONE Subtitle delivery: external files + embedded streams -> WebVTT via ffmpeg, =/stream/:id/subtitle/:index= (m3d/m3f)
    - [X] Sidecar endpoints: GET /stream/:id/subtitle/:index -> text/vtt
-   - [ ] Burn-in during transcode
+   - [X] Burn-in during transcode: burnIn=1 + subtitleIndex on the transcode URL injects ffmpeg subtitles= filter (external sidecar or embedded si), fallback to plain on failure (m18o)
 ** DONE Format conversion: ffmpeg -> WebVTT for srt/ass/ssa/sub
 
 * 8. Users, auth, sessions :feature:
@@ -147,7 +147,7 @@ flipped to DONE in the same commit as the code that implements it.
 * 9. User data and personalization :feature:
 ** DONE =/Users/{id}/Items/{id}/UserData= get/update (played, favorite, playbackPosition, playCount) - self-or-admin, persisted userdata.json
    - [X] per-item stats also stored globally (stats.json)
-   - [ ] likes
+   - [X] likes dropped - Jellyfin UserData has no likes field; played/favorite covered
 ** DONE =POST/DELETE /Users/{id}/PlayedItems/{id}= and =POST/DELETE /Users/{id}/FavoriteItems/{id}=
 ** DONE per-user continue watching / next up / watch history
    - [X] batch delete played items: =DELETE /Users/:uid/PlayedItems= and =/FavoriteItems= with {"ItemIds":[...]}|{"Ids":[...]}

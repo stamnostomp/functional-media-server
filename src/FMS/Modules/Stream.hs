@@ -34,7 +34,15 @@ streamModule :: Module
 streamModule = Module
   { moduleName   = "stream"
   , moduleInit   = pure ()
-  , moduleRoutes = [get [Lit "stream", Capture "id"] streamHandler]
+  , moduleRoutes =
+      [ get [Lit "stream", Capture "id"] streamHandler
+        -- Jellyfin-compat aliases (todo): /Videos/:id/stream and
+        -- /Audio/:id/stream serve the same bytes (incl. Range handling).
+        -- Registered here (streamModule precedes hlsModule) so the
+        -- literal "stream" wins over HLS's [videos, :id, Capture seg].
+      , get [Lit "Videos", Capture "id", Lit "stream"] streamHandler
+      , get [Lit "Audio", Capture "id", Lit "stream"] streamHandler
+      ]
   }
 
 -- | @GET /stream/:id@ — the whole file (200), or one byte range (206).

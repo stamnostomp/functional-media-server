@@ -5,11 +5,13 @@ module FMS.Modules.Playback.Routes
   , deviceProfilesHandler
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (forM)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Aeson (FromJSON(..), Value, eitherDecode, object, withObject, (.:?), (.=))
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.Wai (Request, Response, queryString, strictRequestBody)
@@ -39,6 +41,7 @@ import FMS.Modules.Playback.Types
   , MediaStream(..)
   , PlaybackResponse(..)
   , defaultDeviceProfile
+  , deviceProfileAllows
   , markDefaultStreams
   , selectStreams
   )
@@ -68,11 +71,15 @@ deviceProfilesHandler _captures _req =
 
 -- | The optional @POST /items/:id/PlaybackInfo@ body (milestone 6f).
 -- All fields optional; unknown keys (e.g. @MaxWidth@) are accepted and
--- ignored by aeson, and not modelled here.
+-- ignored by aeson, and not modelled here. Jellyfin-compat (todo): the
+-- client-sent @DeviceProfile@ object and @SubtitleDeliveryMethod@ are
+-- accepted too.
 data PlaybackInfoRequest = PlaybackInfoRequest
   { pirMaxBitrate    :: Maybe Int
   , pirAudioIndex    :: Maybe Int
   , pirSubtitleIndex :: Maybe Int
+  , pirDeviceProfile :: Maybe Value
+  , pirSubtitleDeliveryMethod :: Maybe Text
   }
 
 instance FromJSON PlaybackInfoRequest where
@@ -81,9 +88,11 @@ instance FromJSON PlaybackInfoRequest where
       <$> o .:? "MaxStreamingBitrate"
       <*> o .:? "AudioStreamIndex"
       <*> o .:? "SubtitleStreamIndex"
+      <*> o .:? "DeviceProfile"
+      <*> o .:? "SubtitleDeliveryMethod"
 
 emptyPlaybackInfoRequest :: PlaybackInfoRequest
-emptyPlaybackInfoRequest = PlaybackInfoRequest Nothing Nothing Nothing
+emptyPlaybackInfoRequest = PlaybackInfoRequest Nothing Nothing Nothing Nothing Nothing
 
 -- | @POST /items/:id/PlaybackInfo@ — probe the item's file with ffprobe
 -- and answer with @{MediaSources: [...], PlaySessionId: "..."}@.
@@ -136,12 +145,31 @@ playbackInfoHandler captures req =
                 Nothing -> queryCap
               cap = effectiveBitrateCap policyCap clientCap (configMaxBitrate cfg)
           srcBitrate <- liftIO (probeBitrate (itemPath item))
-          let method = decidePlayMethod (supportsDirectPlay source0) srcBitrate cap
+          -- Jellyfin-compat (todo): a client-sent DeviceProfile narrows the
+          -- DirectPlay decision (container+codec check against its
+          -- DirectPlayProfiles; absent profile -> built-in default logic,
+          -- i.e. unchanged behavior).
+          let codecOf = listToMaybe [ msCodec s | s <- mediaStreams source0
+                                        , msType s == "Video" ]
+                        <|> listToMaybe [ msCodec s | s <- mediaStreams source0
+                                        , msType s == "Audio" ]
+              dpAllowed = case pirDeviceProfile pir of
+                Nothing -> True
+                Just p  -> deviceProfileAllows p (container source0) (fromMaybe "" codecOf)
+              method = decidePlayMethod (supportsDirectPlay source0 && dpAllowed) srcBitrate cap
               tUrl =
                 if method == "Transcode"
                   then Just (T.concat
                     [ "/stream/", i, "/transcode?version=0"
-                    , maybe "" (\b -> "&maxBitrate=" <> T.pack (show b)) cap ])
+                    , maybe "" (\b -> "&maxBitrate=" <> T.pack (show b)) cap
+                    -- burn-in requested via PlaybackInfo -> ask the
+                    -- transcode endpoint to burn the selected subtitle in
+                    , if pirSubtitleDeliveryMethod pir == Just "BurnIn"
+                        && isJust (pirSubtitleIndex pir)
+                        && isJust mSub
+                      then "&burnIn=1&subtitleIndex=" <> T.pack (show (fromMaybe 0 (pirSubtitleIndex pir)))
+                      else ""
+                    ])
                   else Nothing
               -- milestone 6i: resolve the requested audio/subtitle
               -- stream indexes against the probed streams of the

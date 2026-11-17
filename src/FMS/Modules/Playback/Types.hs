@@ -3,14 +3,19 @@ module FMS.Modules.Playback.Types
   , MediaSource(..)
   , PlaybackResponse(..)
   , defaultDeviceProfile
+  , deviceProfileAllows
   , selectStreams
   , markDefaultStreams
   ) where
 
-import Data.Aeson (ToJSON(..), Value, object, (.=))
+import Data.Aeson (ToJSON(..), Value (..), object, (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Foldable as F
 import Data.List (find)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | One ffprobe stream of a media file, in the Jellyfin 'MediaStream'
 -- shape (docs/todo.org section 6, milestone 6a). 'msType' is one of
@@ -140,6 +145,44 @@ defaultDeviceProfile = object
           , "AudioCodec" .= ("aac" :: Text)
           ]
       ]
+
+-- | Pure (Jellyfin-compat, todo): does a client-sent @DeviceProfile@
+-- allow direct play of @container@ with @codec@? Checks the profile's
+-- @DirectPlayProfiles@ entries: the container must appear in an entry's
+-- comma-separated @Container@ list (case-insensitive), and when the
+-- entry carries @VideoCodec@/@AudioCodec@ lists the codec must appear
+-- in one of them (an empty codec means "any"). When the profile has no
+-- usable @DirectPlayProfiles@ list, the built-in 'defaultDeviceProfile'
+-- is used instead, so behavior without a client profile is unchanged.
+deviceProfileAllows :: Value -> Text -> Text -> Bool
+deviceProfileAllows profile cont codec = any entryAllows entries
+  where
+    entries = case profile of
+      Object o -> case KeyMap.lookup (Key.fromText "DirectPlayProfiles") o of
+        Just (Array a) | not (F.null a) -> F.toList a
+        _                                -> defaultDirectPlayEntries
+      _ -> defaultDirectPlayEntries
+    defaultDirectPlayEntries = case defaultDeviceProfile of
+      Object o -> case KeyMap.lookup (Key.fromText "DirectPlayProfiles") o of
+        Just (Array a) -> F.toList a
+        _              -> []
+      _ -> []
+    entryAllows (Object e) =
+      case lookupString e "Container" of
+        Just cs | contLower `elem` csvLower cs ->
+          case (lookupString e "VideoCodec", lookupString e "AudioCodec") of
+            (Nothing, Nothing) -> True
+            (mv, ma) -> T.null codec
+                       || codecLower `elem` csvLower (fromMaybe "" mv)
+                       || codecLower `elem` csvLower (fromMaybe "" ma)
+        _ -> False
+    entryAllows _ = False
+    lookupString e k = case KeyMap.lookup (Key.fromText k) e of
+      Just (String s) -> Just s
+      _               -> Nothing
+    contLower = T.toLower cont
+    codecLower     = T.toLower codec
+    csvLower t = map T.toLower (filter (not . T.null) (map T.strip (T.splitOn "," t)))
 
 -- | Pick the effective audio and subtitle streams for a PlaybackInfo
 -- request (milestone 6i). Audio: matched by 'msIndex' when an index is

@@ -39,6 +39,19 @@ segmentsRoutes =
   , post   [Lit "items", Capture "id", Lit "MediaSegments"] createSegmentHandler
   , post   [Lit "items", Capture "id", Lit "MediaSegments", Lit "AutoDetect"] autoDetectHandler
   , delete [Lit "items", Capture "id", Lit "MediaSegments", Capture "segId"] deleteSegmentHandler
+    -- Jellyfin-compat aliases (todo): /Videos/:id/MediaSegments and
+    -- /Audio/:id/MediaSegments are the same route group (the handlers
+    -- only read the "id"/"segId" captures). segmentsModule is ordered
+    -- BEFORE hlsModule in FMS.Server so these literals win over HLS's
+    -- [videos, :id, Capture seg].
+  , get    [Lit "Videos", Capture "id", Lit "MediaSegments"] listSegmentsHandler
+  , post   [Lit "Videos", Capture "id", Lit "MediaSegments"] createSegmentHandler
+  , post   [Lit "Videos", Capture "id", Lit "MediaSegments", Lit "AutoDetect"] autoDetectHandler
+  , delete [Lit "Videos", Capture "id", Lit "MediaSegments", Capture "segId"] deleteSegmentHandler
+  , get    [Lit "Audio", Capture "id", Lit "MediaSegments"] listSegmentsHandler
+  , post   [Lit "Audio", Capture "id", Lit "MediaSegments"] createSegmentHandler
+  , post   [Lit "Audio", Capture "id", Lit "MediaSegments", Lit "AutoDetect"] autoDetectHandler
+  , delete [Lit "Audio", Capture "id", Lit "MediaSegments", Capture "segId"] deleteSegmentHandler
   ]
 
 -- | Body of @POST /items/:id/MediaSegments@:

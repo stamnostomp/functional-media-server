@@ -72,13 +72,17 @@ modules :: [Module]
 modules =
   [ systemModule, authModule, libraryModule, playbackModule, streamModule
   , transcodeModule
+  -- segmentsModule BEFORE dash/hlsModule: the Jellyfin-compat alias
+  -- [videos, :id, Lit "MediaSegments"] must not be captured by the HLS
+  -- [videos, id, Capture seg] route.
+  , segmentsModule
   -- dashModule BEFORE hlsModule: videos/:id/dash.mpd must not be captured
   -- by the HLS [videos, id, Capture seg] route (milestone 3g).
   , dashModule
   , hlsModule, subtitlesModule, chaptersModule, thumbsModule, imagesModule
   , statsModule
   , metadataModule, adminModule, userDataModule, sessionsModule, playlistsModule
-  , collectionsModule, segmentsModule, socketModule
+  , collectionsModule, socketModule
   , devicesModule
   , pluginsModule
   , webhooksModule

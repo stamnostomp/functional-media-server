@@ -3,8 +3,10 @@ module FMS.Modules.Stats.Routes
   , continueWatchingHandler
   , popularHandler
   , newHandler
+  , ProgressRequest (..)
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), decode, object, withObject, (.:), (.=))
@@ -17,8 +19,8 @@ import Network.Wai (Request, Response, strictRequestBody)
 
 import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM)
-import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Core.Types.Progress (ItemStats (..))
+import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
+import FMS.Core.Types.Progress (simpleProgressEntry)
 import FMS.Modules.Library (MonadLibrary (..))
 import FMS.Modules.Stats.Monad (MonadStats (..), continueWatching, popular)
 
@@ -32,9 +34,9 @@ data ProgressRequest = ProgressRequest
 instance FromJSON ProgressRequest where
   parseJSON = withObject "ProgressRequest" $ \o ->
     ProgressRequest
-      <$> o .: "itemId"
-      <*> o .: "currentTime"
-      <*> o .: "duration"
+      <$> (o .: "id" <|> o .: "itemId" <|> o .: "ItemId")          -- index.html sends "id"
+      <*> (o .: "currentTime" <|> o .: "CurrentTime")
+      <*> (o .: "duration" <|> o .: "Duration")
 
 -- | @POST /progress@ with @{\"itemId\": \"...\", \"currentTime\": 12.5,
 -- \"duration\": 100.0}@ — records the playback position for the item.
@@ -53,9 +55,11 @@ progressHandler req = do
           recordProgress (prItemId pr) (prCurrentTime pr) (prDuration pr)
           pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
--- | @GET /continuewatching@ — items with unfinished progress, joined with
--- their library titles: @[{\"Id\", \"Name\", \"Progress\": {...}}, ...]@,
--- most recently reported first.
+-- | @GET /continuewatching@ — items with unfinished progress, joined
+-- with their library entries, most recently reported first. LEGACY
+-- simple lowercase shape for the stamno-media UI:
+-- @[{\"id\",\"title\",\"size\",\"mime\",\"progress\": 0..100}, ...]@
+-- ('simpleProgressEntry').
 continueWatchingHandler :: AppM Response
 continueWatchingHandler = do
   allStats <- getAllStats
@@ -65,42 +69,27 @@ continueWatchingHandler = do
         | (ident, p) <- continueWatching allStats
         , Just item <- [HM.lookup ident byId]
         ]
-  pure (jsonResponse
-    [ object
-        [ "Id"       .= itemId item       -- milestone 17b/17c: PascalCase
-        , "Name"     .= itemTitle item
-        , "Progress" .= p
-        ]
-    | (item, p) <- entries
-    ])
+  pure (jsonResponse [ simpleProgressEntry item p | (item, p) <- entries ])
 
--- | @GET /popular@ — items played at least once, most-played first:
--- @[{\"Id\", \"Name\", \"PlayCount\", \"LastPlayedAt\"}, ...]@ (top 20).
+-- | @GET /popular@ — items played at least once, most-played first
+-- (top 20), in the legacy simple lowercase shape ('simpleItemJson').
 popularHandler :: AppM Response
 popularHandler = do
   allStats <- getAllStats
   byId <- indexById
   let ranked =
-        [ (item, s)
-        | (ident, s) <- take 20 (popular allStats)
+        [ item
+        | (ident, _s) <- take 20 (popular allStats)
         , Just item <- [HM.lookup ident byId]
         ]
-  pure (jsonResponse
-    [ object
-        [ "Id"           .= itemId item
-        , "Name"         .= itemTitle item
-        , "PlayCount"    .= statsPlayCount s
-        , "LastPlayedAt" .= statsLastPlayedAt s
-        ]
-    | (item, s) <- ranked
-    ])
+  pure (jsonResponse (map simpleItemJson ranked))
 
 -- | @GET /new@ — the most recently added library items (by file mtime),
--- newest first, top 20.
+-- newest first, top 20, in the legacy simple lowercase shape.
 newHandler :: AppM Response
 newHandler = do
   items <- listItems
-  pure (jsonResponse (take 20 (sortOn (Down . itemAddedAt) items)))
+  pure (jsonResponse (map simpleItemJson (take 20 (sortOn (Down . itemAddedAt) items))))
 
 -- | The library items keyed by id, for joining stats against titles.
 indexById :: MonadLibrary m => m (HashMap Text MediaItem)

@@ -39,7 +39,7 @@ import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
-import FMS.Core.Types.MediaItem (MediaItem (..))
+import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
@@ -79,11 +79,14 @@ libraryRoutes =
 
 -- | @GET \/library@ — JSON array of all items visible to the requester
 -- (milestone 5d: a valid non-admin token filters to the user's allowed
--- folders; anonymous/open mode sees everything).
+-- folders; anonymous/open mode sees everything). LEGACY simple shape for
+-- the stamno-media Elm UI: each item is @{\"id\",\"title\",\"size\",\"mime\"}
+-- lowercase ('simpleItemJson'); the Jellyfin-shaped @/items@ is separate.
 listItemsHandler :: [(Text, Text)] -> Request -> AppM Response
 listItemsHandler _captures req = do
   mUser <- currentUserFromReq req
-  jsonResponse <$> (listItems >>= visibleItems mUser)
+  items <- listItems >>= visibleItems mUser
+  pure (jsonResponse (map simpleItemJson items))
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
 -- query params @search@/@searchTerm@, @sortBy@, @sortOrder@, @startIndex@,

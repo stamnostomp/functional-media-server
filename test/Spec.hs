@@ -13,7 +13,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, sort)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import qualified Data.Set as Set
 import Data.SafeCopy (safeGet, safePut)
 import Data.Serialize (runGet, runPut)
@@ -49,9 +49,9 @@ import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
 import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
-import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3)
+import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3, simpleItemJson)
 import FMS.Core.Types.Policy (AccessSchedule (..), UserPolicy (..), emptyUserPolicy, itemAllowedByPolicy, ratingAllowed, ratingRank, scheduleAllowsNow, tagsAllowed)
-import FMS.Core.Types.Progress (ItemStats(..), Progress(..))
+import FMS.Core.Types.Progress (ItemStats(..), Progress(..), progressPercent, simpleProgressEntry)
 import FMS.Core.Types.ServerConfig
   ( ServerConfig (..)
   , ServerConfigPatch (..)
@@ -89,6 +89,7 @@ import FMS.Modules.Library.Scan
   , walkWithLoops
   )
 import FMS.Modules.Stats.Monad (applyPlay, applyProgress, continueWatching, popular)
+import FMS.Modules.Stats.Routes (ProgressRequest (..))
 import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
@@ -3256,4 +3257,48 @@ main = do
     , isLeft' (validateConfig (cfg1d { configMemorySampleSecs = 0 }))
     , isLeft' (validateConfig (cfg1d { configMemoryWarnMb = 0, configMemorySampleSecs = 30 })) ]
 
+
+  -- Legacy simple lowercase JSON for the stamno-media Elm UI (Api.elm):
+  -- simpleItemJson + progressPercent + simpleProgressEntry + the
+  -- /progress body accepting id/itemId/ItemId and PascalCase fallbacks.
+  let tUi = read "2026-01-01 00:00:00 UTC" :: UTCTime
+      uiItem = MediaItem
+        { itemId = "7", itemTitle = "Movie", itemPath = "/lib/movie.mp4", itemSize = 12345
+        , itemMime = "video/mp4", itemAddedAt = tUi, itemFolder = "1", itemType = "Movie"
+        , itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = []
+        }
+      uiEnc = LBS.toStrict (Aeson.encode (simpleItemJson uiItem))
+      uiKeys = case simpleItemJson uiItem of
+        Aeson.Object o -> sort (map Key.toText (KeyMap.keys o))
+        _ -> []
+  check "simpleItemJson: exactly the lowercase keys id/title/size/mime"
+    ["id", "mime", "size", "title"] uiKeys
+  check "simpleItemJson: values for id/title/size/mime"
+    [True, True, True, True]
+    [ "\"id\":\"7\"" `BSC.isInfixOf` uiEnc
+    , "\"title\":\"Movie\"" `BSC.isInfixOf` uiEnc
+    , "\"size\":12345" `BSC.isInfixOf` uiEnc
+    , "\"mime\":\"video/mp4\"" `BSC.isInfixOf` uiEnc ]
+  check "progressPercent: 0/negative duration -> 0, half -> 50, over -> 100, neg cur -> 0"
+    [0, 0, 50, 100, 0, 25, 100]
+    [ progressPercent 30 0, progressPercent 5 (-3), progressPercent 50 100
+    , progressPercent 130 100, progressPercent (-5) 100, progressPercent 25 100
+    , progressPercent 100 100 ]
+  check "simpleProgressEntry: simple keys plus lowercase progress percent"
+    [True, True, True]
+    [ "\"id\":\"7\"" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (simpleProgressEntry uiItem (Progress 30 100 tUi)))
+    , "\"mime\":\"video/mp4\"" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (simpleProgressEntry uiItem (Progress 30 100 tUi)))
+    , "\"progress\":30" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (simpleProgressEntry uiItem (Progress 30 100 tUi))) ]
+  check "ProgressRequest body: id / itemId / ItemId + PascalCase fallbacks"
+    [Just ("1", 30, 100), Just ("2", 1.5, 10), Just ("3", 0, 5)]
+    [ ((\pr -> (prItemId pr, prCurrentTime pr, prDuration pr)) <$> d)
+      | d <- [ Aeson.decode "{\"id\":\"1\",\"currentTime\":30,\"duration\":100}" :: Maybe ProgressRequest
+             , Aeson.decode "{\"itemId\":\"2\",\"currentTime\":1.5,\"duration\":10}" :: Maybe ProgressRequest
+             , Aeson.decode "{\"ItemId\":\"3\",\"CurrentTime\":0,\"Duration\":5}" :: Maybe ProgressRequest
+             ] ]
+  check "ProgressRequest body: malformed or missing id -> Nothing"
+    [True, True]
+    [ isNothing (Aeson.decode "{oops" :: Maybe ProgressRequest)
+    , isNothing (Aeson.decode "{\"currentTime\":1,\"duration\":2}" :: Maybe ProgressRequest) ]
   putStrLn "All tests passed."

@@ -12,9 +12,10 @@ module FMS.Core.Types.MediaItem
   , migrateMediaItemV2
   , migrateMediaItemV3
   , itemTypeFromMime
+  , simpleItemJson
   ) where
 
-import Data.Aeson (ToJSON(..), object, (.=))
+import Data.Aeson (ToJSON(..), Value, object, (.=))
 import Data.SafeCopy (Migrate (..), base, deriveSafeCopy, extension)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -244,3 +245,16 @@ instance ToJSON MediaItem where
     , "ExtraType"    .= itemExtraType i
     , "Versions"     .= itemVersions i   -- milestone 4j
     ]
+
+-- | The legacy SIMPLE lowercase item shape decoded by the stamno-media
+-- Elm UI (@Api.elm@ itemDecoder): exactly @id@/@title@/@size@/@mime@.
+-- Used ONLY by the four legacy endpoints (@GET /library@,
+-- @/continuewatching@, @/popular@, @/new@); the Jellyfin-shaped
+-- endpoints keep the PascalCase 'ToJSON' above.
+simpleItemJson :: MediaItem -> Value
+simpleItemJson i = object
+  [ "id"    .= itemId i
+  , "title" .= itemTitle i
+  , "size"  .= itemSize i
+  , "mime"  .= itemMime i
+  ]

@@ -1,10 +1,16 @@
 module FMS.Core.Types.Progress
   ( Progress (..)
   , ItemStats (..)
+  , progressPercent
+  , simpleProgressEntry
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:), (.:?), (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Time (UTCTime)
+
+import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
 
 -- | Playback position last reported by a client for one item
 -- (docs/modules.org: =Progress= / =ItemStats= are the core stats types).
@@ -64,3 +70,20 @@ instance FromJSON ItemStats where
       <$> o .: "playCount"
       <*> o .: "lastPlayedAt"
       <*> o .: "progress"
+
+-- | Pure: watch percentage 0..100 from a reported position —
+-- @floor (currentTime / duration * 100)@ clamped to [0, 100]; 0 when the
+-- duration is unknown (<= 0). Used by the legacy /continuewatching
+-- endpoint for the stamno-media UI's @progress@ int field.
+progressPercent :: Double -> Double -> Int
+progressPercent cur dur
+  | dur <= 0  = 0
+  | otherwise = max 0 (min 100 (floor (cur / dur * 100) :: Int))
+
+-- | The legacy simple continue-watching entry for the stamno-media UI:
+-- 'simpleItemJson' plus a lowercase @progress@ percent int.
+simpleProgressEntry :: MediaItem -> Progress -> Value
+simpleProgressEntry item p = case simpleItemJson item of
+  Object o -> Object (KeyMap.insert (Key.fromText "progress")
+                     (toJSON (progressPercent (progressCurrentTime p) (progressDuration p))) o)
+  v        -> v

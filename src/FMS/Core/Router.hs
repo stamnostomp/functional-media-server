@@ -9,6 +9,7 @@ module FMS.Core.Router
   , parseCorsOrigins
   , allowedOriginsHeader
   , securityHeaders
+  , normalizeSegments
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
@@ -84,6 +85,12 @@ buildApplication env modules req respond0 = do
         then respond (errorResponse reqId (TooManyRequests "rate limited"))
         else do
           let routes = concatMap moduleRoutes modules
+              -- milestone 17a: jellyfin-web calls PascalCase paths
+              -- (/Items, /Videos/...); literal segments now compare
+              -- case-insensitively in 'matchSegments' and 'isOpenPath'
+              -- lowercases internally, so raw segments are passed through
+              -- (captures keep their original case; no two routes differ
+              -- only by case -- verified by route audit)
               segs   = pathInfo req
               dispatch =
                 case firstMatch routes (requestMethod req) segs of
@@ -189,9 +196,15 @@ openPaths =
   ]
 
 -- | Is this concrete request path in the open list? Pure, exported for
--- tests.
+-- tests. Milestone 17a: compared case-insensitively (see 'normalizeSegments').
 isOpenPath :: [Text] -> Bool
-isOpenPath segs = segs `elem` openPaths
+isOpenPath segs = normalizeSegments segs `elem` map normalizeSegments openPaths
+
+-- | Milestone 17a: case-fold path segments (jellyfin-web uses PascalCase
+-- paths like /Items while the routes are registered lowercase).
+-- Pure, exported for tests.
+normalizeSegments :: [Text] -> [Text]
+normalizeSegments = map T.toLower
 
 -- | Extract a credential token from request headers:
 -- @X-Emby-Token: \<t\>@, or @Authorization: MediaBrowser Token=\"\<t\>\"@,
@@ -285,11 +298,12 @@ firstMatch routes meth segs =
     ]
 
 -- | Match a route pattern against concrete path segments, collecting the
--- captures. Literal segments must compare equal; capture segments bind.
+-- captures. Literal segments compare case-insensitively (milestone 17a);
+-- capture segments bind the ORIGINAL segment (ids keep their case).
 matchSegments :: [Segment] -> [Text] -> Maybe [(Text, Text)]
 matchSegments [] [] = Just []
 matchSegments (Lit l : rest) (s : segs)
-  | l == s = matchSegments rest segs
+  | T.toLower l == T.toLower s = matchSegments rest segs
 matchSegments (Capture name : rest) (s : segs) =
   ((name, s) :) <$> matchSegments rest segs
 matchSegments _ _ = Nothing

@@ -1,7 +1,9 @@
 module FMS.Core.Query
   ( queryParams
+  , normalizeQueryParams
   , searchItems
   , filterByFolder
+  , filterByParent
   , filterByType
   , filterBySeries
   , filterByIncludeTypes
@@ -48,10 +50,18 @@ import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 -- 'Network.Wai.queryString') into @[(Text, Text)]@: percent-decode with
 -- @+@ read as space (query-string convention, hence 'urlDecode' @True@),
 -- drop parameters that have no value (@Nothing@), then decode UTF-8.
+-- Milestone 17a: parameter NAMES are case-folded to lowercase (values
+-- untouched) via 'normalizeQueryParams', so jellyfin-web's PascalCase
+-- @?Filters=@ / @?IncludeItemTypes=@ work like the lowercase forms.
 queryParams :: [(ByteString, Maybe ByteString)] -> [(Text, Text)]
-queryParams qs = [ (dec k, dec v) | (k, Just v) <- qs ]
+queryParams qs = normalizeQueryParams [ (dec k, dec v) | (k, Just v) <- qs ]
   where
     dec = TE.decodeUtf8 . urlDecode True
+
+-- | Milestone 17a: case-fold query parameter NAMES to lowercase, keeping
+-- values (and order) as-is. Pure, exported for tests.
+normalizeQueryParams :: [(Text, Text)] -> [(Text, Text)]
+normalizeQueryParams = map (\(k, v) -> (T.toLower k, v))
 
 -- | Case-insensitive substring match on 'itemTitle'. An empty search term
 -- is a substring of every title, so @?search=@ behaves like no filter.
@@ -66,12 +76,23 @@ filterByFolder mFolder = case mFolder of
   Nothing  -> id
   Just fid -> filter (\i -> itemFolder i == fid)
 
+-- | Milestone 17a: @?ParentId=<folderId>@ keeps only items whose
+-- 'itemFolder' equals the value (exact 'Text' comparison). Folder ids
+-- only - BoxSet pseudo-ids ("boxset-...") are NOT accepted here
+-- (documented). Empty or absent param -> identity. Reads the
+-- case-folded "parentid" key (see 'normalizeQueryParams').
+filterByParent :: [(Text, Text)] -> [MediaItem] -> [MediaItem]
+filterByParent rawParams items =
+  case lookup "parentid" (normalizeQueryParams rawParams) of
+    Just p | not (T.null p) -> filter (\i -> itemFolder i == p) items
+    _                       -> items
+
 -- | Keep only items of the given type (milestone 4d:
 -- @?type=Movie@ / @?type=Episode@ / @?type=Audio@).
 filterByType :: Maybe Text -> [MediaItem] -> [MediaItem]
 filterByType mType = case mType of
   Nothing -> id
-  Just t  -> filter (\i -> itemType i == t)
+  Just t  -> filter (\i -> T.toCaseFold (itemType i) == T.toCaseFold (T.strip t))
 
 -- | Keep only episodes of the given series (milestone 4d: @?series=...@).
 filterBySeries :: Maybe Text -> [MediaItem] -> [MediaItem]
@@ -158,11 +179,12 @@ projectFields fields v = case v of
 -- @includeItemTypes@) include BoxSet, case-insensitively? When it does,
 -- @\/items@ appends the synthesized BoxSet pseudo-items (collections).
 typeFilterIncludesBoxSet :: [(Text, Text)] -> Bool
-typeFilterIncludesBoxSet params =
+typeFilterIncludesBoxSet rawParams =
+  let params = normalizeQueryParams rawParams in
   maybe False (\t -> T.toCaseFold (T.strip t) == "boxset") (lookup "type" params)
   || maybe False (\raw -> "boxset" `elem`
                     [ T.toCaseFold (T.strip x) | x <- T.splitOn "," raw ])
-               (lookup "includeItemTypes" params)
+               (lookup "includeitemtypes" params)
 
 -- | Pure (milestone 4h): apply the metadata-backed query params @genres@,
 -- @studios@ and @persons@ (comma-separated, case-insensitive) using a
@@ -176,10 +198,11 @@ applyMetadataFilters
   -> (Text -> Maybe MediaMetadata)  -- ^ itemId -> metadata lookup
   -> [MediaItem]
   -> [MediaItem]
-applyMetadataFilters params lookupMeta =
+applyMetadataFilters rawParams lookupMeta =
   foldl applyParam id
         [ ("genres", metaGenres), ("studios", metaStudios), ("persons", metaPersons) ]
   where
+    params = normalizeQueryParams rawParams
     applyParam acc (key, getField) = case tokensOf (lookup key params) of
       []   -> acc
       toks -> \xs -> filter (\i -> case lookupMeta (itemId i) of
@@ -302,7 +325,7 @@ similarItems lookupMeta limit base allItems =
 -- unparseable -> 'Left' (the caller turns it into a 400).
 versionParam :: [(Text, Text)] -> Either Text Int
 versionParam qparams =
-  case lookup "version" qparams of
+  case lookup "version" (normalizeQueryParams qparams) of
     Nothing -> Right 0
     Just v  -> maybe (Left "invalid version parameter") Right (readMaybe (T.unpack v))
 
@@ -328,8 +351,8 @@ sortItems mSortBy mSortOrder items = sortBy cmp items
       Just "addedAt" -> comparing itemAddedAt
       _              -> comparing itemTitle  -- "title", unknown, Nothing
     cmp = case mSortOrder of
-      Just "desc" -> \x y -> base y x
-      _           -> base  -- "asc", anything else, Nothing
+      Just o | T.toCaseFold (T.strip o) `elem` ["desc", "descending"] -> \x y -> base y x
+      _           -> base  -- "asc", "ascending", anything else, Nothing
 
 -- | Pagination window: @startIndex@ (default 0, clamped to >= 0) and
 -- @limit@ (default: all remaining items). A negative limit yields an
@@ -354,7 +377,7 @@ paginate mStart mLimit xs =
 -- values are ignored and the defaults apply.
 applyItemQuery :: [(Text, Text)] -> [MediaItem] -> (Int, [MediaItem])
 applyItemQuery params items =
-  let get name = lookup name params
+  let get name = lookup (T.toLower name) (normalizeQueryParams params)
       searchTerm = case get "search" of
         Just s  -> Just s
         Nothing -> get "searchTerm"          -- milestone 4e alias

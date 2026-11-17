@@ -77,7 +77,7 @@ listDevicesHandler :: [(Text, Text)] -> Request -> AppM Response
 listDevicesHandler _captures req = do
   devices <- listDevices
   let qparams = queryParams (queryString req)
-      filtered = case lookup "deviceId" qparams of
+      filtered = case lookup "deviceid" qparams of
         Just did -> filter (\d -> devId d == did) devices
         Nothing  -> devices
   pure (jsonResponse (object

@@ -114,7 +114,7 @@ playbackInfoHandler captures req =
           mUser <- currentUserFromReq req
           let policyCap = mUser >>= policyMaxStreamingBitrate . userPolicy
               -- a ?maxBitrate= query param also counts as client-requested
-              queryCap = lookup "maxBitrate" (queryParams (queryString req))
+              queryCap = lookup "maxbitrate" (queryParams (queryString req))
                           >>= \v -> readMaybe (T.unpack v)
               clientCap = case pirMaxBitrate pir of
                 Just b  -> Just b

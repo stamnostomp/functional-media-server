@@ -134,7 +134,7 @@ transcodeHandler captures req =
           let qparams = queryParams (queryString req)
               policyCap = mUser >>= policyMaxStreamingBitrate . userPolicy
               -- invalid maxBitrate is ignored (documented), not a 400
-              clientCap = lookup "maxBitrate" qparams >>= \v -> readMaybe (T.unpack v)
+              clientCap = lookup "maxbitrate" qparams >>= \v -> readMaybe (T.unpack v)
               cap = effectiveBitrateCap policyCap clientCap (configMaxBitrate cfg)
               -- milestone 15: ffmpeg's own read timeout for network inputs
               -- (before -i), on top of the killer-thread guard below

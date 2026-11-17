@@ -288,7 +288,7 @@ logsLogHandler _captures req = do
   mTv <- getState "system.logbuf" :: AppM (Maybe (TVar [LogEntry]))
   buf <- maybe (pure []) (liftIO . readTVarIO) mTv
   let qparams = queryParams (queryString req)
-      startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
+      startIndex = fromMaybe (0 :: Int) (lookup "startindex" qparams >>= readMaybe . T.unpack)
       limit      = fromMaybe (100 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
       newestFirst = reverse buf
       total = length newestFirst

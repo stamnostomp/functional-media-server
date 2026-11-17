@@ -192,7 +192,7 @@ usersItemsHandler captures req = do
         Just usr
           | isAdmin usr || userId usr == uid -> pure usr
           | otherwise -> throwError (Forbidden "self or admin required")
-  itemsQueryResponse (Just u) (("userId", uid) : queryParams (queryString req))
+  itemsQueryResponse (Just u) (("userid", uid) : queryParams (queryString req))
 
 -- | @DELETE /Users/:userId/PlayedItems@ with @{\"ItemIds\":[...]}@ (or
 -- @{\"Ids\":[...]}@) — batch mark unplayed (milestone 5f). 200

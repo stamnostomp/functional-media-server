@@ -156,7 +156,7 @@ manifestHandler captures req =
           mUser <- currentUserFromReq req
           let qparams = queryParams (queryString req)
               policyCap = mUser >>= policyMaxStreamingBitrate . userPolicy
-              clientCap = lookup "maxBitrate" qparams >>= \v -> readMaybe (T.unpack v)
+              clientCap = lookup "maxbitrate" qparams >>= \v -> readMaybe (T.unpack v)
               cap = effectiveBitrateCap policyCap clientCap (configMaxBitrate cfg)
           mpd <- ensureDash cfg item version cap
           ok <- liftIO (doesFileExist mpd)

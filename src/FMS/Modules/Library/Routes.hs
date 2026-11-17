@@ -35,7 +35,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByParent, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -55,11 +55,14 @@ import FMS.Modules.UserData.Types (UserData)
 libraryRoutes :: [Route]
 libraryRoutes =
   [ get    [Lit "library"] listItemsHandler
-  , get    [Lit "library", Capture "id"] itemHandler
-  , post   [Lit "library", Lit "rescan"] rescanHandler
+  -- milestone 17a: with case-insensitive matching, [Lit "library", Capture "id"]
+  -- would also match /Library/MediaFolders, so the literal MediaFolders
+  -- routes must come BEFORE the capture route (first match wins)
   , get    [Lit "Library", Lit "MediaFolders"] listFoldersHandler
   , post   [Lit "Library", Lit "MediaFolders"] addFolderHandler
   , delete [Lit "Library", Lit "MediaFolders", Capture "id"] removeFolderHandler
+  , get    [Lit "library", Capture "id"] itemHandler
+  , post   [Lit "library", Lit "rescan"] rescanHandler
   , get    [Lit "Shows"] showsHandler
   , get    [Lit "Shows", Capture "name", Lit "Episodes"] episodesHandler
   , get    [Lit "Shows", Capture "name", Lit "NextUp"] nextUpHandler
@@ -115,18 +118,21 @@ itemsQueryResponse mUser qparams = do
                then boxSetValuesFor mUser items0
                else pure []
   let metaLookup = flip HM.lookup metaMap
-      items1 = applyMetadataFilters qparams metaLookup items0
+      -- milestone 17a: ParentId filter (case-folded param name) before the
+      -- metadata/user-data filters, so the total count reflects it
+      itemsP = filterByParent qparams items0
+      items1 = applyMetadataFilters qparams metaLookup itemsP
       itemsU = case mLookup of
         Just lk | not (null filterTokens) -> applyUserDataFilters filterTokens lk items1
         _                                 -> items1
       -- Milestone 5f: when userId is present and sortBy is a user-data key
       -- (lastPlayedDate/playCount), pre-sort by that field; applyItemQuery
       -- then skips its own sort for these keys, so pagination sees it.
-      items = case (mLookup, lookup "sortBy" qparams) of
+      items = case (mLookup, lookup "sortby" qparams) of
         (Just lk, Just s) | isUserDataSortKey s -> sortByUserDataField s lk itemsU
         _                                       -> itemsU
       (total, page) = applyItemQuery qparams items
-      startIndex = fromMaybe (0 :: Int) (lookup "startIndex" qparams >>= readMaybe . T.unpack)
+      startIndex = fromMaybe (0 :: Int) (lookup "startindex" qparams >>= readMaybe . T.unpack)
       renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))
   pure (jsonResponse (object
     [ "Items" .= (map renderItem page ++ map (projectFields fields) boxVals)
@@ -147,7 +153,7 @@ resolveUserQuery
             , [Text]                         -- fields keys
             )
 resolveUserQuery qparams mUser = do
-  mLookup <- case lookup "userId" qparams of
+  mLookup <- case lookup "userid" qparams of
     Nothing -> pure Nothing
     Just uid -> do
       case mUser of
@@ -408,7 +414,7 @@ searchHintsHandler _captures req = do
   mUser <- currentUserFromReq req
   items <- listItems >>= visibleItems mUser
   let qparams = queryParams (queryString req)
-      term = case lookup "searchTerm" qparams of
+      term = case lookup "searchterm" qparams of
         Just t  -> t
         Nothing -> fromMaybe "" (lookup "term" qparams)
       limit = fromMaybe (20 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)

@@ -436,8 +436,8 @@ serveStoredImage :: FilePath -> Text -> Text -> FilePath -> String -> Request ->
 serveStoredImage dir i ty path ext req = do
   tag <- liftIO (imageTagOfFile path)
   let qp   = queryParams (queryString req)
-      mW   = lookup "maxWidth"  qp >>= readMaybe . T.unpack
-      mH   = lookup "maxHeight" qp >>= readMaybe . T.unpack
+      mW   = lookup "maxwidth"  qp >>= readMaybe . T.unpack
+      mH   = lookup "maxheight" qp >>= readMaybe . T.unpack
       q    = fromMaybe defaultQuality (lookup "quality" qp >>= readMaybe . T.unpack)
       hdrs = [(mk "ETag", tagB tag), (mk "Cache-Control", "public, max-age=86400")]
   if isNothing mW && isNothing mH

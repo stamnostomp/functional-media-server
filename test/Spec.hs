@@ -38,10 +38,10 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, normalizeQueryParams, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
-import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3)
@@ -2518,5 +2518,32 @@ main = do
     , isRight' (validateFolderPath "../etc")
     , isRight' (validateFolderPath "/mnt/mo\0vies")
     ]
+
+  -- Milestone 17a (jellyfin-web compat): case-insensitive path segments,
+  -- case-insensitive query param names, ParentId filter.
+  check "normalizeSegments lowercases path segments"
+    ["items", "videos", "1", "main.m3u8"]
+    (normalizeSegments ["Items", "Videos", "1", "MAIN.M3U8"])
+  check "matchSegments: Lit compares case-insensitively, captures keep case"
+    (Just [("id", "AbC")], True)
+    ( matchSegments [Lit "Items", Capture "id"] ["ITEMS", "AbC"]
+    , matchSegments [Lit "items"] ["ITEMS"] == Just [] )
+  check "isOpenPath is case-insensitive"
+    [True, True, False]
+    [ isOpenPath ["system", "info", "public"], isOpenPath ["System", "Info", "Public"]
+    , isOpenPath ["items"] ]
+  check "normalizeQueryParams lowercases names, keeps values and order"
+    [("filters", "IsPlayed"), ("includeitemtypes", "Movie,Episode"), ("sortby", "SortName")]
+    (normalizeQueryParams [("Filters", "IsPlayed"), ("IncludeItemTypes", "Movie,Episode"), ("SortBy", "SortName")])
+  check "queryParams: PascalCase WAI query names are folded (value untouched)"
+    [("parentid", "1"), ("sortby", "Title")]
+    (queryParams [("ParentId", Just "1"), ("SortBy", Just "Title")])
+  let m17a = testItem
+      items17 = [m17a { itemId = "a", itemFolder = "1" }, m17a { itemId = "b", itemFolder = "2" }]
+  check "filterByParent: keeps only the given folder, empty/absent -> identity"
+    (["a"], ["a", "b"], ["a", "b"])
+    ( map itemId (filterByParent [("parentid", "1")] items17)
+    , map itemId (filterByParent [("parentid", "")] items17)
+    , map itemId (filterByParent [] items17) )
 
   putStrLn "All tests passed."

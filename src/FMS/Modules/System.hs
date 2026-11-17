@@ -338,6 +338,7 @@ currentServerConfig = do
         , scStartupCompleted = False
         , scLoginDisclaimer  = ""
         , scCustomCss        = ""
+        , scUiDir            = configUiDir cfg
         }
 
 -- | A stable-ish server id derived from the config (library path + port),

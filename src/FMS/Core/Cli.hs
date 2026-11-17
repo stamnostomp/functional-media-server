@@ -65,6 +65,7 @@ parseCliArgs = go []
       , ("follow-symlinks",     ("follow-symlinks", False))
       , ("tls-cert",            ("tls-cert", True))
       , ("tls-key",             ("tls-key", True))
+      , ("ui-dir",              ("ui-dir", True))
       ]
 
 -- | ASCII usage text printed by @--help@.
@@ -95,6 +96,7 @@ cliUsage = unlines
   , "  --follow-symlinks[=BOOL] scanner symlink policy (env FMS_FOLLOW_SYMLINKS)"
   , "  --tls-cert PATH         TLS certificate PEM, enables HTTPS (env FMS_TLS_CERT)"
   , "  --tls-key PATH          TLS private key PEM (env FMS_TLS_KEY; both required)"
+  , "  --ui-dir PATH           serve the stamno-media Elm UI from PATH (env FMS_UI_DIR, config.json \"uiDir\")"
   , "  --help                  show this help and exit"
   , "  --version               show name and version and exit"
   , ""

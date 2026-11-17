@@ -1,11 +1,11 @@
 module Main (main) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Char (toLower)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Text as T
-import System.Directory (doesFileExist)
+import System.Directory (doesDirectoryExist, doesFileExist)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, stderr, stdout)
@@ -87,6 +87,7 @@ main = do
   mFfTo  <- lookupEnv "FMS_FFMPEG_TIMEOUT"
   mTlsC  <- lookupEnv "FMS_TLS_CERT"
   mTlsK  <- lookupEnv "FMS_TLS_KEY"
+  mUiDir <- lookupEnv "FMS_UI_DIR"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   mFetchImgs <- lookupEnv "FMS_FETCH_IMAGES"
   mTmdbBase  <- lookupEnv "FMS_TMDB_BASE_URL"
@@ -105,6 +106,7 @@ main = do
       hwAccV  = cliV "hwaccel" <|> mHwAcc
       tlsCV   = cliV "tls-cert" <|> mTlsC
       tlsKV   = cliV "tls-key" <|> mTlsK
+      uiDirV  = cliV "ui-dir" <|> mUiDir
       -- booleans: CLI (true/false) > env > file/default
       boolV cliK mEnv def = fromMaybe (fromMaybe def (envBool mEnv)) (cliBool cliK)
       envBool (Just v) = Just (map toLower v `elem` ["true", "1", "yes"])
@@ -114,6 +116,7 @@ main = do
         , scLibraryPath = fromMaybe (scLibraryPath fileCfg) libV
         , scRequireAuth = boolV "require-auth" mAuth (scRequireAuth fileCfg)
         , scServerName  = T.pack (fromMaybe (T.unpack (scServerName fileCfg)) nameV)
+        , scUiDir       = maybe (scUiDir fileCfg) Just uiDirV  -- CLI/env wins over config.json
         }
       cfg0 = Config
         { configLibraryPath = scLibraryPath sc
@@ -157,6 +160,7 @@ main = do
         , configMaxBodyBytes = fromMaybe 10485760 (mMaxBody >>= readMaybe)  -- default 10 MiB; 0 = unlimited; negative rejected by validateConfig (exit 2)
         , configMemoryWarnMb = fromMaybe 1024 (mMemWarn >>= readMaybe)      -- default 1024 MB; negative rejected by validateConfig
         , configMemorySampleSecs = fromMaybe 30 (mMemSamp >>= readMaybe)    -- default 30s; 0 = disabled; negative rejected by validateConfig
+        , configUiDir = scUiDir sc    -- Elm UI dir; existence checked below (exit 2)
         }
   cfg0v <- case validateConfig cfg0 of
     Left err -> do
@@ -173,4 +177,13 @@ main = do
     when (not (null missing)) $ do
       hPutStrLn stderr ("config error: TLS cert/key file not found: " ++ unwords missing)
       exitWith (ExitFailure 2)
+  -- UI dir: validateConfig is pure, so the existence check happens here
+  -- (exit 2 with a clear message when a set dir is missing), like the TLS files.
+  case configUiDir cfg of
+    Just uiDir -> do
+      ok <- doesDirectoryExist uiDir
+      unless ok $ do
+        hPutStrLn stderr ("config error: UI dir not found: " ++ uiDir)
+        exitWith (ExitFailure 2)
+    Nothing -> pure ()
   runServer cfg

@@ -41,6 +41,7 @@ data Config = Config
   , configMaxBodyBytes :: !Int           -- ^ max request body size in bytes; larger bodies get 413 (env FMS_MAX_BODY_BYTES, default 10485760 = 10 MiB; 0 = unlimited)
   , configMemoryWarnMb :: !Int           -- ^ RSS warn threshold in MB (env FMS_MEMORY_WARN_MB, default 1024; memory monitoring)
   , configMemorySampleSecs :: !Int       -- ^ RSS sampling interval in seconds (env FMS_MEMORY_SAMPLE_SECS, default 30; 0 = disabled)
+  , configUiDir :: !(Maybe FilePath)     -- ^ serve the stamno-media Elm UI from this dir (env FMS_UI_DIR / --ui-dir / config.json "uiDir"; Nothing = built-in page)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-

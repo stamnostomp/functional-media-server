@@ -111,6 +111,7 @@ runServer cfg = do
         , scRequireAuth = configRequireAuth cfg
         , scLibraryPath = configLibraryPath cfg
         , scPort        = configPort cfg
+        , scUiDir       = configUiDir cfg
         }
   scTv <- newTVarIO sc
   shutdownMv <- newEmptyMVar :: IO (MVar Text)

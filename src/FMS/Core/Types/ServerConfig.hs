@@ -10,6 +10,7 @@ module FMS.Core.Types.ServerConfig
   , mergeServerConfig
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import qualified Data.Aeson as Aeson
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:?), (.!=), (.=))
@@ -30,6 +31,7 @@ data ServerConfig = ServerConfig
   , scStartupCompleted :: !Bool -- ^ milestone 10b: first-run wizard done
   , scLoginDisclaimer  :: !Text -- ^ milestone 10b: branding login disclaimer
   , scCustomCss        :: !Text -- ^ milestone 10b: branding custom CSS
+  , scUiDir            :: !(Maybe FilePath) -- ^ serve the Elm UI from this dir (config.json key "uiDir"; env FMS_UI_DIR / --ui-dir)
   } deriving (Show, Eq)
 
 instance ToJSON ServerConfig where
@@ -41,6 +43,7 @@ instance ToJSON ServerConfig where
     , "StartupCompleted" .= scStartupCompleted sc
     , "LoginDisclaimer"  .= scLoginDisclaimer sc
     , "CustomCss"        .= scCustomCss sc
+    , "uiDir"            .= scUiDir sc
     ]
 
 -- | Every field optional with the defaults as fallback, so a pre-10b
@@ -55,6 +58,7 @@ instance FromJSON ServerConfig where
       <*> o .:? "StartupCompleted" .!= scStartupCompleted defaultServerConfig
       <*> o .:? "LoginDisclaimer"  .!= scLoginDisclaimer defaultServerConfig
       <*> o .:? "CustomCss"        .!= scCustomCss defaultServerConfig
+      <*> (o .:? "uiDir" <|> o .:? "UiDir")
 
 -- | A partial update: every field optional. @POST /System/Configuration@
 -- decodes the body into this and merges it over the current config, so a
@@ -67,6 +71,7 @@ data ServerConfigPatch = ServerConfigPatch
   , scpStartupCompleted :: Maybe Bool  -- ^ milestone 10b
   , scpLoginDisclaimer  :: Maybe Text  -- ^ milestone 10b
   , scpCustomCss        :: Maybe Text  -- ^ milestone 10b
+  , scpUiDir            :: Maybe FilePath
   } deriving (Show, Eq)
 
 -- | Patch convention: every field optional; a missing OR null field is
@@ -81,6 +86,7 @@ instance FromJSON ServerConfigPatch where
       <*> o .:? "StartupCompleted"
       <*> o .:? "LoginDisclaimer"
       <*> o .:? "CustomCss"
+      <*> (o .:? "uiDir" <|> o .:? "UiDir")
 
 instance ToJSON ServerConfigPatch where
   toJSON p = object
@@ -91,6 +97,7 @@ instance ToJSON ServerConfigPatch where
     , "StartupCompleted" .= scpStartupCompleted p
     , "LoginDisclaimer"  .= scpLoginDisclaimer p
     , "CustomCss"        .= scpCustomCss p
+    , "uiDir"            .= scpUiDir p
     ]
 
 -- | The built-in defaults (same values the env-var defaults had before
@@ -104,6 +111,7 @@ defaultServerConfig = ServerConfig
   , scStartupCompleted = False
   , scLoginDisclaimer  = ""
   , scCustomCss        = ""
+  , scUiDir            = Nothing
   }
 
 -- | Where the config file lives: @stateDir \/ \"config.json\"@.
@@ -141,6 +149,7 @@ serverConfigToPatch sc = ServerConfigPatch
   , scpStartupCompleted = Just (scStartupCompleted sc)
   , scpLoginDisclaimer  = Just (scLoginDisclaimer sc)
   , scpCustomCss        = Just (scCustomCss sc)
+  , scpUiDir            = scUiDir sc
   }
 
 -- | Pure merge: the patch's set fields override the base's, unset fields
@@ -154,6 +163,7 @@ applyServerConfigPatch base p = ServerConfig
   , scStartupCompleted = fromMaybe (scStartupCompleted base) (scpStartupCompleted p)
   , scLoginDisclaimer  = fromMaybe (scLoginDisclaimer base)  (scpLoginDisclaimer p)
   , scCustomCss        = fromMaybe (scCustomCss base)        (scpCustomCss p)
+  , scUiDir            = maybe (scUiDir base) Just (scpUiDir p)  -- patch Nothing = keep
   }
 
 -- | Pure merge of two full configs: the second one's fields win.

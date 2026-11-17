@@ -164,7 +164,7 @@ import FMS.Modules.Sessions.Types (PlaySession (..), SessionCapabilities (..), a
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
 import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..), countsByType, uptimeSeconds)
 import FMS.Modules.ApiDocs (methodText, routeToPath, routesToOpenApi, segmentToPathPiece)
-import FMS.Modules.Web (webPageHtml)
+import FMS.Modules.Web (contentTypeFor, safeUiPath, webPageHtml)
 
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
@@ -1553,12 +1553,12 @@ main = do
     (Just defaultServerConfig)
     (Aeson.decode (Aeson.encode defaultServerConfig) :: Maybe ServerConfig)
   check "ServerConfigPatch partial decode: only ServerName set"
-    (Just (ServerConfigPatch (Just "My Media") Nothing Nothing Nothing Nothing Nothing Nothing))
+    (Just (ServerConfigPatch (Just "My Media") Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
     (Aeson.decode "{\"ServerName\":\"My Media\"}" :: Maybe ServerConfigPatch)
   check "ServerConfigPatch empty object decodes to all-Nothing"
-    (Just (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
+    (Just (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
     (Aeson.decode "{}" :: Maybe ServerConfigPatch)
-  let patch = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+  let patch = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
             (Aeson.decode "{\"ServerName\":\"My Media\",\"Port\":9999}" :: Maybe ServerConfigPatch)
       merged = applyServerConfigPatch defaultServerConfig patch
   check "applyServerConfigPatch overrides set fields, keeps the rest"
@@ -1600,14 +1600,14 @@ main = do
     (scStartupCompleted <$>
       (Aeson.decode (Aeson.encode (defaultServerConfig { scStartupCompleted = True }))
         :: Maybe ServerConfig))
-  let p10b = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+  let p10b = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
              (Aeson.decode "{\"StartupCompleted\":true,\"LoginDisclaimer\":\"hi\",\"CustomCss\":\"body{}\"}"
                :: Maybe ServerConfigPatch)
       m10b = applyServerConfigPatch defaultServerConfig p10b
   check "applyServerConfigPatch sets the 10b fields"
     (True, "hi", "body{}")
     (scStartupCompleted m10b, scLoginDisclaimer m10b, scCustomCss m10b)
-  let p10bClear = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+  let p10bClear = fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
                   (Aeson.decode "{\"LoginDisclaimer\":\"\"}" :: Maybe ServerConfigPatch)
       m10bClear = applyServerConfigPatch m10b p10bClear
   check "applyServerConfigPatch can clear a branding field to empty"
@@ -1620,7 +1620,7 @@ main = do
   check "applyServerConfigPatch with a null field keeps the base value"
     "hi"
     (scLoginDisclaimer (applyServerConfigPatch m10b
-      (fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+      (fromMaybe (ServerConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
         (Aeson.decode "{\"LoginDisclaimer\":null}" :: Maybe ServerConfigPatch))))
   check "ServerConfigPatch ToJSON roundtrip with 10b keys"
     (Just p10b) (Aeson.decode (Aeson.encode p10b) :: Maybe ServerConfigPatch)
@@ -2651,6 +2651,7 @@ main = do
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
       , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
+      , configUiDir = Nothing
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2775,6 +2776,7 @@ main = do
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
         , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
+        , configUiDir = Nothing
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -3384,4 +3386,26 @@ main = do
     (["-i", "x", "-vf", "subtitles=/a", "-f", "mp4", "pipe:1"], ["-i", "x", "-vf", "f"])
     ( spliceBeforeF ["-vf", "subtitles=/a"] ["-i", "x", "-f", "mp4", "pipe:1"]
     , spliceBeforeF ["-vf", "f"] ["-i", "x"] )
+
+  -- Web module: safeUiPath traversal guard + contentTypeFor mapping.
+  check "safeUiPath: normal and nested files resolve under uiDir"
+    [Just "/ui/index.html", Just "/ui/assets/app.js"]
+    [ safeUiPath "/ui" "index.html", safeUiPath "/ui" "assets/app.js" ]
+  check "safeUiPath: .. segments, absolute paths, null bytes rejected"
+    [Nothing, Nothing, Nothing, Nothing, Nothing]
+    [ safeUiPath "/ui" "../etc/passwd"
+    , safeUiPath "/ui" "a/../../x"
+    , safeUiPath "/ui" "/etc/passwd"
+    , safeUiPath "/ui" ".."
+    , safeUiPath "/ui" "a\0b" ]
+  check "safeUiPath: encoded-slash traversal form rejected, dot-file ok"
+    [Nothing, Just "/ui/.well-known/x"]
+    [ safeUiPath "/ui" "../config.json", safeUiPath "/ui" ".well-known/x" ]
+  check "contentTypeFor: html/js/css/png/jpg/svg/json/ico/map + default"
+    [ "text/html; charset=utf-8", "application/javascript", "text/css; charset=utf-8"
+    , "image/png", "image/jpeg", "image/svg+xml", "application/json"
+    , "image/x-icon", "application/json", "application/octet-stream" ]
+    (map (BSC.unpack . contentTypeFor)
+      [ "index.html", "elm.js", "STAMNO.CSS", "a.png", "a.JPG", "a.svg"
+      , "a.json", "favicon.ico", "a.js.map", "a.bin" ])
   putStrLn "All tests passed."

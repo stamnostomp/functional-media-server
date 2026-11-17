@@ -203,7 +203,7 @@ flipped to DONE in the same commit as the code that implements it.
 
 * 16. Testing, packaging, ops :techdebt:
 ** DONE Unit tests: 715 assertions in test/Spec.hs covering Range parsing, NFO parsing, SafeCopy ID stability/migrations, query filters, policy, CLI, and more; run in nix checkPhase + cabal test + CI
-** TODO Integration tests against the API (items, playback info, auth flow)
+** DONE Integration tests against the API: scripts/integration-test.sh spins up a live server on a fresh port with a fresh /tmp library (ffmpeg-generated mp4+mp3 + NFO), runs 26 curl checks (public info, auth 401/200, items scan/search, item detail, PlaybackInfo, byte-range 206 stream, images, userdata played, sessions, system info), prints INTEGRATION: N passed, M failed, exit 0 iff M=0 (m18a)
 ** DONE CI pipeline: .github/workflows/ci.yml (nix build .#default + cabal test + docker drvPath eval on push/PR to main)
 ** DONE Docker: nix packages.docker (dockerTools image, /bin/fms + ffmpeg, port 8096) + docker-compose.yml
 ** TODO Haddock docs on all exports

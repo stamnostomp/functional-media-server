@@ -25,7 +25,7 @@ import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.Policy (AccessSchedule, UserPolicy (..))
 import FMS.Core.Types.User (User (..), checkPasswordPolicy)
-import FMS.Modules.Auth.Monad (MonadAuth (..), verifyPassword)
+import FMS.Modules.Auth.Monad (MonadAuth (..), requireAdmin, verifyPassword)
 
 -- | The users/auth/sessions API (docs/todo.org section 8,
 -- Jellyfin-shaped). Order matters: the literal routes ([Users, Public],
@@ -285,7 +285,10 @@ getPermissionsHandler captures req = do
 setPermissionsHandler :: [(Text, Text)] -> Request -> AppM Response
 setPermissionsHandler captures req = do
   i <- captureId captures
-  requireSelfOrAdmin req i
+  -- milestone 16: admin-only; a non-admin must not change anyone's folder
+  -- permissions (previously self-or-admin, which allowed self-escalation
+  -- of AllowedFolders to null)
+  requireAdmin req
   _ <- requireExistingUser i
   pr <- parseBody req
   _ <- setAllowedFolders i (prAllowedFolders pr)
@@ -363,20 +366,9 @@ currentUser req =
     Nothing  -> pure Nothing
     Just tok -> resolveToken tok
 
--- | Admin gate. A present credential must belong to an admin (401
--- otherwise); when no credential is present at all, the request is allowed
--- only in open mode (configRequireAuth off) — in strict mode the router
--- gate has already rejected it.
-requireAdmin :: Request -> AppM ()
-requireAdmin req = do
-  cfg <- asks envConfig
-  mUser <- currentUser req
-  case mUser of
-    Just u | isAdmin u -> pure ()
-    Just _  -> throwError (Unauthorized "admin privileges required")
-    Nothing
-      | configRequireAuth cfg -> throwError (Unauthorized "authentication required")
-      | otherwise             -> pure ()
+-- | Milestone 16: 'requireAdmin' moved to "FMS.Modules.Auth.Monad" (shared
+-- by all modules with admin-only routes) with stricter semantics: no token
+-- or non-admin -> 403 even in open mode.
 
 -- | Milestone 9: like 'requireSelfOrAdmin', but a present non-matching
 -- credential gets 403 Forbidden (used by the Policy/Enable/Disable routes,

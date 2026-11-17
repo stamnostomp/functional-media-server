@@ -10,6 +10,7 @@ module FMS.Modules.Auth.Monad
   , canAccessFolder
   , allowedFoldersFor
   , currentUserFromReq
+  , requireAdmin
   , folderAccessOrThrow
   , visibleItems
   , getItemWithAccess
@@ -198,6 +199,20 @@ currentUserFromReq req =
   case tokenFromRequest req of
     Nothing  -> pure Nothing
     Just tok -> resolveToken tok
+
+-- | Milestone 16 (security hardening, docs/todo.org section 13): the
+-- admin gate for mutating/global routes (folder management, shutdown,
+-- config, webhooks, ...). Unlike the router's open/strict gate this
+-- ALWAYS requires a present ADMIN credential: no token or a non-admin
+-- token -> 403 Forbidden, even in open mode (FMS_REQUIRE_AUTH=false), so
+-- an anonymous client cannot e.g. index an arbitrary directory via
+-- @POST /Library/MediaFolders@.
+requireAdmin :: Request -> AppM ()
+requireAdmin req = do
+  mUser <- currentUserFromReq req
+  case mUser of
+    Just u | isAdmin u -> pure ()
+    _                  -> throwError (Forbidden "admin privileges required")
 
 -- | Milestone 5d enforcement: admins pass, users with 'Nothing'
 -- allowedFolders pass, users with a restriction pass only for their

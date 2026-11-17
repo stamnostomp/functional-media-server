@@ -14,6 +14,7 @@ import Network.Wai (Request, Response, responseLBS, strictRequestBody)
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, getState)
+import FMS.Modules.Auth.Monad (requireAdmin)
 import FMS.Modules.Webhooks.Monad
   ( MonadWebhooks (..), deliverWebhook, webhookBody )
 
@@ -49,13 +50,15 @@ instance FromJSON CreateWebhookRequest where
 
 -- | @GET /Webhooks@ — 200 JSON array of all webhooks (oldest first).
 listWebhooksHandler :: [(Text, Text)] -> Request -> AppM Response
-listWebhooksHandler _captures _req =
+listWebhooksHandler _captures req = do
+  requireAdmin req  -- milestone 16
   jsonResponse <$> listWebhooks
 
 -- | @POST /Webhooks@ — register a webhook. 400 on a malformed body or an
 -- empty @Url@; otherwise 201 with the new webhook's JSON.
 createWebhookHandler :: [(Text, Text)] -> Request -> AppM Response
 createWebhookHandler _captures req = do
+  requireAdmin req  -- milestone 16
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
@@ -69,7 +72,8 @@ createWebhookHandler _captures req = do
 
 -- | @DELETE /Webhooks/:id@ — 200 @{\"status\":\"ok\"@}, 404 when unknown.
 deleteWebhookHandler :: [(Text, Text)] -> Request -> AppM Response
-deleteWebhookHandler captures _req =
+deleteWebhookHandler captures req = do
+  requireAdmin req  -- milestone 16
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just wid -> do
@@ -82,7 +86,8 @@ deleteWebhookHandler captures _req =
 -- SYNCHRONOUSLY (awaited, unlike 'fireWebhooks') and answer 200
 -- @{\"delivered\": true|false}@; 404 when the webhook is unknown.
 testWebhookHandler :: [(Text, Text)] -> Request -> AppM Response
-testWebhookHandler captures _req =
+testWebhookHandler captures req = do
+  requireAdmin req  -- milestone 16
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just wid -> do

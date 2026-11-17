@@ -14,6 +14,7 @@ import Network.Wai (Request, Response, queryString, strictRequestBody)
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Query (queryParams)
+import FMS.Modules.Auth.Monad (requireAdmin)
 import FMS.Modules.Devices.Monad (MonadDevices (..))
 import FMS.Modules.Devices.Types (Device (..))
 
@@ -89,6 +90,7 @@ listDevicesHandler _captures req = do
 -- malformed body or an empty @Name@; otherwise 200 with the device JSON.
 upsertDeviceHandler :: [(Text, Text)] -> Request -> AppM Response
 upsertDeviceHandler _captures req = do
+  requireAdmin req  -- milestone 16: POST /Devices is admin-only
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
@@ -120,7 +122,8 @@ getDeviceHandler captures _req =
 
 -- | @DELETE /Devices/:id@ — 200 @{\"status\":\"ok\"@}, 404 when unknown.
 deleteDeviceHandler :: [(Text, Text)] -> Request -> AppM Response
-deleteDeviceHandler captures _req =
+deleteDeviceHandler captures req = do
+  requireAdmin req  -- milestone 16
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just did -> do
@@ -134,7 +137,8 @@ deleteDeviceHandler captures _req =
 -- 400 on a malformed body, 404 when the device is unknown; otherwise 200
 -- with the updated device JSON.
 capabilitiesHandler :: [(Text, Text)] -> Request -> AppM Response
-capabilitiesHandler captures req =
+capabilitiesHandler captures req = do
+  requireAdmin req  -- milestone 16
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just did -> do

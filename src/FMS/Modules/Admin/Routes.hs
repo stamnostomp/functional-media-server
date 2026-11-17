@@ -12,6 +12,7 @@ import Network.Wai (Request, Response, strictRequestBody)
 import FMS.Core.Module (Route, Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Modules.Admin.Monad (MonadAdmin (..))
+import FMS.Modules.Auth.Monad (requireAdmin)
 import FMS.Modules.Admin.Types (ScheduledTask (..))
 
 -- | The admin routes (docs/todo.org section 11, milestone 11a),
@@ -27,7 +28,8 @@ adminRoutes =
 -- | @GET /System/ActivityLog@ — 200 @{\"Items\": [...], \"TotalRecordCount\": n}@,
 -- newest entries first.
 activityLogHandler :: [(Text, Text)] -> Request -> AppM Response
-activityLogHandler _captures _req = do
+activityLogHandler _captures req = do
+  requireAdmin req  -- milestone 16
   entries <- listActivity
   pure (jsonResponse (object
     [ "Items" .= entries
@@ -37,13 +39,15 @@ activityLogHandler _captures _req = do
 -- | @GET /ScheduledTasks@ — 200 JSON array of the registered tasks
 -- (sorted by id), including LastRun/LastResult of the most recent run.
 listTasksHandler :: [(Text, Text)] -> Request -> AppM Response
-listTasksHandler _captures _req =
+listTasksHandler _captures req = do
+  requireAdmin req  -- milestone 16
   jsonResponse <$> listTasks
 
 -- | @POST /ScheduledTasks/:id/Run@ — run the task now; 200 with the
 -- updated task JSON (LastRun + LastResult set), 404 for an unknown id.
 runTaskHandler :: [(Text, Text)] -> Request -> AppM Response
-runTaskHandler captures _req =
+runTaskHandler captures req = do
+  requireAdmin req  -- milestone 16
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just tid -> do
@@ -65,6 +69,7 @@ instance FromJSON EnableRequest where
 -- the updated task JSON, 404 for an unknown id, 400 on a malformed body.
 enableTaskHandler :: [(Text, Text)] -> Request -> AppM Response
 enableTaskHandler captures req = do
+  requireAdmin req  -- milestone 16
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))

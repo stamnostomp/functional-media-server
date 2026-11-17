@@ -182,7 +182,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Chromecast/AirPlay are client-side; ensure casting endpoints work
 
 * 14. Security :fix:
-** TODO Path sanitization everywhere (no directory traversal via ids/paths)
+** DONE Path sanitization audited (tester audit PASS): all FS-touching routes DB-gate ids via getItemWithAccess (404), seg names [A-Za-z0-9._-]+no-"..", image types [A-Za-z]+, version/index parsed as Int; traversal battery clean, zero secret leaks
+   - [X] admin guards (requireAdmin in Auth.Monad, 403 even in open mode): MediaFolders POST/DELETE, System/Configuration|Shutdown|Restart, Logs, Branding POST, ScheduledTasks, ActivityLog, Webhooks, Devices mutations, Users list, Permissions (admin-only, no self-escalation), metadata POST/refresh; validateFolderPath rejects relative/".."/empty/null-byte paths (400)
 ** TODO Rate limiting
    - [X] per-IP token bucket (FMS_RATE_LIMIT req/min, 429 + JSON error), OPTIONS exempt, refills
    - [ ] per-endpoint limits

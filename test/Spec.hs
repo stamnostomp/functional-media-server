@@ -62,7 +62,7 @@ import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), apply
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (withScanLock)
 import FMS.Modules.Library.Watch (eventsPending, watchMediaFile)
-import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders)
+import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
   ( classifyItem
   , diffScan
@@ -2502,5 +2502,21 @@ main = do
     [ isLeft' (validateConfig (cfg1d { configTlsCert = Just "/c.pem" }))
     , isLeft' (validateConfig (cfg1d { configTlsCert = Just "/c.pem", configTlsKey = Just "/k.pem" }))
     , isLeft' (validateConfig cfg1d) ]
+
+  -- Milestone 16 (security hardening, docs/todo.org section 13):
+  -- validateFolderPath rejects empty/relative/traversal/null-byte paths.
+  let isRight' :: Either a b -> Bool
+      isRight' = either (const False) (const True)
+  check "validateFolderPath: absolute paths ok (trailing slash kept normalised)"
+    [Right "/mnt/movies", Right "/mnt/movies/", Right "/"]
+    [validateFolderPath "/mnt/movies", validateFolderPath "/mnt/movies/", validateFolderPath "/"]
+  check "validateFolderPath: relative, empty, .. segment, null byte rejected"
+    [False, False, False, False, False]
+    [ isRight' (validateFolderPath "movies")
+    , isRight' (validateFolderPath "")
+    , isRight' (validateFolderPath "/mnt/../etc")
+    , isRight' (validateFolderPath "../etc")
+    , isRight' (validateFolderPath "/mnt/mo\0vies")
+    ]
 
   putStrLn "All tests passed."

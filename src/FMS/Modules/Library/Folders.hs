@@ -4,6 +4,7 @@ module FMS.Modules.Library.Folders
   , foldersFilePath
   , defaultFolders
   , nextFolderId
+  , validateFolderPath
   ) where
 
 import Control.Exception (SomeException, try)
@@ -16,7 +17,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, normalise, splitDirectories, (</>))
 import Text.Read (readMaybe)
 
 import FMS.Core.Types.Config (Config (..))
@@ -68,3 +69,19 @@ nextFolderId folders =
   let numericIds = [ i | (k, _) <- HM.toList folders
                        , Just i <- [readMaybe (T.unpack k) :: Maybe Int] ]
   in T.pack (show (1 + max 0 (foldr max 0 numericIds)))
+
+-- | Milestone 16 (path-sanitization audit, docs/todo.org section 13):
+-- validate a folder path from @POST /Library/MediaFolders@ before it is
+-- stored/scanned. Rejects the empty path, paths with null bytes,
+-- RELATIVE paths, and any @..@ path segment (traversal); a trailing
+-- slash is fine ('normalise' keeps it). Returns the normalised absolute
+-- path on 'Right'. The route is admin-only, so arbitrary absolute paths
+-- are by design - only malformed/traversal paths are rejected.
+validateFolderPath :: FilePath -> Either Text FilePath
+validateFolderPath p
+  | null p = Left "folder path must not be empty"
+  | '\0' `elem` p = Left "folder path must not contain null bytes"
+  | not (isAbsolute p) = Left ("folder path must be absolute: " <> T.pack p)
+  | ".." `elem` splitDirectories p =
+      Left ("folder path must not contain '..': " <> T.pack p)
+  | otherwise = Right (normalise p)

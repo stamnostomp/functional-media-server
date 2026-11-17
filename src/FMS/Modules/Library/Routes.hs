@@ -39,8 +39,9 @@ import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilter
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
-import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, visibleItems)
+import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
+import FMS.Modules.Library.Folders (validateFolderPath)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
 import FMS.Modules.Socket (broadcastSocket)
@@ -212,21 +213,29 @@ listFoldersHandler _captures _req =
 -- | @POST \/Library\/MediaFolders@ — create a folder (the path is created
 -- if missing, the type defaults to \"mixed\"), rescan so its items appear,
 -- then 201 with the folder JSON. Bad JSON -> 400.
+-- Milestone 16: admin-only ('requireAdmin'), and the path is validated by
+-- 'validateFolderPath' (absolute, no @..@, no null bytes) -> 400 on 'Left'.
 addFolderHandler :: [(Text, Text)] -> Request -> AppM Response
 addFolderHandler _captures req = do
+  requireAdmin req
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
-    Right afr -> do
-      f <- addFolder (afrName afr) (afrPath afr) (fromMaybe "mixed" (afrType afr))
-      rescanLibrary
-      pure (responseLBS status201 [("Content-Type", "application/json")] (encode f))
+    Right afr ->
+      case validateFolderPath (afrPath afr) of
+        Left e -> throwError (BadRequest e)
+        Right p -> do
+          f <- addFolder (afrName afr) p (fromMaybe "mixed" (afrType afr))
+          rescanLibrary
+          pure (responseLBS status201 [("Content-Type", "application/json")] (encode f))
 
 -- | @DELETE \/Library\/MediaFolders\/:id@ — remove the folder and its items
 -- from acid-state; 200 @{\"status\":\"ok\"}@, 404 for an unknown id, 400
--- when trying to remove the last remaining folder.
+-- when trying to remove the last remaining folder. Milestone 16:
+-- admin-only ('requireAdmin').
 removeFolderHandler :: [(Text, Text)] -> Request -> AppM Response
-removeFolderHandler captures _req =
+removeFolderHandler captures req = do
+  requireAdmin req
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just fid -> do

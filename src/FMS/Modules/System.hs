@@ -33,7 +33,7 @@ import FMS.Core.Types.ServerConfig
   )
 -- FMS.Modules.Auth.Monad imports only Core/Auth/Library.Monad, so importing
 -- it here does not create a cycle (only FMS.Server imports this module).
-import FMS.Modules.Auth.Monad (MonadAuth (..))
+import FMS.Modules.Auth.Monad (MonadAuth (..), requireAdmin)
 
 -- | The system module: server info, health check, configuration and
 -- shutdown/restart (docs/todo.org section 1, milestone 1b). Init only
@@ -115,9 +115,10 @@ configHandler _captures _req =
 -- ServerName and RequireAuth take effect immediately), and answer 200
 -- with the new config. Bad JSON -> 400. Note: Port and LibraryPath only
 -- take full effect on the next start/restart (warp is already bound, the
--- library already scanned).
+-- library already scanned). Milestone 16: admin-only ('requireAdmin').
 updateConfigHandler :: [(Text, Text)] -> Request -> AppM Response
 updateConfigHandler _captures req = do
+  requireAdmin req
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
@@ -178,7 +179,13 @@ wizardStartupHandler _captures req = do
 -- | @POST /System/Wizard/Completed@ — mark the startup wizard completed
 -- without creating a user (milestone 10b); 200 @{"status":"ok"}@.
 wizardCompletedHandler :: [(Text, Text)] -> Request -> AppM Response
-wizardCompletedHandler _captures _req = do
+wizardCompletedHandler _captures req = do
+  -- milestone 16: when users already exist this is admin-only; with zero
+  -- users (first run) it stays open
+  users <- listUsers
+  case users of
+    (_ : _) -> requireAdmin req
+    []      -> pure ()
   sc <- currentServerConfig
   let sc' = sc { scStartupCompleted = True }
   persistServerConfig sc'
@@ -195,9 +202,10 @@ brandingGetHandler _captures _req = do
 -- fields (@LoginDisclaimer@?, @CustomCss@?), persisted to config.json and
 -- applied to the live TVar; 200 with the updated branding object.
 -- Reuses 'ServerConfigPatch' (its 10b fields are exactly the branding
--- ones); 400 on bad JSON.
+-- ones); 400 on bad JSON. Milestone 16: admin-only (the GET stays open).
 brandingPostHandler :: [(Text, Text)] -> Request -> AppM Response
 brandingPostHandler _captures req = do
+  requireAdmin req
   body <- liftIO (strictRequestBody req)
   case eitherDecode body of
     Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
@@ -235,7 +243,8 @@ persistServerConfig sc' = do
 -- constructed, returned, and flushed by warp BEFORE teardown starts.
 shutdownLikeHandler
   :: Text -> Text -> [(Text, Text)] -> Request -> AppM Response
-shutdownLikeHandler tag statusMsg _captures _req = do
+shutdownLikeHandler tag statusMsg _captures req = do
+  requireAdmin req  -- milestone 16: Shutdown/Restart are admin-only
   let resp = jsonResponse (object ["status" .= statusMsg])
   mMv <- getState "system.shutdown" :: AppM (Maybe (MVar Text))
   case mMv of
@@ -249,7 +258,8 @@ shutdownLikeHandler tag statusMsg _captures _req = do
 -- list. The server's log is reported as @server.log@; its size/mtime are
 -- taken from @stateDir/activity.log@ when present (0 / now otherwise).
 logsListHandler :: [(Text, Text)] -> Request -> AppM Response
-logsListHandler _captures _req = do
+logsListHandler _captures req = do
+  requireAdmin req  -- milestone 16
   cfg <- asks envConfig
   let logPath = configStateDir cfg </> "activity.log"
   exists <- liftIO (doesFileExist logPath)
@@ -274,6 +284,7 @@ logsListHandler _captures _req = do
 -- ring TVar kept by the 'MonadLog' instance.
 logsLogHandler :: [(Text, Text)] -> Request -> AppM Response
 logsLogHandler _captures req = do
+  requireAdmin req  -- milestone 16
   mTv <- getState "system.logbuf" :: AppM (Maybe (TVar [LogEntry]))
   buf <- maybe (pure []) (liftIO . readTVarIO) mTv
   let qparams = queryParams (queryString req)

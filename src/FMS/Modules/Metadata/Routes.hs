@@ -26,7 +26,7 @@ import Network.Wai (Request, Response, strictRequestBody)
 import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Modules.Auth.Monad (getItemWithAccess)
+import FMS.Modules.Auth.Monad (getItemWithAccess, requireAdmin)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..))
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata)
 
@@ -60,7 +60,8 @@ metadataHandler captures req =
 -- cache it. 200 with the metadata JSON, 404 when the item is unknown or
 -- no metadata could be found ("no metadata found for item").
 refreshMetadataHandler :: [(Text, Text)] -> Request -> AppM Response
-refreshMetadataHandler captures req =
+refreshMetadataHandler captures req = do
+  requireAdmin req  -- milestone 16: provider refresh is admin-only
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i -> do
@@ -80,7 +81,8 @@ refreshMetadataHandler captures req =
 -- 200 with the updated metadata JSON, 404 unknown item (also enforces
 -- folder/policy access via 'getItemWithAccess'), 400 on a non-object body.
 editMetadataHandler :: [(Text, Text)] -> Request -> AppM Response
-editMetadataHandler captures req =
+editMetadataHandler captures req = do
+  requireAdmin req  -- milestone 16: manual metadata editing is admin-only
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just i -> do

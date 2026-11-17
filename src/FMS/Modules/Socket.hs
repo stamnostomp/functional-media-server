@@ -9,6 +9,7 @@ module FMS.Modules.Socket
   , addConn
   , removeConn
   , broadcastSocket
+  , broadcastSocketToToken
   ) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
@@ -56,14 +57,17 @@ socketModule :: Module
 socketModule = Module
   { moduleName   = "socket"
   , moduleInit   = do
-      tv <- liftIO (newTVarIO ([] :: [(Unique, Connection)]))
+      tv <- liftIO (newTVarIO ([] :: [(Unique, (Maybe Text, Connection))]))
       putState socketConnsKey tv
   , moduleRoutes = []
   }
 
 -- | Namespaced registry key for the live connections:
--- @TVar [(Unique, Connection)]@ (keyed because 'Connection' has no
--- 'Eq' instance, so removal needs a stable key).
+-- @TVar [(Unique, (Maybe Text, Connection))]@ — each entry also carries
+-- the credential (api_key/token) the socket authenticated with, so
+-- targeted messages can reach one session's socket
+-- ('broadcastSocketToToken'). Keyed because 'Connection' has no 'Eq'
+-- instance, so removal needs a stable key.
 socketConnsKey :: Text
 socketConnsKey = "socket.conns"
 
@@ -123,7 +127,7 @@ socketServerApp env pending = do
     else do
       conn <- acceptRequest pending
       u <- newUnique
-      _ <- runApp env (registerConn u conn)
+      _ <- runApp env (registerConn u mKey conn)
       keepAlive <- forkIO (keepAliveLoop conn)
       receiveLoop conn
       killThread keepAlive
@@ -146,11 +150,11 @@ keepAliveLoop conn = forever $ do
          :: IO (Either SomeException ())
   pure ()
 
-registerConn :: Unique -> Connection -> AppM ()
-registerConn u conn = do
-  mTv <- getState socketConnsKey :: AppM (Maybe (TVar [(Unique, Connection)]))
+registerConn :: Unique -> Maybe Text -> Connection -> AppM ()
+registerConn u mKey conn = do
+  mTv <- getState socketConnsKey :: AppM (Maybe (TVar [(Unique, (Maybe Text, Connection))]))
   case mTv of
-    Just tv -> liftIO (atomically (modifyTVar' tv (addConn u conn)))
+    Just tv -> liftIO (atomically (modifyTVar' tv (addConn u (mKey, conn))))
     Nothing -> pure ()
 
 unregisterConn :: Unique -> AppM ()
@@ -165,12 +169,27 @@ unregisterConn u = do
 -- the caller.
 broadcastSocket :: Text -> Value -> AppM ()
 broadcastSocket msgType dat = do
-  mTv <- getState socketConnsKey :: AppM (Maybe (TVar [(Unique, Connection)]))
+  mTv <- getState socketConnsKey :: AppM (Maybe (TVar [(Unique, (Maybe Text, Connection))]))
   case mTv of
     Nothing -> pure ()
     Just tv -> do
-      conns <- liftIO (map snd <$> readTVarIO tv)
+      conns <- liftIO (map (snd . snd) <$> readTVarIO tv)
       forM_ conns $ \conn ->
+        liftIO (void (try (sendTextData conn (encodeMessage msgType dat))
+                        :: IO (Either SomeException ())))
+
+-- | Broadcast a server->client message only to the socket connections
+-- that authenticated with this token (i.e. one session's socket, when
+-- connected). Used for per-session GeneralCommand delivery. Failures
+-- are swallowed like in 'broadcastSocket'.
+broadcastSocketToToken :: Text -> Text -> Value -> AppM ()
+broadcastSocketToToken tok msgType dat = do
+  mTv <- getState socketConnsKey :: AppM (Maybe (TVar [(Unique, (Maybe Text, Connection))]))
+  case mTv of
+    Nothing -> pure ()
+    Just tv -> do
+      conns <- liftIO (readTVarIO tv)
+      forM_ [ c | (_, (mTok, c)) <- conns, mTok == Just tok ] $ \conn ->
         liftIO (void (try (sendTextData conn (encodeMessage msgType dat))
                         :: IO (Either SomeException ())))
 

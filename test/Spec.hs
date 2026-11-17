@@ -154,7 +154,7 @@ import FMS.Modules.Playback.Types
   , selectStreams
   )
 import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
-import FMS.Modules.Sessions.Types (PlaySession (..))
+import FMS.Modules.Sessions.Types (PlaySession (..), SessionCapabilities (..), applyCapabilities, emptyCapabilities, latestSessionForToken, validCommandName)
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
 import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..), countsByType, uptimeSeconds)
 import FMS.Modules.ApiDocs (methodText, routeToPath, routesToOpenApi, segmentToPathPiece)
@@ -1425,8 +1425,15 @@ main = do
   -- Sessions module (milestone 6c, docs/todo.org section 6): the pure
   -- session-map helpers (upsert/expire) and the PlaySession JSON roundtrip.
   let t0 = read "2026-01-01 00:00:00 UTC" :: UTCTime
-      s1 = PlaySession "s1" "1" (Just "1") (Just "admin") 0 False t0 t0
-      s2 = PlaySession "s2" "2" Nothing Nothing 12.5 True t0 (addUTCTime (-120) t0)
+      s1 = PlaySession
+        { psId = "s1", psItemId = "1", psUserId = Just "1", psUserName = Just "admin"
+        , psPositionSeconds = 0, psIsPaused = False, psStartedAt = t0, psLastPingAt = t0
+        , psPlayableMediaTypes = [], psSupportedCommands = []
+        , psSupportsMediaControl = False, psSupportsPersistentIdentifier = False
+        , psDeviceId = Nothing, psLastCommand = Nothing, psToken = Nothing
+        }
+      s2 = s1 { psId = "s2", psItemId = "2", psUserId = Nothing, psUserName = Nothing
+              , psPositionSeconds = 12.5, psIsPaused = True, psLastPingAt = addUTCTime (-120) t0 }
       s3 = s1 { psId = "s3", psLastPingAt = addUTCTime (-90) t0 }
       sessMap = HM.fromList [("s1", s1), ("s2", s2)]
   check "upsertSession inserts a new session"
@@ -1444,6 +1451,62 @@ main = do
     True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode s1))
       [ "\"Id\":", "\"ItemId\":", "\"UserId\":", "\"UserName\":"
       , "\"PositionSeconds\":", "\"IsPaused\":", "\"StartedAt\":", "\"LastPingAt\":" ])
+
+  -- Session capabilities + commands (todo Chromecast/AirPlay section):
+  -- backward-compatible JSON, capability merge, command-name validation,
+  -- token->session lookup.
+  let oldShape = "{\"Id\":\"s9\",\"ItemId\":\"1\",\"PositionSeconds\":0,"
+              ++ "\"IsPaused\":false,"
+              ++ "\"StartedAt\":\"2026-01-01T00:00:00Z\",\"LastPingAt\":\"2026-01-01T00:00:00Z\"}"
+      mOld = Aeson.decode (LBSC.pack oldShape) :: Maybe PlaySession
+      caps = SessionCapabilities
+        { scPlayableMediaTypes = ["Video", "Audio"]
+        , scSupportedCommands = ["VolumeUp", "VolumeDown"]
+        , scSupportsMediaControl = True
+        , scSupportsPersistentIdentifier = True
+        , scDeviceId = Just "dev-1"
+        }
+      s1c = applyCapabilities s1 caps
+  check "old session JSON (no capability fields) decodes with defaults"
+    (Just (False, [], [], False, Nothing, Nothing))
+    ((\s -> (psSupportsMediaControl s, psPlayableMediaTypes s, psSupportedCommands s
+            , psSupportsPersistentIdentifier s, psDeviceId s, psLastCommand s)) <$> mOld)
+  check "PlaySession roundtrip WITH capability fields set"
+    (Just s1c) (Aeson.decode (Aeson.encode s1c) :: Maybe PlaySession)
+  check "capability fields appear in JSON only when set"
+    (True, False)
+    ( BSC.isInfixOf "\"PlayableMediaTypes\":[\"Video\",\"Audio\"]" (LBS.toStrict (Aeson.encode s1c))
+    , BSC.isInfixOf "PlayableMediaTypes" (LBS.toStrict (Aeson.encode s1)) )
+  check "capability flags + DeviceId appear when set"
+    [True, True, True]
+    [ BSC.isInfixOf "\"SupportsMediaControl\":true" (LBS.toStrict (Aeson.encode s1c))
+    , BSC.isInfixOf "\"SupportsPersistentIdentifier\":true" (LBS.toStrict (Aeson.encode s1c))
+    , BSC.isInfixOf "\"DeviceId\":\"dev-1\"" (LBS.toStrict (Aeson.encode s1c)) ]
+  check "psToken is never serialized"
+    False (BSC.isInfixOf "Token" (LBS.toStrict (Aeson.encode (s1 { psToken = Just "sekret" }))))
+  check "applyCapabilities replaces lists/flags (merge, not append)"
+    (["Video"], ["VolumeUp"], True, Just "d2")
+    ( let c2 = applyCapabilities s1c (emptyCapabilities { scPlayableMediaTypes = ["Video"]
+                                                            , scSupportedCommands = ["VolumeUp"]
+                                                            , scSupportsMediaControl = True
+                                                            , scDeviceId = Just "d2" })
+      in (psPlayableMediaTypes c2, psSupportedCommands c2, psSupportsMediaControl c2, psDeviceId c2) )
+  check "SessionCapabilities empty body decodes to all defaults"
+    (Just emptyCapabilities) (Aeson.decode "{}" :: Maybe SessionCapabilities)
+  check "validCommandName: ok names, empty, 64 vs 65 chars, control chars"
+    [True, False, True, False, False, True]
+    [ validCommandName "VolumeUp"
+    , validCommandName ""
+    , validCommandName (T.replicate 64 "a")
+    , validCommandName (T.replicate 65 "a")
+    , validCommandName "bad\tname"
+    , validCommandName "SetVolume" ]
+  check "latestSessionForToken picks the most recent ping; Nothing when absent"
+    (Just "sB", Nothing)
+    ( fmap psId (latestSessionForToken "tok1" [ s1 { psId = "sA", psToken = Just "tok1", psLastPingAt = t0 }
+                                              , s1 { psId = "sB", psToken = Just "tok1", psLastPingAt = addUTCTime 10 t0 }
+                                              , s1 { psId = "sC", psToken = Just "tok2" } ])
+    , fmap psId (latestSessionForToken "nope" [s1 { psToken = Just "tok1" }]) )
 
   -- Genres + Playlists (milestone 10a, docs/todo.org section 10): the
   -- pure genre grouping, the pure playlist item helpers, the Playlist

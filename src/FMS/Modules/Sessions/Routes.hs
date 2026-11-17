@@ -4,21 +4,36 @@ module FMS.Modules.Sessions.Routes
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, object, withObject, (.:), (.:?), (.=))
+import qualified Data.ByteString.Lazy as BL
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, object, withObject, (.:), (.:?), (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.Wai (Request, Response, strictRequestBody)
+import Network.HTTP.Types (status204)
+import Network.Wai (Request, Response, responseLBS, strictRequestBody)
 
 import FMS.Core.Module (Route, Segment (..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.User (User (..))
-import FMS.Modules.Auth.Monad (MonadAuth (resolveToken))
-import FMS.Modules.Socket (broadcastSocket)
+import FMS.Modules.Auth.Monad (MonadAuth (resolveToken), currentUserFromReq)
+import FMS.Modules.Socket (broadcastSocket, broadcastSocketToToken)
 import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.Library (MonadLibrary (..))
-import FMS.Modules.Sessions.Monad (MonadSessions (..))
+import FMS.Modules.Sessions.Monad
+  ( MonadSessions (..)
+  , applySessionCapabilitiesTo
+  , ensureSessionForToken
+  , getSessionById
+  , recordSessionCommand
+  , setSessionToken
+  )
+import FMS.Modules.Sessions.Types
+  ( PlaySession (..)
+  , SessionCapabilities (..)
+  , emptyCapabilities
+  , validCommandName
+  )
 
 -- | The live playback session routes (docs/todo.org section 6, milestone
 -- 6c), Jellyfin-shaped: @POST /Sessions/Playing@ starts a session,
@@ -35,7 +50,14 @@ sessionsRoutes =
   , post [Lit "Sessions", Lit "Playing", Lit "Progress"]     progressReportHandler
   , post [Lit "Sessions", Lit "Playing", Lit "Ping"]         pingHandler
   , post [Lit "Sessions", Lit "Playing", Lit "Stopped"]      stoppedHandler
+  , post [Lit "Sessions", Lit "Capabilities", Lit "Full"]    capabilitiesHandler
+  , post [Lit "Sessions", Lit "Capabilities"]                capabilitiesHandler
   , get  [Lit "Sessions"]                                     listSessionsHandler
+  -- capture routes come after the literal ones (first match wins)
+  , get  [Lit "Sessions", Capture "id"]                       sessionViewHandler
+  , post [Lit "Sessions", Capture "id", Lit "Command"]        commandHandler
+  , post [Lit "Sessions", Capture "id", Lit "Command", Capture "command"]
+                                                              commandPathHandler
   ]
 
 -- Request bodies ------------------------------------------------------------
@@ -113,6 +135,11 @@ playingHandler _captures req = do
           mUser <- currentUserFromRequest req
           let pos = fromMaybe 0 (plPositionSeconds pr)
           s <- startSession (plItemId pr) (userId <$> mUser) pos
+          -- remember the creating token so capabilities/commands can
+          -- find this session and its websocket later
+          _ <- case tokenFromRequest req of
+                 Just tok -> setSessionToken (psId s) tok
+                 Nothing  -> pure Nothing
           _ <- broadcastSocket "PlaybackStart" (toJSON s)   -- milestone 8
           fireWebhooks "PlaybackStart" (toJSON s)           -- milestone 12
           pure (jsonResponse s)
@@ -183,6 +210,112 @@ stoppedHandler _captures req = do
 listSessionsHandler :: [(Text, Text)] -> Request -> AppM Response
 listSessionsHandler _captures _req =
   jsonResponse <$> listSessions
+
+-- | Body of @POST /Sessions/:id/Command@:
+-- @{\"Name\": \"SetVolume\", \"Arguments\"?: {...}}@.
+data CommandRequest = CommandRequest
+  { crName      :: Text
+  , crArguments :: Maybe Value
+  }
+
+instance FromJSON CommandRequest where
+  parseJSON = withObject "CommandRequest" $ \o ->
+    CommandRequest
+      <$> o .:  "Name"
+      <*> o .:? "Arguments"
+
+-- | @POST /Sessions/Capabilities/Full@ (and the @POST
+-- /Sessions/Capabilities@ alias) — 204. Body is a partial capability
+-- object (@PlayableMediaTypes@, @SupportedCommands@,
+-- @SupportsMediaControl@, @SupportsPersistentIdentifier@, @DeviceId@);
+-- every field is optional and an EMPTY body is accepted (all defaults).
+-- The capabilities are upserted onto the session identified by the
+-- request's auth token, creating a lightweight session when none exists
+-- yet. 400 on malformed JSON, 401 without a valid token.
+capabilitiesHandler :: [(Text, Text)] -> Request -> AppM Response
+capabilitiesHandler _captures req = do
+  body <- liftIO (strictRequestBody req)
+  caps <- if BL.null body
+            then pure emptyCapabilities
+            else case eitherDecode body of
+                   Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+                   Right c  -> pure (c :: SessionCapabilities)
+  case tokenFromRequest req of
+    Nothing  -> throwError (Unauthorized "authentication required")
+    Just tok -> do
+      mUser <- resolveToken tok
+      s <- ensureSessionForToken tok (userId <$> mUser)
+      _ <- applySessionCapabilitiesTo (psId s) caps
+      pure (responseLBS status204 [] "")
+
+-- | @GET /Sessions/:id@ — 200 with the session JSON (including the
+-- capability fields when set). Admin or the session owner only:
+-- 401 without a valid token, 403 for another user's session, 404 for an
+-- unknown id.
+sessionViewHandler :: [(Text, Text)] -> Request -> AppM Response
+sessionViewHandler captures req = do
+  mUser <- currentUserFromReq req
+  case mUser of
+    Nothing  -> throwError (Unauthorized "authentication required")
+    Just u -> do
+      let sid = fromMaybe "" (lookup "id" captures)
+      mS <- getSessionById sid
+      case mS of
+        Nothing -> throwError (NotFound ("no active session with id " <> sid))
+        Just s
+          | isAdmin u                        -> pure (jsonResponse s)
+          | psUserId s == Just (userId u)    -> pure (jsonResponse s)
+          | otherwise                        -> throwError (Forbidden "not your session")
+
+-- | @POST /Sessions/:id/Command@ — body @{\"Name\": ..., \"Arguments\"?:
+-- ...}@; 204 on success. The command is broadcast as a websocket
+-- @GeneralCommand@ to the session's socket (when connected) and recorded
+-- as LastCommand on the session. 400 on a malformed body or an invalid
+-- command name, 401/403 per the view rule, 404 for an unknown session.
+commandHandler :: [(Text, Text)] -> Request -> AppM Response
+commandHandler captures req = do
+  body <- liftIO (strictRequestBody req)
+  case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right cr -> runCommand captures req (crName cr) (fromMaybe (object []) (crArguments cr))
+
+-- | @POST /Sessions/:id/Command/:command@ — same as 'commandHandler' but
+-- the command name comes from the path segment and no body is needed.
+commandPathHandler :: [(Text, Text)] -> Request -> AppM Response
+commandPathHandler captures req =
+  runCommand captures req
+    (fromMaybe "" (lookup "command" captures))
+    (object [])
+
+-- | Shared implementation of the two command routes: validate the name,
+-- enforce admin-or-owner, record LastCommand, targeted-broadcast
+-- GeneralCommand, then 204.
+runCommand :: [(Text, Text)] -> Request -> Text -> Value -> AppM Response
+runCommand captures req cmd args
+  | not (validCommandName cmd) =
+      throwError (BadRequest "invalid command name (empty, over 64 chars, or control chars)")
+  | otherwise = do
+      mUser <- currentUserFromReq req
+      case mUser of
+        Nothing -> throwError (Unauthorized "authentication required")
+        Just u -> do
+          let sid = fromMaybe "" (lookup "id" captures)
+          mS <- getSessionById sid
+          case mS of
+            Nothing -> throwError (NotFound ("no active session with id " <> sid))
+            Just s
+              | not (isAdmin u) && psUserId s /= Just (userId u) ->
+                  throwError (Forbidden "not your session")
+              | otherwise -> do
+                  _ <- recordSessionCommand sid cmd
+                  case psToken s of
+                    Just tok -> broadcastSocketToToken tok "GeneralCommand"
+                                  (object [ "Name"      .= cmd
+                                          , "Arguments" .= args
+                                          , "SessionId" .= sid
+                                          ])
+                    Nothing  -> pure ()
+                  pure (responseLBS status204 [] "")
 
 -- Helpers -------------------------------------------------------------------
 

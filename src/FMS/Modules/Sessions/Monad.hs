@@ -6,9 +6,15 @@ module FMS.Modules.Sessions.Monad
   , upsertSession
   , expireSessions
   , newSessionId
+  , getSessionById
+  , sessionForToken
+  , ensureSessionForToken
+  , setSessionToken
+  , applySessionCapabilitiesTo
+  , recordSessionCommand
   ) where
 
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -21,7 +27,12 @@ import System.Random (newStdGen, randomRs)
 import FMS.Core.Monad (AppM, getState, putState)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (MonadAuth (getUser))
-import FMS.Modules.Sessions.Types (PlaySession (..))
+import FMS.Modules.Sessions.Types
+  ( PlaySession (..)
+  , SessionCapabilities
+  , applyCapabilities
+  , latestSessionForToken
+  )
 
 -- | Namespaced key under which the sessions module stashes its
 -- @TVar (HashMap Text PlaySession)@ in the typed registry
@@ -67,6 +78,13 @@ instance MonadSessions AppM where
           , psIsPaused        = False
           , psStartedAt       = now
           , psLastPingAt      = now
+          , psPlayableMediaTypes           = []
+          , psSupportedCommands            = []
+          , psSupportsMediaControl         = False
+          , psSupportsPersistentIdentifier = False
+          , psDeviceId                     = Nothing
+          , psLastCommand                  = Nothing
+          , psToken                        = Nothing
           }
     modifySessions (upsertSession s)
     pure s
@@ -133,7 +151,81 @@ initSessionsState = do
   tv <- liftIO (newTVarIO (HM.empty :: HashMap Text PlaySession))
   putState sessionsStateKey tv
 
+-- Casting/session-capability helpers (todo Chromecast/AirPlay section) -------
+
+-- | Look up a session by id (no stale-expiry pass).
+getSessionById :: Text -> AppM (Maybe PlaySession)
+getSessionById sid = do
+  tv <- sessionsTVar
+  liftIO (HM.lookup sid <$> readTVarIO tv)
+
+-- | The most recently pinged active session created with this auth token.
+sessionForToken :: Text -> AppM (Maybe PlaySession)
+sessionForToken tok = latestSessionForToken tok <$> listSessions
+
+-- | Find the session for this auth token, or create a lightweight one
+-- (no item yet, empty ItemId) keyed by the token, so capability reporting
+-- works before the first @POST /Sessions/Playing@.
+ensureSessionForToken :: Text -> Maybe Text -> AppM PlaySession
+ensureSessionForToken tok mUserId = do
+  mS <- sessionForToken tok
+  case mS of
+    Just s  -> pure s
+    Nothing -> do
+      now <- liftIO getCurrentTime
+      sid <- liftIO newSessionId
+      mUser <- case mUserId of
+        Nothing  -> pure Nothing
+        Just uid -> getUser uid
+      let s = PlaySession
+            { psId              = sid
+            , psItemId          = ""
+            , psUserId          = mUserId
+            , psUserName        = userName <$> mUser
+            , psPositionSeconds = 0
+            , psIsPaused        = False
+            , psStartedAt       = now
+            , psLastPingAt      = now
+            , psPlayableMediaTypes           = []
+            , psSupportedCommands            = []
+            , psSupportsMediaControl         = False
+            , psSupportsPersistentIdentifier = False
+            , psDeviceId                     = Nothing
+            , psLastCommand                  = Nothing
+            , psToken                        = Just tok
+            }
+      modifySessions (upsertSession s)
+      pure s
+
+-- | Record the creating token on an existing session (so later commands
+-- can be routed to its websocket). Nothing when the id is unknown.
+setSessionToken :: Text -> Text -> AppM (Maybe PlaySession)
+setSessionToken sid tok = updateSession sid (\s -> s { psToken = Just tok })
+
+-- | Merge reported capabilities onto a session (pure 'applyCapabilities'
+-- + upsert). Nothing when the id is unknown.
+applySessionCapabilitiesTo :: Text -> SessionCapabilities -> AppM (Maybe PlaySession)
+applySessionCapabilitiesTo sid caps = updateSession sid (`applyCapabilities` caps)
+
+-- | Record the last GeneralCommand name on a session.
+recordSessionCommand :: Text -> Text -> AppM (Maybe PlaySession)
+recordSessionCommand sid cmd = updateSession sid (\s -> s { psLastCommand = Just cmd })
+
 -- Internals ---------------------------------------------------------------
+
+-- | Shared update helper: apply a pure update to the session with the
+-- given id and upsert the result.
+updateSession :: Text -> (PlaySession -> PlaySession) -> AppM (Maybe PlaySession)
+updateSession sid f = do
+  tv <- sessionsTVar
+  liftIO $ atomically $ do
+    mS <- HM.lookup sid <$> readTVar tv
+    case mS of
+      Nothing -> pure Nothing
+      Just s  -> do
+        let s' = f s
+        modifyTVar' tv (HM.insert sid s')
+        pure (Just s')
 
 sessionsTVar :: AppM (TVar (HashMap Text PlaySession))
 sessionsTVar = do

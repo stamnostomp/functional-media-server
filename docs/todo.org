@@ -184,7 +184,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] case-insensitive route paths (Lit segments fold case, captures keep case) + case-insensitive query param NAMES (values keep case; sortOrder desc/descending + type value case-folded) + ParentId folder filter (m17a)
    - [X] PascalCase JSON keys: MediaItem (Id/Name/Type/Path/Size/MimeType/DateCreated/FolderId/SeriesName/SeasonNumber/EpisodeNumber/ExtraType/Versions), User public (Id/Name/IsAdministrator/...), BoxSet pseudo-items, metadata envelope; internal persistence JSON unchanged (m17b)
    - [X] /Users/:id/Views, /Shows/NextUp?userId= envelope, /Users/:id/Items/Latest, /Library/VirtualFolders, /DisplayPreferences, PascalCase /popular+/continuewatching entries (m17c)
-** TODO Chromecast/AirPlay are client-side; ensure casting endpoints work
+** DONE Casting/session-capability endpoints: POST /Sessions/Capabilities[/Full] (204, replace-merge onto the token session, all fields optional), GET /Sessions/:id (admin-or-owner), POST /Sessions/:id/Command and /Sessions/:id/Command/:command (204, name validated, LastCommand recorded, GeneralCommand broadcast over the session websocket); capability fields appear PascalCase in GET /Sessions when set (m18l)
 
 * 14. Security :fix:
 ** DONE Path sanitization audited (tester audit PASS): all FS-touching routes DB-gate ids via getItemWithAccess (404), seg names [A-Za-z0-9._-]+no-"..", image types [A-Za-z]+, version/index parsed as Int; traversal battery clean, zero secret leaks

@@ -168,7 +168,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Server logs endpoint + log levels: in-memory ring buffer (cap 500, "system.logbuf") fed by MonadLog; =GET /System/Logs= (file list) + =GET /System/Logs/Log?startIndex&limit= (newest-first envelope); =FMS_LOG_LEVEL= (debug/info/warn/error) gates printing, buffer ungated
 ** DONE Branding + startup wizard state: =GET/POST /Branding/Configuration= {LoginDisclaimer, CustomCss, SplashscreenEnabled}, persisted in config.json, reloaded at boot
 ** DONE Webhooks: =/Webhooks= CRUD + =POST /Webhooks/:id/Test=; webhooks.json; fires PlaybackStart/Progress/Stop, LibraryChanged, UserDataSaved as JSON {Event,Data,Timestamp,ServerId} (X-Webhook-Secret header when set, 5s timeout, forked non-blocking); event subscription filter incl. "*"
-** TODO Plugin system architecture (install/list/enable plugins) — see [[file:modules.org][modules.org]]
+** DONE Plugin system skeleton: FMS.Modules.Plugins registry with built-in entries (webhooks enabled; livetv/dlna disabled), plugins.json persistence with boot overlay (enable state + unknown ids survive restarts), in-process hook registry under "plugins.hooks", GET /Plugins + GET /Plugins/:id + admin POST /Plugins/:id/Enable|Disable (PascalCase JSON) (m18e); dynamic loading/marketplace still open (roadmap)
 
 * 12. Live TV and DLNA (low priority) :feature:
 ** TODO Tuners: M3U, HDHomeRun; channel lineups (=/LiveTv/Channels=)

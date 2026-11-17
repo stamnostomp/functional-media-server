@@ -125,6 +125,7 @@ import FMS.Modules.Devices.Persistence (loadDevices, saveDevices)
 import FMS.Modules.Devices.Types (Device (..), upsertDevice)
 import FMS.Modules.Segments.Persistence (loadSegments, saveSegments)
 import FMS.Modules.Segments.Types (MediaSegment (..), secondsToTicks, ticksToSeconds, validSegmentType, validateSegment)
+import FMS.Modules.Plugins.Types (Plugin (..), builtinPlugins, overlayPlugins, registerHook, unregisterHook)
 import FMS.Modules.Socket (addConn, encodeMessage, parseApiKey, parseApiKeyFromPath, removeConn)
 import FMS.Modules.Playback.Probe
   ( containerFromExtension
@@ -2991,5 +2992,40 @@ main = do
     [("favorite", 2), ("hd", 1)]
     (tagsFromMetadata [ emptyMetadata { metaTags = ["favorite", "hd", "favorite"] }
                       , emptyMetadata { metaTags = ["favorite"] } ])
+
+  -- Plugin system skeleton: Plugin JSON, overlay/seed merge, hook registry
+  let pl = Plugin "livetv" "Live TV" "0.0.0" "Live TV tuners (not implemented)." False
+      plJ = LBS.toStrict (Aeson.encode pl)
+  check "Plugin ToJSON uses PascalCase keys Id/Name/Version/Description/Enabled"
+    [True, True, True, True, True]
+    [ "\"Id\":\"livetv\"" `BSC.isInfixOf` plJ
+    , "\"Name\":\"Live TV\"" `BSC.isInfixOf` plJ
+    , "\"Version\":\"0.0.0\"" `BSC.isInfixOf` plJ
+    , "\"Description\":\"Live TV tuners (not implemented).\"" `BSC.isInfixOf` plJ
+    , "\"Enabled\":false" `BSC.isInfixOf` plJ ]
+  check "Plugin JSON roundtrip"
+    (Just pl) (Aeson.decode (Aeson.encode pl) :: Maybe Plugin)
+  check "Plugin FromJSON defaults Enabled=True on partial JSON"
+    (Just True) (plugEnabled <$> (Aeson.decode "{\"Id\":\"x\"}" :: Maybe Plugin))
+  check "builtinPlugins: at least webhooks(enabled), livetv(disabled), dlna(disabled)"
+    [("dlna", False), ("livetv", False), ("webhooks", True)]
+    (sort [(plugId p, plugEnabled p) | p <- builtinPlugins])
+  let persisted = HM.fromList
+        [ ("livetv", pl { plugEnabled = True })                       -- disabled builtin, enabled in file
+        , ("future-plugin", Plugin "future-plugin" "Future" "9.9" "not built in" True) ]  -- unknown id
+      mergedPlugs = overlayPlugins builtinPlugins persisted
+  check "overlayPlugins: persisted enabled state wins, unknown persisted id kept, missing builtins defaulted"
+    (Just True, Just True, Just False, 4)
+    ( plugEnabled <$> HM.lookup "livetv" mergedPlugs
+    , plugEnabled <$> HM.lookup "future-plugin" mergedPlugs
+    , plugEnabled <$> HM.lookup "dlna" mergedPlugs
+    , HM.size mergedPlugs )
+  check "registerHook/unregisterHook: dedupe, per-hook lists, removal"
+    ( HM.fromList [("scan", ["webhooks", "dlna"]), ("play", ["webhooks"])]
+    , HM.fromList [("scan", ["dlna"]), ("play", ["webhooks"])]
+    , HM.fromList [("scan", ["webhooks"]), ("play", ["webhooks"])] )
+    ( registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty)))
+    , unregisterHook "scan" "webhooks" (registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty)))
+    , unregisterHook "scan" "dlna" (registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty))) )
 
   putStrLn "All tests passed."

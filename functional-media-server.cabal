@@ -104,6 +104,11 @@ library
                       FMS.Modules.Devices.Persistence
                       FMS.Modules.Devices.Monad
                       FMS.Modules.Devices.Routes
+                      FMS.Modules.Plugins
+                      FMS.Modules.Plugins.Types
+                      FMS.Modules.Plugins.Persistence
+                      FMS.Modules.Plugins.Monad
+                      FMS.Modules.Plugins.Routes
                       FMS.Modules.Webhooks
                       FMS.Modules.Webhooks.Types
                       FMS.Modules.Webhooks.Persistence

@@ -44,7 +44,8 @@ import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlur
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
-import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
+import FMS.Core.Router (allowedOriginsHeader, errorBody, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3)
@@ -3109,5 +3110,28 @@ main = do
      check "pooledMapIO: stat sizes match the written byte counts"
        (map (\(_, s, _) -> s) pooled8) (map (fromIntegral :: Int -> Integer) [1 .. 40 :: Int])
      removeDirectoryRecursive poolDir
+
+  -- Error model: one body shape {"error","status","requestId"} everywhere
+  check "statusForError maps all 7 AppError constructors to 400/401/403/404/429/503/500"
+    [400, 401, 403, 404, 429, 503, 500]
+    [ statusForError (BadRequest "x"), statusForError (Unauthorized "x")
+    , statusForError (Forbidden "x"), statusForError (NotFound "x")
+    , statusForError (TooManyRequests "x"), statusForError (ServiceUnavailable "x")
+    , statusForError (InternalError "x") ]
+  check "errorMessage extracts the message of each constructor"
+    ["m1", "m2", "m3", "m4", "m5", "m6", "m7"]
+    [ errorMessage (BadRequest "m1"), errorMessage (Unauthorized "m2")
+    , errorMessage (Forbidden "m3"), errorMessage (NotFound "m4")
+    , errorMessage (TooManyRequests "m5"), errorMessage (ServiceUnavailable "m6")
+    , errorMessage (InternalError "m7") ]
+  let eb = LBS.toStrict (Aeson.encode (errorBody "boom" 404 "00ff"))
+  check "errorBody has exactly error+status+requestId with correct values"
+    (True, True, True, True)
+    ( "\"error\":\"boom\"" `BSC.isInfixOf` eb
+    , "\"status\":404" `BSC.isInfixOf` eb
+    , "\"requestId\":\"00ff\"" `BSC.isInfixOf` eb
+    , case errorBody "boom" 404 "00ff" of
+        Aeson.Object o -> length (KeyMap.keys o) == 3
+        _              -> False )
 
   putStrLn "All tests passed."

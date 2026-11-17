@@ -10,12 +10,13 @@ module FMS.Core.Router
   , allowedOriginsHeader
   , securityHeaders
   , normalizeSegments
+  , errorBody
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (encode, object, (.=))
+import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString as B
 import Data.CaseInsensitive (original)
 import Data.HashMap.Strict (HashMap)
@@ -27,8 +28,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
-  ( Header, Method, ResponseHeaders
-  , status204, status400, status401, status403, status404, status429, status500, status503
+  ( Header, Method, ResponseHeaders, mkStatus
+  , status204, status401
   )
 import Network.Socket (SockAddr (..), hostAddressToTuple)
 import Network.Wai
@@ -38,7 +39,7 @@ import Network.Wai
   )
 
 import FMS.Core.Module (Module(..), Route(..), Segment(..))
-import FMS.Core.Monad (AppError(..), AppEnv(..), AppM, getState, putState, runApp)
+import FMS.Core.Monad (AppError(..), AppEnv(..), AppM, errorMessage, getState, putState, runApp, statusForError)
 import FMS.Core.RateLimit
   ( Bucket, newBucket, tryTake, rateLimitBucketsKey, requestCounterKey, requestIdHex
   , rateLimitClass, bucketKeyFor, retryAfterSeconds )
@@ -304,7 +305,7 @@ tokenIsValid req =
 unauthorizedResponse :: Text -> Response
 unauthorizedResponse reqId =
   responseLBS status401 jsonContentType
-    (encode (object ["error" .= ("unauthorized" :: Text), "requestId" .= reqId]))
+    (encode (errorBody "unauthorized" 401 reqId))
 
 -- | First route matching method + path segments; captures bound as pairs.
 firstMatch :: [Route] -> Method -> [Text] -> Maybe (Route, [(Text, Text)])
@@ -370,21 +371,22 @@ securityHeaders =
   , ("Referrer-Policy", "no-referrer")
   ]
 
--- | Map an 'AppError' to its HTTP response. Milestone 14a: the body is
--- JSON @{\"error\": msg, \"requestId\": id}@ so clients can correlate
--- failures with server logs.
+-- | The ONE error body shape (error model, docs/todo.org section 2):
+-- @{\"error\": msg, \"status\": <http status int>, \"requestId\": id}@.
+-- Pure, exported for tests; every error response (AppError mapping, the
+-- 401 unauthorized response, the 429 rate-limited response) renders
+-- through it so clients always see the same three keys.
+errorBody :: Text -> Int -> Text -> Value
+errorBody msg code reqId =
+  object [ "error" .= msg, "status" .= code, "requestId" .= reqId ]
+
+-- | Map an 'AppError' to its HTTP response. The body is the standard
+-- 'errorBody' ({\"error\", \"status\", \"requestId\"}) so clients can
+-- correlate failures with server logs and read the status from the body.
 errorResponse :: Text -> AppError -> Response
 errorResponse reqId err =
-  let (st, msg) = case err of
-        BadRequest     m -> (status400, m)
-        Unauthorized   m -> (status401, m)
-        Forbidden      m -> (status403, m)
-        NotFound       m -> (status404, m)
-        TooManyRequests m -> (status429, m)
-        ServiceUnavailable m -> (status503, m)  -- milestone 15
-        InternalError  m -> (status500, m)
-  in responseLBS st jsonContentType
-       (encode (object ["error" .= msg, "requestId" .= reqId]))
+  responseLBS (mkStatus (statusForError err) "") jsonContentType
+    (encode (errorBody (errorMessage err) (statusForError err) reqId))
 
 jsonContentType :: ResponseHeaders
 jsonContentType = [("Content-Type", "application/json")]

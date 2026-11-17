@@ -7,6 +7,8 @@ module FMS.Core.Monad
   , MonadLog(..)
   , putState
   , getState
+  , statusForError
+  , errorMessage
   , acquireFfmpegSlot
   , releaseFfmpegSlot
   , ffmpegSlotGraceSec
@@ -44,6 +46,30 @@ data AppError
   | ServiceUnavailable Text -- ^ milestone 15 ffmpeg slot exhaustion; maps to HTTP 503
   | InternalError Text
   deriving (Show, Eq)
+
+-- | Milestone (error model): the HTTP status code of an 'AppError'.
+-- Pure, exported for tests and for the router's 'errorBody'.
+statusForError :: AppError -> Int
+statusForError e = case e of
+  BadRequest _     -> 400
+  Unauthorized _   -> 401
+  Forbidden _      -> 403
+  NotFound _       -> 404
+  TooManyRequests _ -> 429
+  ServiceUnavailable _ -> 503
+  InternalError _  -> 500
+
+-- | Milestone (error model): the human-readable message of an 'AppError'.
+-- Pure, exported so the router renders one consistent body shape.
+errorMessage :: AppError -> Text
+errorMessage e = case e of
+  BadRequest m     -> m
+  Unauthorized m   -> m
+  Forbidden m      -> m
+  NotFound m       -> m
+  TooManyRequests m -> m
+  ServiceUnavailable m -> m
+  InternalError m  -> m
 
 -- | Read-only environment plus the typed state registry that modules use to
 -- stash their own state under namespaced keys.

@@ -74,14 +74,17 @@ instance FromJSON User where
 
 -- | Public API JSON: no password hash, just whether one is set. Includes
 -- the per-folder access list (milestone 5d) as @AllowedFolders@.
+-- Milestone 17b: all keys PascalCase (jellyfin-web reads Id/Name/
+-- IsAdministrator/...). The internal 'toInternalJSON'/'FromJSON' shape
+-- (lowercase, with the hash) is unchanged, so users.json is untouched.
 instance ToJSON User where
   toJSON u = object
-    [ "id"            .= userId u
-    , "name"          .= userName u
-    , "isAdmin"       .= isAdmin u
-    , "hasPassword"   .= not (T.null (passwordHash u))
+    [ "Id"            .= userId u
+    , "Name"          .= userName u
+    , "IsAdministrator" .= isAdmin u
+    , "HasPassword"   .= not (T.null (passwordHash u))
     , "AllowedFolders" .= userAllowedFolders u
-    , "enabled"       .= userEnabled u          -- milestone 9
+    , "Enabled"       .= userEnabled u          -- milestone 9
     , "Policy"        .= userPolicy u           -- milestone 9
     , "MustChangePassword" .= userMustChangePassword u  -- milestone 8b
     ]

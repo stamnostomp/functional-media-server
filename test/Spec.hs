@@ -784,11 +784,11 @@ main = do
       uj3 = LBS.toStrict (Aeson.encode (User "3" "nopw" "" False [] Nothing emptyUserPolicy True False))
   check "User ToJSON omits passwordHash" False ("passwordHash" `BSC.isInfixOf` uj1)
   check "User ToJSON has hasPassword:true when a hash is set"
-    True ("\"hasPassword\":true" `BSC.isInfixOf` uj1)
+    True ("\"HasPassword\":true" `BSC.isInfixOf` uj1)
   check "User ToJSON has hasPassword:false when the hash is empty"
-    True ("\"hasPassword\":false" `BSC.isInfixOf` uj3)
+    True ("\"HasPassword\":false" `BSC.isInfixOf` uj3)
   check "User ToJSON carries id/name/isAdmin"
-    True (all (`BSC.isInfixOf` uj1) ["\"id\":\"1\"", "\"name\":\"admin\"", "\"isAdmin\":true"])
+    True (all (`BSC.isInfixOf` uj1) ["\"Id\":\"1\"", "\"Name\":\"admin\"", "\"IsAdministrator\":true"])
   check "User FromJSON parses the internal full shape"
     (Just u1) (Aeson.decode (Aeson.encode (toInternalJSON u1)) :: Maybe User)
 
@@ -1379,7 +1379,7 @@ main = do
   check "web page plays via /stream/" True ("/stream/" `BSC.isInfixOf` LBS.toStrict webPageHtml)
   check "web page links thumbs, HLS and metadata"
     True (all (`BSC.isInfixOf` LBS.toStrict webPageHtml)
-      ["/items/'+it.id+'/thumb", "/videos/'+it.id+'/main.m3u8", "/items/'+it.id+'/metadata"])
+      ["/items/'+it.Id+'/thumb", "/videos/'+it.Id+'/main.m3u8", "/items/'+it.Id+'/metadata"])
   check "web page is pure ASCII" True (LBS.all (<= 0x7F) webPageHtml)
 
   -- Media folders (milestone 2c, docs/todo.org section 2): folder JSON,
@@ -1601,10 +1601,10 @@ main = do
         _              -> []
       keysOf v = map (Key.toText . fst) (lookupObj v)
   check "projectFields keeps requested keys (case-insensitive) plus id"
-    ["id", "title"] (keysOf (projectFields ["Title"] iv))
+    ["Id", "Name"] (keysOf (projectFields ["Name"] iv))
   check "projectFields empty list is identity" iv (projectFields [] iv)
   check "projectFields keeps only id when nothing requested matches"
-    ["id"] (keysOf (projectFields ["nope"] iv))
+    ["Id"] (keysOf (projectFields ["nope"] iv))
   check "projectFields non-object passthrough"
     (Aeson.String "hello") (projectFields ["id"] (Aeson.String "hello"))
   check "projectFields result still encodes"
@@ -1623,7 +1623,7 @@ main = do
   check "attachUserData without a lookup is identity"
     iv (attachUserData Nothing (qi "1" "movie") iv)
   check "attachUserData + projectFields: fields=UserData keeps the record"
-    [ "UserData", "id" ]
+    [ "Id", "UserData" ]
     (keysOf (projectFields ["userdata"] (attachUserData (Just ud5eLookup) (qi "1" "movie") iv)))
 
   -- Embedded subtitle streams (milestone 3f, docs/todo.org section 7).
@@ -1823,11 +1823,11 @@ main = do
   check "boxSetIdFor prefixes the collection id" "boxset-abc" (boxSetIdFor "abc")
   check "isBoxSetId recognises pseudo-item ids" (True, False) (isBoxSetId "boxset-abc", isBoxSetId "1")
   let bvJson = LBSC.unpack (Aeson.encode (boxSetItemValue col))
-  check "boxSetItemValue has id/title/type/itemCount keys"
-    True (  "\"id\":\"boxset-abc\"" `isInfixOf` bvJson
-         && "\"title\":\"Favs\"" `isInfixOf` bvJson
-         && "\"type\":\"BoxSet\"" `isInfixOf` bvJson
-         && "\"itemCount\":2" `isInfixOf` bvJson )
+  check "boxSetItemValue has Id/Name/Type/ItemCount keys (milestone 17b)"
+    True (  "\"Id\":\"boxset-abc\"" `isInfixOf` bvJson
+         && "\"Name\":\"Favs\"" `isInfixOf` bvJson
+         && "\"Type\":\"BoxSet\"" `isInfixOf` bvJson
+         && "\"ItemCount\":2" `isInfixOf` bvJson )
   check "typeFilterIncludesBoxSet type=BoxSet" True (typeFilterIncludesBoxSet [("type", "BoxSet")])
   check "typeFilterIncludesBoxSet is case-insensitive" True (typeFilterIncludesBoxSet [("type", "boxset")])
   check "typeFilterIncludesBoxSet includeItemTypes=Movie,BoxSet" True
@@ -2545,5 +2545,30 @@ main = do
     ( map itemId (filterByParent [("parentid", "1")] items17)
     , map itemId (filterByParent [("parentid", "")] items17)
     , map itemId (filterByParent [] items17) )
+
+  -- Milestone 17b (jellyfin-web compat): PascalCase JSON keys for MediaItem
+  -- and the public User; the internal persistence JSON is unchanged.
+  let jsonKeys v = case v of
+        Aeson.Object o -> sort (map Key.toText (KeyMap.keys o))
+        _              -> []
+      u17b = User "1" "admin" "hash" True [] Nothing emptyUserPolicy True False
+  check "MediaItem ToJSON uses exactly the PascalCase Jellyfin key set"
+    [ "DateCreated", "EpisodeNumber", "ExtraType", "FolderId", "Id", "MimeType"
+    , "Name", "Path", "SeasonNumber", "SeriesName", "Size", "Type", "Versions" ]
+    (jsonKeys (Aeson.toJSON (testItem { itemId = "1" })))
+  check "User public ToJSON uses exactly the PascalCase key set"
+    [ "AllowedFolders", "Enabled", "HasPassword", "Id", "IsAdministrator"
+    , "MustChangePassword", "Name", "Policy" ]
+    (jsonKeys (Aeson.toJSON u17b))
+  check "User internal JSON keeps the lowercase persistence keys (unchanged)"
+    True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode (toInternalJSON u17b)))
+      [ "\"userId\":", "\"userName\":", "\"passwordHash\":", "\"isAdmin\":"
+      , "\"allowedFolders\":", "\"mustChangePassword\":" ])
+  check "User internal JSON roundtrip still decodes"
+    (Just u17b) (Aeson.decode (Aeson.encode (toInternalJSON u17b)) :: Maybe User)
+  let iv17b = Aeson.toJSON (testItem { itemId = "1" })
+  check "projectFields fields=Name and fields=name both keep Id+Name (case-insensitive)"
+    (["Id", "Name"], ["Id", "Name"])
+    (jsonKeys (projectFields ["Name"] iv17b), jsonKeys (projectFields ["name"] iv17b))
 
   putStrLn "All tests passed."

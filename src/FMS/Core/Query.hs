@@ -172,7 +172,9 @@ projectFields fields v = case v of
     | otherwise   -> Object (KeyMap.filterWithKey (\k _ -> keep k) o)
     where
       wanted = [ T.toCaseFold (T.strip f) | f <- fields, not (T.null (T.strip f)) ]
-      keep k = k == Key.fromText "id" || T.toCaseFold (Key.toText k) `elem` wanted
+      -- milestone 17b: the id key is "Id" now; compare case-insensitively so
+      -- fields=Id / fields=id both keep it
+      keep k = T.toCaseFold (Key.toText k) == "id" || T.toCaseFold (Key.toText k) `elem` wanted
   _ -> v
 
 -- | Pure (milestone 7): does the effective type filter (@type@ or

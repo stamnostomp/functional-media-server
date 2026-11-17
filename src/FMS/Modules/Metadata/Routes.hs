@@ -46,13 +46,13 @@ metadataHandler captures req =
         Just item -> do
           mMeta <- getMetadata i
           pure (jsonResponse (object
-            [ "id"       .= itemId item
-            , "title"    .= itemTitle item
-            , "path"     .= itemPath item
-            , "size"     .= itemSize item
-            , "mime"     .= itemMime item
-            , "addedAt"  .= itemAddedAt item
-            , "metadata" .= mMeta
+            [ "Id"          .= itemId item       -- milestone 17b: PascalCase
+            , "Name"        .= itemTitle item    --   item keys, matching
+            , "Path"        .= itemPath item     --   MediaItem's ToJSON
+            , "Size"        .= itemSize item
+            , "MimeType"    .= itemMime item
+            , "DateCreated" .= itemAddedAt item
+            , "Metadata"    .= mMeta
             ]))
 
 -- | @POST \/items\/:id\/metadata\/refresh@ — re-read the item's metadata

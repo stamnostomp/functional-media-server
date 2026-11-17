@@ -57,8 +57,8 @@ isBoxSetId = T.isPrefixOf boxSetIdPrefix
 -- @itemCount@.
 boxSetItemValue :: Collection -> Value
 boxSetItemValue c = object
-  [ "id"        .= boxSetIdFor (colId c)
-  , "title"     .= colName c
-  , "type"      .= ("BoxSet" :: Text)
-  , "itemCount" .= length (colItemIds c)
+  [ "Id"        .= boxSetIdFor (colId c)
+  , "Name"      .= colName c
+  , "Type"      .= ("BoxSet" :: Text)
+  , "ItemCount" .= length (colItemIds c)   -- milestone 17b: PascalCase like MediaItem
   ]

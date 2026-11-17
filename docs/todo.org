@@ -180,7 +180,8 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Serve the official jellyfin-web static client instead
 ** TODO API must be compatible enough for jellyfin-web to browse/play
    - [X] case-insensitive route paths (Lit segments fold case, captures keep case) + case-insensitive query param NAMES (values keep case; sortOrder desc/descending + type value case-folded) + ParentId folder filter (m17a)
-   - [ ] PascalCase JSON keys on items/users (audit gap), /Users/:id/Views, /Shows/NextUp envelope, /Users/:id/Items/Latest, /Library/VirtualFolders, /DisplayPreferences (m17b/m17c pending)
+   - [X] PascalCase JSON keys: MediaItem (Id/Name/Type/Path/Size/MimeType/DateCreated/FolderId/SeriesName/SeasonNumber/EpisodeNumber/ExtraType/Versions), User public (Id/Name/IsAdministrator/...), BoxSet pseudo-items, metadata envelope; internal persistence JSON unchanged (m17b)
+   - [ ] /Users/:id/Views, /Shows/NextUp?userId= envelope, /Users/:id/Items/Latest, /Library/VirtualFolders, /DisplayPreferences, PascalCase /popular+/continuewatching entries (m17c pending)
 ** TODO Chromecast/AirPlay are client-side; ensure casting endpoints work
 
 * 14. Security :fix:

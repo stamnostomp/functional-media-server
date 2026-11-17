@@ -212,19 +212,23 @@ migrateMediaItemV2 = migrate
 migrateMediaItemV3 :: MediaItemV3 -> MediaItem
 migrateMediaItemV3 = migrate
 
+-- | Public API JSON with Jellyfin-style PascalCase keys (milestone 17b;
+-- jellyfin-web reads Id/Name/Type/...). All fields are always present
+-- (@null@ for 'Nothing'). The FromJSON/persistence side is unchanged
+-- (acid-state SafeCopy, not aeson).
 instance ToJSON MediaItem where
   toJSON i = object
-    [ "id"        .= itemId i
-    , "title"     .= itemTitle i
-    , "path"      .= itemPath i
-    , "size"      .= itemSize i
-    , "mime"      .= itemMime i
-    , "addedAt"   .= itemAddedAt i
-    , "folderId"  .= itemFolder i
-    , "type"      .= itemType i
-    , "series"    .= itemSeries i
-    , "season"    .= itemSeason i
-    , "episode"   .= itemEpisode i
-    , "extraType" .= itemExtraType i
-    , "versions"  .= itemVersions i   -- milestone 4j
+    [ "Id"           .= itemId i
+    , "Name"         .= itemTitle i
+    , "Path"         .= itemPath i
+    , "Size"         .= itemSize i
+    , "MimeType"     .= itemMime i
+    , "DateCreated"  .= itemAddedAt i
+    , "FolderId"     .= itemFolder i
+    , "Type"         .= itemType i
+    , "SeriesName"   .= itemSeries i
+    , "SeasonNumber" .= itemSeason i
+    , "EpisodeNumber" .= itemEpisode i
+    , "ExtraType"    .= itemExtraType i
+    , "Versions"     .= itemVersions i   -- milestone 4j
     ]

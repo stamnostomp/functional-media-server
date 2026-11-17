@@ -25,16 +25,19 @@ module FMS.Core.Query
   , sortItems
   , paginate
   , applyItemQuery
+  , viewsFromFolders
+  , nextUpEpisodes
+  , latestItems
   ) where
 
-import Data.Aeson (ToJSON (..), Value (..))
+import Data.Aeson (ToJSON (..), Value (..), object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.List (sortBy)
 import Data.Maybe (catMaybes, fromMaybe)
-import Data.Ord (comparing)
+import Data.Ord (Down (..), comparing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -42,6 +45,7 @@ import Network.HTTP.Types (urlDecode)
 import System.FilePath (takeDirectory)
 import Text.Read (readMaybe)
 
+import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Metadata.Types (MediaMetadata (..))
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
@@ -86,6 +90,45 @@ filterByParent rawParams items =
   case lookup "parentid" (normalizeQueryParams rawParams) of
     Just p | not (T.null p) -> filter (\i -> itemFolder i == p) items
     _                       -> items
+
+-- | Milestone 17c: the @GET /Users/:id/Views@ entries - one per media
+-- folder, Jellyfin CollectionFolder shape. Pure, exported for tests.
+viewsFromFolders :: [MediaFolder] -> [Value]
+viewsFromFolders folders =
+  [ object
+      [ "Name"           .= folderName f
+      , "Id"             .= folderId f
+      , "Type"           .= ("CollectionFolder" :: Text)
+      , "CollectionType" .= folderType f
+      ]
+  | f <- folders
+  ]
+
+-- | Milestone 17c: the @GET /Shows/NextUp@ pure core - for every series
+-- present in @items@, the first episode (by 'sortEpisodes' order) that is
+-- NOT played according to the user-data lookup; series with no unplayed
+-- episode are skipped (documented). With an empty lookup map every
+-- series contributes its first episode. Pure, exported for tests.
+nextUpEpisodes :: (Text -> Maybe UserData) -> [MediaItem] -> [MediaItem]
+nextUpEpisodes lookupUd items =
+  [ ep
+  | (series, _count) <- showsFromItems items
+  , let eps = sortEpisodes [ i | i <- items
+                               , itemType i == "Episode"
+                               , itemSeries i == Just series ]
+  , ep <- take 1 [ e | e <- eps, not (maybe False udPlayed (lookupUd (itemId e))) ]
+  ]
+
+-- | Milestone 17c: the @GET /Users/:id/Items/Latest@ pure core - the
+-- newest items by 'itemAddedAt' (DateCreated) descending, optionally
+-- filtered by the @includeItemTypes@ param (comma-separated, see
+-- 'filterByIncludeTypes'), capped at @limitCap@ (<= 0 -> default 12).
+-- Pure, exported for tests.
+latestItems :: [(Text, Text)] -> Int -> [MediaItem] -> [MediaItem]
+latestItems rawParams limitCap items =
+  take (if limitCap <= 0 then 12 else limitCap)
+    (sortBy (comparing (Down . itemAddedAt))
+            (filterByIncludeTypes (lookup "includeitemtypes" (normalizeQueryParams rawParams)) items))
 
 -- | Keep only items of the given type (milestone 4d:
 -- @?type=Movie@ / @?type=Episode@ / @?type=Audio@).

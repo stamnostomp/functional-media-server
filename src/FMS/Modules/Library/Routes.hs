@@ -35,7 +35,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByParent, filterBySeries, isUserDataSortKey, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByParent, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -61,9 +61,15 @@ libraryRoutes =
   , get    [Lit "Library", Lit "MediaFolders"] listFoldersHandler
   , post   [Lit "Library", Lit "MediaFolders"] addFolderHandler
   , delete [Lit "Library", Lit "MediaFolders", Capture "id"] removeFolderHandler
+  -- milestone 17c: /Library/VirtualFolders is the same folder list
+  , get    [Lit "Library", Lit "VirtualFolders"] listFoldersHandler
   , get    [Lit "library", Capture "id"] itemHandler
   , post   [Lit "library", Lit "rescan"] rescanHandler
   , get    [Lit "Shows"] showsHandler
+  -- milestone 17c: the literal NextUp route BEFORE the :name capture
+  -- routes (first match wins, /Shows/NextUp would otherwise be captured
+  -- as a series name)
+  , get    [Lit "Shows", Lit "NextUp"] showsNextUpHandler
   , get    [Lit "Shows", Capture "name", Lit "Episodes"] episodesHandler
   , get    [Lit "Shows", Capture "name", Lit "NextUp"] nextUpHandler
   ]
@@ -290,6 +296,24 @@ nextUpHandler captures req = do
   case sortEpisodes (filterBySeries (Just name) items) of
     []   -> throwError (NotFound ("no episodes for series " <> name))
     (e : _) -> pure (jsonResponse e)
+
+-- | @GET \/Shows\/NextUp?userId=@ (milestone 17c) — 200 the Jellyfin
+-- envelope @{\"Items\": [...], \"TotalRecordCount\": n}@ with the next
+-- unplayed episode of every series (visible items only; @userId@ selects
+-- the user-data used for the played check, absent -> first episode).
+showsNextUpHandler :: [(Text, Text)] -> Request -> AppM Response
+showsNextUpHandler _captures req = do
+  mUser <- currentUserFromReq req
+  items <- listItems >>= visibleItems mUser
+  let qparams = queryParams (queryString req)
+  udMap <- case lookup "userid" qparams of  -- query names are case-folded (17a)
+    Just uid -> listUserData uid
+    Nothing  -> pure HM.empty
+  let eps = nextUpEpisodes (\iid -> HM.lookup iid udMap) items
+  pure (jsonResponse (object
+    [ "Items" .= eps
+    , "TotalRecordCount" .= length eps
+    ]))
 
 captureName :: [(Text, Text)] -> AppM Text
 captureName captures =

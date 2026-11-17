@@ -3,7 +3,7 @@ module FMS.Core.Types.Progress
   , ItemStats (..)
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
 import Data.Time (UTCTime)
 
 -- | Playback position last reported by a client for one item
@@ -18,17 +18,27 @@ data Progress = Progress
 instance ToJSON Progress where
   toJSON p =
     object
-      [ "currentTime" .= progressCurrentTime p
-      , "duration"    .= progressDuration p
-      , "updatedAt"   .= progressUpdatedAt p
+      [ "PositionSeconds" .= progressCurrentTime p   -- milestone 17c: PascalCase
+      , "DurationSeconds" .= progressDuration p
+      , "UpdatedAt"       .= progressUpdatedAt p
       ]
 
 instance FromJSON Progress where
-  parseJSON = withObject "Progress" $ \o ->
-    Progress
-      <$> o .: "currentTime"
-      <*> o .: "duration"
-      <*> o .: "updatedAt"
+  -- milestone 17c: accept the new PascalCase keys AND the old lowercase
+  -- ones, so pre-17c stats.json files still load
+  parseJSON = withObject "Progress" $ \o -> do
+    -- (.:? succeeds with Nothing on an absent key, so fall through manually)
+    let get2 new old = do
+          mv <- o .:? new
+          case mv of
+            Just v  -> pure v
+            Nothing -> o .:? old
+    ct <- get2 "PositionSeconds" "currentTime"
+    du <- get2 "DurationSeconds" "duration"
+    ua <- get2 "UpdatedAt" "updatedAt"
+    case (ct, du, ua) of
+      (Just a, Just b, Just c) -> pure (Progress a b c)
+      _ -> fail "Progress needs PositionSeconds/DurationSeconds/UpdatedAt"
 
 -- | Per-item stats accumulated from client activity: how many times the
 -- item was played, when it was last played, and (if any) where playback

@@ -19,11 +19,14 @@ import Network.Wai (Request, Response, queryString, requestHeaders, strictReques
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM)
-import FMS.Core.Query (queryParams)
+import FMS.Core.Query (latestItems, queryParams, viewsFromFolders)
 import FMS.Core.Router (parseTokenHeader)
+import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem)
+import Data.Maybe (fromMaybe)
+import Text.Read (readMaybe)
 import FMS.Core.Types.User (User (..))
-import FMS.Modules.Auth.Monad (MonadAuth (..))
+import FMS.Modules.Auth.Monad (MonadAuth (..), allowedFoldersFor, canAccessFolder, visibleItems)
 import FMS.Modules.Library (MonadLibrary (..))
 -- FMS.Modules.Library.Routes imports only UserData.Monad/Types (not this
 -- module), so importing it here does not create a cycle.
@@ -32,7 +35,9 @@ import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.UserData.Monad
   ( MonadUserData (..)
+  , getDisplayPrefs
   , markPlayed
+  , setDisplayPrefs
   , setFavorite
   )
 import FMS.Modules.UserData.Types (UserData (..))
@@ -47,7 +52,11 @@ userDataRoutes :: [Route]
 userDataRoutes =
   -- Milestone 5f: the 3-segment literal routes come first (first match
   -- wins) so they are not shadowed by the 4/5-segment capture routes.
-  [ get    [Lit "Users", Capture "userId", Lit "Items"] usersItemsHandler
+  [ get    [Lit "Users", Capture "userId", Lit "Views"] viewsHandler
+  , get    [Lit "Users", Capture "userId", Lit "Items"] usersItemsHandler
+  , get    [Lit "Users", Capture "userId", Lit "Items", Lit "Latest"] latestItemsHandler
+  , get    [Lit "DisplayPreferences"] displayPrefsGetHandler
+  , post   [Lit "DisplayPreferences"] displayPrefsPostHandler
   , delete [Lit "Users", Capture "userId", Lit "PlayedItems"]   batchUnplayedHandler
   , delete [Lit "Users", Capture "userId", Lit "FavoriteItems"] batchUnfavoriteHandler
   , get    [Lit "Users", Capture "userId", Lit "Items", Capture "itemId", Lit "UserData"]
@@ -177,6 +186,78 @@ unfavoriteHandler captures req = do
 -- (delegates to 'itemsQueryResponse' with @userId@ forced into the query
 -- params), so @sortBy=LastPlayedDate/PlayCount@, @filters=...@ and
 -- @fields=...@ all work. Self-or-admin guard on @:userId@.
+-- | @GET \/Users/:userId/Views@ (milestone 17c) — 200
+-- @{\"Items\": [...], \"TotalRecordCount\": n}@ with one CollectionFolder
+-- view per media folder visible to the target user (non-admin: filtered by
+-- 'allowedFoldersFor', same rule as 'visibleItems'). Self-or-admin on
+-- :userId (403 cross-user), 404 unknown user.
+viewsHandler :: [(Text, Text)] -> Request -> AppM Response
+viewsHandler captures req = do
+  uid <- capture "userId" captures
+  u <- requireSelfOrAdmin403' req uid
+  _ <- requireExistingUserOr404 uid
+  folders <- listFolders
+  let visible = [ f | f <- folders
+                    , canAccessFolder (allowedFoldersFor u) (folderId f) ]
+      views = viewsFromFolders visible
+  pure (jsonResponse (object
+    [ "Items" .= views
+    , "TotalRecordCount" .= length views
+    ]))
+
+-- | @GET \/Users/:userId/Items/Latest?Limit=&IncludeItemTypes=@
+-- (milestone 17c) — 200 @{\"Items\": [...], \"TotalRecordCount\": n}@ with
+-- the newest items (DateCreated desc) visible to the target user, capped
+-- at Limit (default 12). Self-or-admin on :userId, 404 unknown user.
+latestItemsHandler :: [(Text, Text)] -> Request -> AppM Response
+latestItemsHandler captures req = do
+  uid <- capture "userId" captures
+  u <- requireSelfOrAdmin403' req uid
+  _ <- requireExistingUserOr404 uid
+  items <- listItems >>= visibleItems (Just u)
+  let qparams = queryParams (queryString req)
+      limit = fromMaybe (12 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
+      latest = latestItems qparams limit items
+  pure (jsonResponse (object
+    [ "Items" .= latest
+    , "TotalRecordCount" .= length latest
+    ]))
+
+-- | @GET \/DisplayPreferences?userId=&client=@ (milestone 17c) — 200 the
+-- stored prefs object for that user/client, or @{}@ when nothing is
+-- stored. Self-or-admin on the userId param (400 when missing).
+displayPrefsGetHandler :: [(Text, Text)] -> Request -> AppM Response
+displayPrefsGetHandler _captures req = do
+  let qparams = queryParams (queryString req)
+  case lookup "userid" qparams of  -- query names are case-folded (17a)
+    Nothing -> throwError (BadRequest "missing userId query param")
+    Just uid -> do
+      _ <- requireUserDataAccess req uid
+      _ <- requireExistingUserOr404 uid
+      let client = fromMaybe "" (lookup "client" qparams)
+      mV <- getDisplayPrefs uid client
+      pure (jsonResponse (fromMaybe (object []) mV))
+
+-- | @POST \/DisplayPreferences?userId=&client=@ (milestone 17c) — store
+-- the request body (any JSON value) as the prefs for that user/client,
+-- persist to displayPreferences.json, 200 with the stored body.
+-- Self-or-admin on userId, 400 on missing userId or bad JSON.
+displayPrefsPostHandler :: [(Text, Text)] -> Request -> AppM Response
+displayPrefsPostHandler _captures req = do
+  let qparams = queryParams (queryString req)
+  case lookup "userid" qparams of  -- query names are case-folded (17a)
+    Nothing -> throwError (BadRequest "missing userId query param")
+    Just uid -> do
+      _ <- requireUserDataAccess req uid
+      _ <- requireExistingUserOr404 uid
+      let client = fromMaybe "" (lookup "client" qparams)
+      body <- liftIO (strictRequestBody req)
+      case eitherDecode body of
+        Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+        Right v  -> do
+          setDisplayPrefs uid client v
+          pure (jsonResponse v)
+
 usersItemsHandler :: [(Text, Text)] -> Request -> AppM Response
 usersItemsHandler captures req = do
   uid <- capture "userId" captures
@@ -287,6 +368,21 @@ capture name captures =
 -- ('parseTokenHeader' over the raw request headers, resolved via
 -- 'MonadAuth'), and the path's @:userId@ must be the token user's own id or
 -- the token user must be an admin. Anything else -> 401.
+-- | Like 'requireUserDataAccess' but 403 (not 401) for an authenticated
+-- non-admin hitting another user's id - the milestone-9/17c convention
+-- used by /Users/:id/Items, /Views, /Items/Latest.
+requireSelfOrAdmin403' :: Request -> Text -> AppM User
+requireSelfOrAdmin403' req targetUserId =
+  case parseTokenHeader [(original k, v) | (k, v) <- requestHeaders req] of
+    Nothing -> throwError (Unauthorized "authentication required")
+    Just tok -> do
+      mUser <- resolveToken tok
+      case mUser of
+        Nothing -> throwError (Unauthorized "invalid or expired token")
+        Just u
+          | isAdmin u || userId u == targetUserId -> pure u
+          | otherwise -> throwError (Forbidden "self or admin required")
+
 requireUserDataAccess :: Request -> Text -> AppM User
 requireUserDataAccess req targetUserId =
   case parseTokenHeader [(original k, v) | (k, v) <- requestHeaders req] of

@@ -54,7 +54,7 @@ progressHandler req = do
           pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
 
 -- | @GET /continuewatching@ — items with unfinished progress, joined with
--- their library titles: @[{\"id\", \"title\", \"progress\": {...}}, ...]@,
+-- their library titles: @[{\"Id\", \"Name\", \"Progress\": {...}}, ...]@,
 -- most recently reported first.
 continueWatchingHandler :: AppM Response
 continueWatchingHandler = do
@@ -67,15 +67,15 @@ continueWatchingHandler = do
         ]
   pure (jsonResponse
     [ object
-        [ "id"       .= itemId item
-        , "title"    .= itemTitle item
-        , "progress" .= p
+        [ "Id"       .= itemId item       -- milestone 17b/17c: PascalCase
+        , "Name"     .= itemTitle item
+        , "Progress" .= p
         ]
     | (item, p) <- entries
     ])
 
 -- | @GET /popular@ — items played at least once, most-played first:
--- @[{\"id\", \"title\", \"playCount\", \"lastPlayedAt\"}, ...]@ (top 20).
+-- @[{\"Id\", \"Name\", \"PlayCount\", \"LastPlayedAt\"}, ...]@ (top 20).
 popularHandler :: AppM Response
 popularHandler = do
   allStats <- getAllStats
@@ -87,10 +87,10 @@ popularHandler = do
         ]
   pure (jsonResponse
     [ object
-        [ "id"           .= itemId item
-        , "title"        .= itemTitle item
-        , "playCount"    .= statsPlayCount s
-        , "lastPlayedAt" .= statsLastPlayedAt s
+        [ "Id"           .= itemId item
+        , "Name"         .= itemTitle item
+        , "PlayCount"    .= statsPlayCount s
+        , "LastPlayedAt" .= statsLastPlayedAt s
         ]
     | (item, s) <- ranked
     ])

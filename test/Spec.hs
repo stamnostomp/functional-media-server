@@ -38,7 +38,7 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, normalizeQueryParams, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
@@ -2570,5 +2570,48 @@ main = do
   check "projectFields fields=Name and fields=name both keep Id+Name (case-insensitive)"
     (["Id", "Name"], ["Id", "Name"])
     (jsonKeys (projectFields ["Name"] iv17b), jsonKeys (projectFields ["name"] iv17b))
+
+  -- Milestone 17c (jellyfin-web compat part 3): Views builder, NextUp,
+  -- Latest, Progress PascalCase keys.
+  let f1 = MediaFolder "1" "Media" "/lib" "mixed"
+      f2 = MediaFolder "2" "Movies" "/movies" "movies"
+      vj = LBSC.unpack (Aeson.encode (viewsFromFolders [f1, f2]))
+  check "viewsFromFolders: CollectionFolder view objects with PascalCase keys"
+    [True, True, True, True]
+    [ "\"Name\":\"Media\"" `isInfixOf` vj
+    , "\"Id\":\"2\"" `isInfixOf` vj
+    , "\"Type\":\"CollectionFolder\"" `isInfixOf` vj
+    , "\"CollectionType\":\"movies\"" `isInfixOf` vj ]
+  let ep ser n = testItem { itemId = "e" <> ser <> T.pack (show n), itemType = "Episode"
+                         , itemSeries = Just ser, itemSeason = Just 1
+                         , itemEpisode = Just n, itemTitle = ser <> " ep" <> T.pack (show n) }
+      eps17 = [ep "S" 1, ep "S" 2, ep "T" 1]
+      udPlayed1 = \iid -> if iid == "eS1" then Just (emptyUserData { udPlayed = True }) else Nothing
+  check "nextUpEpisodes picks the first UNPLAYED episode per series"
+    ["eS2", "eT1"] (map itemId (nextUpEpisodes udPlayed1 eps17))
+  check "nextUpEpisodes with empty lookup -> first episode of each series"
+    ["eS1", "eT1"] (map itemId (nextUpEpisodes (const Nothing) eps17))
+  check "nextUpEpisodes skips a fully-played series"
+    ["eT1"] (map itemId (nextUpEpisodes (\iid -> if iid == "eS1" || iid == "eS2" then Just (emptyUserData { udPlayed = True }) else Nothing) eps17))
+  let t17a = UTCTime (fromGregorian 2020 1 1) 0
+      t17b = UTCTime (fromGregorian 2021 1 1) 0
+      t17c = UTCTime (fromGregorian 2022 1 1) 0
+      la17 = [ testItem { itemId = "a", itemAddedAt = t17a, itemType = "Episode" }
+           , testItem { itemId = "b", itemAddedAt = t17c, itemType = "Movie" }
+           , testItem { itemId = "c", itemAddedAt = t17b, itemType = "Audio" } ]
+  check "latestItems: DateCreated desc, default cap 12, Limit cap, IncludeItemTypes"
+    (["b", "c", "a"], ["b", "c"], ["b"])
+    ( map itemId (latestItems [] 0 la17)
+    , map itemId (latestItems [] 2 la17)
+    , map itemId (latestItems [("includeItemTypes", "Movie")] 0 la17) )
+  let p17 = Progress 5 10 (UTCTime (fromGregorian 2024 1 1) 0)
+      pj = LBS.toStrict (Aeson.encode p17)
+  check "Progress ToJSON uses PascalCase keys (17c)"
+    True (all (`BSC.isInfixOf` pj)
+      [ "\"PositionSeconds\":", "\"DurationSeconds\":", "\"UpdatedAt\":" ])
+  check "Progress FromJSON accepts new AND old (pre-17c stats.json) keys"
+    (Just p17, Just p17)
+    ( Aeson.decode (Aeson.encode p17) :: Maybe Progress
+    , Aeson.decode (LBSC.pack "{\"currentTime\":5,\"duration\":10,\"updatedAt\":\"2024-01-01T00:00:00Z\"}") :: Maybe Progress )
 
   putStrLn "All tests passed."

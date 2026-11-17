@@ -7,6 +7,10 @@ module FMS.Modules.UserData.Monad
   , markPlayed
   , setFavorite
   , setPosition
+  , displayPrefsStateKey
+  , displayPrefsFilePath
+  , getDisplayPrefs
+  , setDisplayPrefs
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
@@ -21,7 +25,8 @@ import System.FilePath ((</>))
 
 import FMS.Core.Monad (AppEnv (..), AppM, getState, putState)
 import FMS.Core.Types.Config (Config (..))
-import FMS.Modules.UserData.Persistence (UserDataMap, loadUserData, saveUserData)
+import FMS.Modules.UserData.Persistence (DisplayPrefsMap, UserDataMap, loadDisplayPrefs, loadUserData, saveDisplayPrefs, saveUserData)
+import Data.Aeson (Value)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 
 -- | Namespaced key under which the user-data module stashes its
@@ -114,3 +119,44 @@ loadUserDataIntoState = do
   loaded <- liftIO (loadUserData (userDataFilePath cfg))
   tv <- liftIO (newTVarIO loaded)
   putState userDataStateKey tv
+  prefs <- liftIO (loadDisplayPrefs (displayPrefsFilePath cfg))
+  prefsTv <- liftIO (newTVarIO prefs)
+  putState displayPrefsStateKey prefsTv
+
+-- Milestone 17c (display preferences, docs/todo.org section 15) ----------
+
+-- | Registry key of the display-preferences TVar:
+-- @HashMap userId (HashMap client Value)@.
+displayPrefsStateKey :: Text
+displayPrefsStateKey = "userdata.displayPrefs"
+
+-- | Where display preferences are persisted: @stateDir/displayPreferences.json@.
+displayPrefsFilePath :: Config -> FilePath
+displayPrefsFilePath cfg = configStateDir cfg </> "displayPreferences.json"
+
+ensureDisplayPrefsTVar :: AppM (TVar DisplayPrefsMap)
+ensureDisplayPrefsTVar = do
+  m <- getState displayPrefsStateKey
+  case m of
+    Just tv -> pure tv
+    Nothing -> do
+      tv <- liftIO (newTVarIO HM.empty)
+      putState displayPrefsStateKey tv
+      pure tv
+
+-- | The stored prefs object for @userId@/@client@ ('Nothing' when unset).
+getDisplayPrefs :: Text -> Text -> AppM (Maybe Value)
+getDisplayPrefs uid client = do
+  tv <- ensureDisplayPrefsTVar
+  m <- liftIO (readTVarIO tv)
+  pure (HM.lookup client =<< HM.lookup uid m)
+
+-- | Store the prefs object for @userId@/@client@ and persist the map.
+setDisplayPrefs :: Text -> Text -> Value -> AppM ()
+setDisplayPrefs uid client v = do
+  cfg <- asks envConfig
+  tv <- ensureDisplayPrefsTVar
+  updated <- liftIO $ atomically $ do
+    modifyTVar' tv (HM.insertWith HM.union uid (HM.singleton client v))
+    readTVar tv
+  liftIO (saveDisplayPrefs (displayPrefsFilePath cfg) updated)

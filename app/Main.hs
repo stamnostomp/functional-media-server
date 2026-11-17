@@ -27,6 +27,7 @@ import FMS.Server (runServer)
 --
 -- Env vars: MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR,
 -- FMS_REQUIRE_AUTH, FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_RATE_LIMIT,
+-- FMS_RATE_LIMIT_AUTH,
 -- FMS_LOG_LEVEL, FMS_CORS_ORIGINS, FMS_SECURITY_HEADERS,
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
 -- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d),
@@ -69,6 +70,7 @@ main = do
   mName  <- lookupEnv "FMS_SERVER_NAME"
   mFollow <- lookupEnv "FMS_FOLLOW_SYMLINKS"
   mRate  <- lookupEnv "FMS_RATE_LIMIT"
+  mRateAuth <- lookupEnv "FMS_RATE_LIMIT_AUTH"
   mLogLvl <- lookupEnv "FMS_LOG_LEVEL"
   mCors  <- lookupEnv "FMS_CORS_ORIGINS"
   mSecH  <- lookupEnv "FMS_SECURITY_HEADERS"
@@ -119,6 +121,9 @@ main = do
         , configRateLimit   = case rateV >>= readMaybe of
             Just n | n > 0 -> Just n
             _              -> Nothing   -- missing/invalid/0 -> disabled (milestone 14a)
+        , configRateLimitAuth = case mRateAuth >>= readMaybe of
+            Just n  -> Just n   -- negative rejected by validateConfig (exit 2)
+            Nothing -> Just 10  -- unset -> default 10 auth attempts/min per IP
         , configLogLevel    = T.pack (fromMaybe "info" logV)  -- milestone 11b; env-only
         , configCorsOrigins = maybe ["*"] parseCorsOrigins (T.pack <$> corsV)  -- milestone 13b
         , configSecurityHeaders = fromMaybe (fromMaybe True (envBool mSecH))

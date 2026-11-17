@@ -40,7 +40,8 @@ import Network.Wai
 import FMS.Core.Module (Module(..), Route(..), Segment(..))
 import FMS.Core.Monad (AppError(..), AppEnv(..), AppM, getState, putState, runApp)
 import FMS.Core.RateLimit
-  ( Bucket, newBucket, tryTake, rateLimitBucketsKey, requestCounterKey, requestIdHex )
+  ( Bucket, newBucket, tryTake, rateLimitBucketsKey, requestCounterKey, requestIdHex
+  , rateLimitClass, bucketKeyFor, retryAfterSeconds )
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.ServerConfig (ServerConfig(..))
 import FMS.Core.Types.User (User(..))
@@ -81,9 +82,10 @@ buildApplication env modules req respond0 = do
     then respond (mapResponseHeaders (("Access-Control-Max-Age", "600") :) (responseLBS status204 [] ""))
     else do
       elim <- runApp env (rateLimitExceeded req)
-      if elim == Right True
-        then respond (errorResponse reqId (TooManyRequests "rate limited"))
-        else do
+      case elim of
+        Right (Just retryAfter) ->
+          respond (rateLimitedResponse reqId retryAfter)
+        _ -> do
           let routes = concatMap moduleRoutes modules
               -- milestone 17a: jellyfin-web calls PascalCase paths
               -- (/Items, /Videos/...); literal segments now compare
@@ -133,30 +135,47 @@ nextRequestId = do
 withRequestId :: Text -> Response -> Response
 withRequestId reqId = mapResponseHeaders (("X-Request-Id", TE.encodeUtf8 reqId) :)
 
--- | Milestone 14a: has this client IP exhausted its token bucket?
--- Disabled (configRateLimit = Nothing or <= 0) or missing bucket TVar ->
--- never limited.
-rateLimitExceeded :: Request -> AppM Bool
+-- | Milestone 14a + 14b: has this request exhausted its token bucket?
+-- Returns 'Nothing' when allowed, @Just retryAfterSeconds@ when denied.
+-- The bucket class comes from 'rateLimitClass': @POST /AuthenticateByName@
+-- uses the stricter 'configRateLimitAuth', everything else the global
+-- 'configRateLimit' (unchanged behaviour when FMS_RATE_LIMIT_AUTH is
+-- absent). Buckets are keyed by 'bucketKeyFor' (class prefix + IP), so
+-- endpoint buckets are separate from the global one. Disabled
+-- (limit Nothing or <= 0) or missing bucket TVar -> never limited.
+rateLimitExceeded :: Request -> AppM (Maybe Int)
 rateLimitExceeded req = do
   cfg <- asks envConfig
-  case configRateLimit cfg of
-    Nothing   -> pure False
-    Just n | n <= 0 -> pure False
+  let cls = rateLimitClass (requestMethod req) (pathInfo req)
+      mLimit = case cls of
+        "auth" -> configRateLimitAuth cfg
+        _      -> configRateLimit cfg
+  case mLimit of
+    Nothing   -> pure Nothing
+    Just n | n <= 0 -> pure Nothing
     Just n -> do
       let rate = fromIntegral n :: Double
       mTv <- getState rateLimitBucketsKey :: AppM (Maybe (TVar (HashMap Text Bucket)))
       case mTv of
-        Nothing -> pure False
+        Nothing -> pure Nothing
         Just tv -> do
           now <- liftIO getCurrentTime
-          let ip = clientIpText req
+          let key = bucketKeyFor cls (clientIpText req)
           denied <- liftIO $ atomically $ do
             m <- readTVar tv
-            let b          = HM.lookupDefault (newBucket rate now) ip m
+            let b          = HM.lookupDefault (newBucket rate now) key m
                 (ok, b')   = tryTake rate now b
-            writeTVar tv (HM.insert ip b' m)
+            writeTVar tv (HM.insert key b' m)
             pure (not ok)
-          pure denied
+          pure (if denied then Just (retryAfterSeconds rate) else Nothing)
+
+-- | Milestone 14b: the 429 response — the usual JSON error body +
+-- @X-Request-Id@ (added by the caller's 'respond') plus a @Retry-After@
+-- header (seconds until one token refills, 'retryAfterSeconds').
+rateLimitedResponse :: Text -> Int -> Response
+rateLimitedResponse reqId retryAfter =
+  mapResponseHeaders (("Retry-After", TE.encodeUtf8 (T.pack (show retryAfter))) :)
+    (errorResponse reqId (TooManyRequests "rate limited"))
 
 -- | The client IP as text (SockAddrInet -> dotted quad; unix sockets ->
 -- the path). The port is deliberately dropped so all connections from one

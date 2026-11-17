@@ -43,7 +43,7 @@ import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilter
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
-import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
+import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
@@ -2569,7 +2569,7 @@ main = do
       { configLibraryPath = "/lib", configPort = 8080, configStateDir = "/st"
       , configRequireAuth = False, configServerName = "fms"
       , configFollowSymlinks = False, configTmdbApiKey = ""
-      , configRateLimit = Nothing, configLogLevel = "info"
+      , configRateLimit = Nothing, configRateLimitAuth = Just 10, configLogLevel = "info"
       , configCorsOrigins = ["*"], configSecurityHeaders = True
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
@@ -2692,7 +2692,7 @@ main = do
         { configLibraryPath = "/lib", configPort = 8080, configStateDir = "/st"
         , configRequireAuth = False, configServerName = "fms"
         , configFollowSymlinks = False, configTmdbApiKey = ""
-        , configRateLimit = Nothing, configLogLevel = "INFO"
+        , configRateLimit = Nothing, configRateLimitAuth = Just 10, configLogLevel = "INFO"
         , configCorsOrigins = ["*"], configSecurityHeaders = True
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
@@ -3049,5 +3049,34 @@ main = do
     ( tmdbImageListToDownloads (Aeson.object [])
     , tmdbImageListToDownloads (Aeson.String "x")
     , tmdbImageListToDownloads (fromMaybe Aeson.Null (Aeson.decode (LBSC.pack "{\"posters\":\"nope\"}") :: Maybe Aeson.Value)) )
+
+  -- Milestone 14b: per-endpoint (auth) rate-limit class, bucket keys, Retry-After
+  check "rateLimitClass: POST /AuthenticateByName -> auth (case-insensitive, trailing segs ok, /Users prefix ok)"
+    ["auth", "auth", "auth", "global", "global", "global"]
+    [ rateLimitClass "POST" ["AuthenticateByName"]
+    , rateLimitClass "POST" ["authenticatebyname", "extra"]
+    , rateLimitClass "POST" ["Users", "AuthenticateByName"]
+    , rateLimitClass "GET" ["AuthenticateByName"]
+    , rateLimitClass "POST" ["Items"]
+    , rateLimitClass "POST" [] ]
+  check "bucketKeyFor prefixes the class"
+    ["auth:1.2.3.4", "global:1.2.3.4"]
+    [ bucketKeyFor "auth" "1.2.3.4", bucketKeyFor "global" "1.2.3.4" ]
+  check "retryAfterSeconds: ceil(60/rate) clamped to >= 1"
+    [1, 20, 60, 1, 1]
+    [ retryAfterSeconds 60, retryAfterSeconds 3, retryAfterSeconds 1
+    , retryAfterSeconds 0, retryAfterSeconds (-5) ]
+  let rlT0 = UTCTime (fromGregorian 2024 1 1) 0
+      rlB0 = Bucket 0 rlT0  -- empty bucket at t0, rate 60/min = 1 token/s
+      (okExact, bExact) = tryTake 60 (addUTCTime 1 rlT0) rlB0     -- exactly 1s -> exactly 1 token
+      (okEarly, _) = tryTake 60 (addUTCTime 0.999 rlT0) rlB0      -- 0.999s -> not yet
+  check "tryTake boundary: rate 60 refills exactly 1 token after 1s"
+    (True, 0, False)
+    (okExact, round (bucketTokens bExact) :: Int, okEarly)
+  check "validateConfig rejects negative auth rate limit, accepts Just 0 (disabled) and default"
+    [True, False, False]
+    [ isLeft' (validateConfig (cfg1d { configRateLimitAuth = Just (-1) }))
+    , isLeft' (validateConfig (cfg1d { configRateLimitAuth = Just 0 }))
+    , isLeft' (validateConfig cfg1d) ]
 
   putStrLn "All tests passed."

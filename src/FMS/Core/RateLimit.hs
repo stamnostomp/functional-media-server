@@ -6,11 +6,15 @@ module FMS.Core.RateLimit
   , rateLimitBucketsKey
   , requestCounterKey
   , requestIdHex
+  , rateLimitClass
+  , bucketKeyFor
+  , retryAfterSeconds
   ) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, diffUTCTime)
+import Network.HTTP.Types (Method)
 import Numeric (showHex)
 
 -- | Registry key for the per-IP token buckets:
@@ -61,3 +65,27 @@ requestIdHex :: Int -> Text
 requestIdHex n =
   let h = showHex n ""
   in T.pack (replicate (max 0 (16 - length h)) '0' ++ h)
+
+-- | Milestone 14b: the rate-limit CLASS of a request. A @POST@ whose path
+-- has @authenticatebyname@ (case-insensitive) among its first two segments
+-- — i.e. both @POST /AuthenticateByName@ and the real route @POST
+-- /Users/AuthenticateByName@ — gets the stricter @\"auth\"@ bucket;
+-- everything else is @\"global\"@. Pure, exported for tests.
+rateLimitClass :: Method -> [Text] -> Text
+rateLimitClass m segs
+  | m == "POST" && any (\s -> T.toLower s == "authenticatebyname") (take 2 segs) = "auth"
+  | otherwise = "global"
+
+-- | Milestone 14b: the bucket registry key for a (class, client IP) pair,
+-- e.g. @auth:1.2.3.4@ vs @global:1.2.3.4@ — endpoint buckets are separate
+-- from the global one. Pure, exported for tests.
+bucketKeyFor :: Text -> Text -> Text
+bucketKeyFor cls ip = cls <> ":" <> ip
+
+-- | Milestone 14b: the @Retry-After@ header value (seconds) for a denied
+-- request: the time until one token refills in a per-minute @rate@ bucket,
+-- i.e. @ceil (60 / rate)@ clamped to >= 1. Pure, exported for tests.
+retryAfterSeconds :: Double -> Int
+retryAfterSeconds rate
+  | rate <= 0 = 1
+  | otherwise = max 1 (ceiling (60 / rate) :: Int)

@@ -21,6 +21,7 @@ data Config = Config
   , configFollowSymlinks :: !Bool   -- ^ scanner symlink policy (env FMS_FOLLOW_SYMLINKS, default False; milestone 2b)
   , configTmdbApiKey  :: !Text      -- ^ TMDB API key for the remote metadata fallback (env MEDIA_TMDB_API_KEY, milestone 4c; empty disables it)
   , configRateLimit   :: !(Maybe Int)  -- ^ max requests per minute per client IP (env FMS_RATE_LIMIT; Nothing/0 = disabled; milestone 14a)
+  , configRateLimitAuth :: !(Maybe Int) -- ^ stricter per-IP bucket for POST /AuthenticateByName (env FMS_RATE_LIMIT_AUTH; default Just 10; Nothing/0 = disabled; brute-force blunting)
   , configLogLevel    :: !Text          -- ^ minimum log level printed (env FMS_LOG_LEVEL, default \"info\"; env-only, milestone 11b)
   , configCorsOrigins :: ![Text]        -- ^ allowed CORS origins (env FMS_CORS_ORIGINS, comma-separated; empty/unset or containing \"*\" = allow all; milestone 13b)
   , configSecurityHeaders :: !Bool      -- ^ add X-Content-Type-Options/X-Frame-Options/Referrer-Policy to every response (env FMS_SECURITY_HEADERS, default True; milestone 13b)
@@ -72,6 +73,8 @@ validateConfig cfg
       Left "password min length must be >= 0"
   | configMaxBitrate cfg < 0 =
       Left "max bitrate must be >= 0"
+  | maybe False (< 0) (configRateLimitAuth cfg) =
+      Left "auth rate limit must be >= 0"
   | configMaxTranscodes cfg < 1 =
       Left "max transcodes must be >= 1"
   | configFfmpegTimeoutSec cfg < 1 =

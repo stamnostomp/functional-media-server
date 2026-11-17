@@ -118,7 +118,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] =GET /Sessions= (live playback sessions), =POST /Sessions/Playing=, =/Playing/Progress=, =/Playing/Ping=, =/Playing/Stopped= (90s stale expiry)
 ** DONE Playback progress, resume points: =/Users/{id}/Items/{id}/UserData= get/update (played/favorite/playbackPosition/playCount/lastPlayedAt), persisted userdata.json (m5c)
 ** DONE Mark played/unplayed + favorite/like: =POST/DELETE /Users/{id}/PlayedItems/{id}|/FavoriteItems/{id}= + batch forms (m5c/m5f)
-** TODO intro start/end auto-detection (segments themselves DONE)
+** DONE intro start/end auto-detection: POST /Items/:id/MediaSegments/AutoDetect (admin) runs ffmpeg blackdetect+silencedetect (slot+timeout guarded), FMS.Core.SceneDetect proposes Intro (prefix black/silence within 2s of 0) and Outro (suffix within 2s of duration), caps 300s, idempotent upsert into mediaSegments.json, 100ns ticks (m18c)
    - [X] MediaSegments CRUD: =GET/POST /Items/:id/MediaSegments=, =DELETE /Items/:id/MediaSegments/:segId= (mediaSegments.json, types Intro/Outro/Preview/Recap/Commercial, 100ns ticks, validation 400s)
 
 * 7. Subtitles :feature:

@@ -5,6 +5,8 @@ module FMS.Modules.Playback.Probe
   , probeBitrateArgs
   , parseFormatBitRate
   , probeBitrate
+  , parseFormatDuration
+  , probeDuration
   , decidePlayMethod
   , containerFromFormatName
   , containerFromExtension
@@ -98,6 +100,24 @@ probeBitrate path = do
   (exitCode, out, _err) <- runProcessBS "ffprobe" (probeBitrateArgs path)
   case exitCode of
     ExitSuccess -> pure (parseFormatBitRate out)
+    ExitFailure _ -> pure Nothing
+
+-- | Pure parser for ffprobe's @-show_format@ JSON: the format
+-- @duration@ in seconds, when present. Same output shape as
+-- 'parseFormatBitRate'.
+parseFormatDuration :: LBS.ByteString -> Maybe Double
+parseFormatDuration body =
+  case Aeson.eitherDecode body :: Either String ProbeFormatDoc of
+    Right doc -> pfDuration (pfFormat doc)
+    Left _    -> Nothing
+
+-- | Run ffprobe with 'probeBitrateArgs' and return the format duration
+-- in seconds, or 'Nothing' on any failure.
+probeDuration :: FilePath -> IO (Maybe Double)
+probeDuration path = do
+  (exitCode, out, _err) <- runProcessBS "ffprobe" (probeBitrateArgs path)
+  case exitCode of
+    ExitSuccess -> pure (parseFormatDuration out)
     ExitFailure _ -> pure Nothing
 
 -- Internal shape for 'parseFormatBitRate'.

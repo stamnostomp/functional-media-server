@@ -26,6 +26,7 @@ library
     exposed-modules:  FMS
                       FMS.Server
                       FMS.Core.Blurhash
+                      FMS.Core.SceneDetect
                       FMS.Core.Monad
                       FMS.Core.Module
                       FMS.Core.Router

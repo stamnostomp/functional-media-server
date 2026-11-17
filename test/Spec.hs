@@ -42,6 +42,7 @@ import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachUserData, backdropImageTagsValue, imageBlurHashesValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
+import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
@@ -132,6 +133,7 @@ import FMS.Modules.Playback.Probe
   , directStreamable
   , parseFfprobe
   , parseFormatBitRate
+  , parseFormatDuration
   , probeArgs
   , probeBitrateArgs
   , probeFile
@@ -717,8 +719,10 @@ main = do
     "" (encodeBlurhash 8 8 4 3 (replicate 10 0))
   -- 32x32 deterministic LCG image, cross-validated against the official
   -- woltapp/blurhash reference algorithm (Python transcription).
-  let lcgPix n = go 12345 n
+  let lcgPix :: Int -> [Word8]
+      lcgPix n = go (12345 :: Int) n
         where
+          go :: Int -> Int -> [Word8]
           go _ 0 = []
           go s k = let s' = (s * 1103515245 + 12345) `mod` 2147483648
                        b = fromIntegral ((s' `div` 65536) `mod` 256) :: Word8
@@ -2890,5 +2894,64 @@ main = do
     (Just p17, Just p17)
     ( Aeson.decode (Aeson.encode p17) :: Maybe Progress
     , Aeson.decode (LBSC.pack "{\"currentTime\":5,\"duration\":10,\"updatedAt\":\"2024-01-01T00:00:00Z\"}") :: Maybe Progress )
+
+  -- SceneDetect (intro/outro auto-detection parsers + proposal)
+  let bl1 = "[blackdetect @ 0x55] black_start:0 black_end:3.04 black_duration:3.04"
+      bl2 = "[blackdetect @ 0x55] black_start:13 black_end:16 black_duration:3"
+      blDur = "[blackdetect @ 0x55] black_start:5 black_duration:2.5"
+      blGarbage = "[blackdetect @ 0x55] config in time_base: no line here"
+  check "parseBlackdetect: start/end lines, duration fallback, garbage ignored"
+    ([(0, 3.04), (13, 16), (5, 7.5)], 3)
+    (parseBlackdetect (unlines [bl1, bl2, blDur, blGarbage, "random noise"])
+    , length (parseBlackdetect (unlines [bl1, bl2, blDur, blGarbage, "random noise"])))
+  let sl1 = "[silencedetect @ 0x77] silence_start: 1.5"
+      sl2 = "[silencedetect @ 0x77] silence_end: 4.2 | silence_duration: 2.7"
+      sl3 = "[silencedetect @ 0x77] silence_start: 9.0"
+      sl4 = "[silencedetect @ 0x77] silence_start: 20"
+      sl5 = "[silencedetect @ 0x77] silence_end: 22.5 | silence_duration: 2.5"
+  check "parseSilencedetect: paired start/end, trailing unpaired start dropped"
+    ([(1.5, 4.2), (20, 22.5)], 2)
+    (parseSilencedetect (unlines [sl1, sl2, sl4, sl5, sl3, "garbage"])
+    , length (parseSilencedetect (unlines [sl1, sl2, sl4, sl5, sl3, "garbage"])))
+  let slDurOnly = "[silencedetect @ 0x77] silence_start: 8 silence_duration: 1.25"
+  check "parseSilencedetect: silence_duration fallback when no end line"
+    [(8, 9.25)] (parseSilencedetect slDurOnly)
+  check "mergeIntervals: overlap, adjacency (gap < 0.5s), disjoint"
+    ([(0, 3.2), (5, 6), (10, 12)], [(0, 1), (2, 3)], [(0, 1), (5, 6)])
+    ( mergeIntervals [(0, 2), (2.2, 3.2), (5, 6), (10, 12)]
+    , mergeIntervals [(0, 1), (2, 3)]
+    , mergeIntervals [(5, 6), (0, 1)] )
+  check "intervalsOverlap matrix"
+    [True, True, False, False, False]
+    [ intervalsOverlap (0, 3) (2, 5), intervalsOverlap (2, 5) (0, 3)
+    , intervalsOverlap (0, 3) (3, 5), intervalsOverlap (0, 3) (4, 5)
+    , intervalsOverlap (5, 6) (0, 3) ]
+  let blacks16 = [(0, 3), (13, 16)]
+  check "proposeSegments: black intro 0-3 + outro 13-16 with duration 16"
+    (Just (0, 3), Just (13, 16)) (proposeSegments 16 blacks16 [])
+  check "proposeSegments: no intervals -> (Nothing, Nothing)"
+    (Nothing, Nothing) (proposeSegments 16 [] [])
+  check "proposeSegments: silence-only intro works"
+    (Just (0, 2.5), Nothing) (proposeSegments 16 [] [(0, 2.5), (10, 11)])
+  check "proposeSegments: interval starting at 1s (within 2s) counts as intro"
+    (Just (1, 4), Nothing) (proposeSegments 16 [(1, 4)] [])
+  check "proposeSegments: intro longer than 300s is capped at 300"
+    (Just (0, 300), Nothing) (proposeSegments 400 [(0, 350)] [])
+  check "proposeSegments: outro longer than 300s is capped (start = duration-300)"
+    (Nothing, Just (100, 400)) (proposeSegments 400 [(50, 400)] [])
+  check "proposeSegments: duration <= 0 -> (Nothing, Nothing)"
+    (Nothing, Nothing) (proposeSegments 0 blacks16 blacks16)
+  check "proposeSegments: mid-movie black interval is neither intro nor outro"
+    (Nothing, Nothing) (proposeSegments 16 [(6, 8)] [])
+  check "blackdetectArgs / silencedetectArgs shapes"
+    (True, True, True, True)
+    ( "blackdetect=d=0.05:pix_th=0.10" `elem` blackdetectArgs "/m/x.mp4"
+    , "-f" `elem` blackdetectArgs "/m/x.mp4" && "null" `elem` blackdetectArgs "/m/x.mp4"
+    , "silencedetect=n=-35dB:d=0.4" `elem` silencedetectArgs "/m/x.mp4"
+    , "-i" `elem` silencedetectArgs "/m/x.mp4" && "/m/x.mp4" `elem` silencedetectArgs "/m/x.mp4" )
+  check "parseFormatDuration: ffprobe -show_format fixture"
+    (Just 16.5, Nothing)
+    ( parseFormatDuration (LBSC.pack "{\"format\":{\"duration\":\"16.500000\",\"bit_rate\":\"123\"}}")
+    , parseFormatDuration (LBSC.pack "{\"format\":{\"bit_rate\":\"123\"}}") )
 
   putStrLn "All tests passed."

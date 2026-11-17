@@ -3,14 +3,17 @@ module FMS.Modules.Metadata
   , MonadMetadata (..)
   ) where
 
-import FMS.Core.Module (Module (..), Segment (..), get, post)
+import FMS.Core.Module (Module (..), Segment (..), delete, get, post)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState)
 import FMS.Modules.Metadata.Routes
-  ( editMetadataHandler
+  ( addItemTagsHandler
+  , editMetadataHandler
   , genresHandler
+  , listItemTagsHandler
   , metadataHandler
   , personsHandler
   , refreshMetadataHandler
+  , removeItemTagHandler
   , studiosHandler
   , tagsHandler
   )
@@ -35,5 +38,10 @@ metadataModule =
         , get  [Lit "items", Capture "id", Lit "metadata"] metadataHandler
         , post [Lit "items", Capture "id", Lit "metadata"] editMetadataHandler          -- milestone 4k
         , post [Lit "items", Capture "id", Lit "metadata", Lit "refresh"] refreshMetadataHandler
+        -- item tags API (literal "Tags" after the capture; captures keep
+        -- their case, so DELETE /Items/1/Tags/Hd matches tag "Hd")
+        , get    [Lit "items", Capture "id", Lit "Tags"] listItemTagsHandler
+        , post   [Lit "items", Capture "id", Lit "Tags"] addItemTagsHandler
+        , delete [Lit "items", Capture "id", Lit "Tags", Capture "tag"] removeItemTagHandler
         ]
     }

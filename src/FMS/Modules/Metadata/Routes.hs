@@ -6,6 +6,9 @@ module FMS.Modules.Metadata.Routes
   , studiosHandler
   , personsHandler
   , tagsHandler
+  , listItemTagsHandler
+  , addItemTagsHandler
+  , removeItemTagHandler
   , genresFromMetadata
   , studiosFromMetadata
   , personsFromMetadata
@@ -20,7 +23,7 @@ module FMS.Modules.Metadata.Routes
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (Value, eitherDecode, object, (.=))
+import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:?), (.!=), (.=))
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.List (nub, sortOn)
@@ -39,7 +42,7 @@ import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie, tmdbSearchTv)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), refreshAllMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata, mergeTags, removeTag)
 
 -- | @GET \/items\/:id\/metadata@ — the library item merged with its
 -- cached metadata:
@@ -128,9 +131,84 @@ personsHandler :: [(Text, Text)] -> Request -> AppM Response
 personsHandler _captures _req = nameCountsResponse personsFromMetadata
 
 -- | @GET \/Tags@ — same shape as 'genresHandler', over 'metaTags'
--- (milestone 4h).
+-- (milestone 4h). Counts are derived live from the stored metadata map
+-- ('listAllMetadata'), not cached at scan time, so tag edits are visible
+-- immediately.
 tagsHandler :: [(Text, Text)] -> Request -> AppM Response
 tagsHandler _captures _req = nameCountsResponse tagsFromMetadata
+
+-- Item tags API (custom tags on items; the tags live in the item's
+-- metadata record 'metaTags' and therefore survive provider refreshes
+-- via 'applyProviderMerge'/'mergeTags'). GET is readable by anyone with
+-- access to the item ('getItemWithAccess'); POST/DELETE are admin-only
+-- (milestone 16 pattern for metadata edits).
+
+-- | Body of @POST /items/:id/Tags@: @{\"Tags\": [\"a\", \"b\"]@.
+newtype TagsRequest = TagsRequest { trTags :: [Text] }
+
+instance FromJSON TagsRequest where
+  parseJSON = withObject "TagsRequest" $ \o -> TagsRequest <$> o .:? "Tags" .!= []
+
+-- | @GET \/items\/:id\/Tags@ — 200 @{\"Tags\": [...]@} (empty array when
+-- the item has no tags); 404 unknown item.
+listItemTagsHandler :: [(Text, Text)] -> Request -> AppM Response
+listItemTagsHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just _  -> do
+          mMeta <- getMetadata i
+          pure (jsonResponse (object ["Tags" .= maybe [] metaTags mMeta]))
+
+-- | @POST \/items\/:id\/Tags@ (admin) — merge the body's tags into the
+-- item's stored metadata ('mergeTags': dedupe case-insensitively, keep
+-- existing order then append new), persist metadata.json, 200 with the
+-- updated full list @{\"Tags\": [...]@}. 404 unknown item, 400 bad JSON.
+addItemTagsHandler :: [(Text, Text)] -> Request -> AppM Response
+addItemTagsHandler captures req = do
+  _ <- requireAdmin req
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just _  -> do
+          body <- liftIO (strictRequestBody req)
+          tr <- case eitherDecode body of
+            Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+            Right v  -> pure v
+          mOld <- getMetadata i
+          let old = fromMaybe emptyMetadata mOld
+              merged = old { metaTags = mergeTags (metaTags old) (trTags tr) }
+          setMetadata i merged
+          pure (jsonResponse (object ["Tags" .= metaTags merged]))
+
+-- | @DELETE \/items\/:id\/Tags\/:tag@ (admin) — remove the tag matching
+-- :tag case-insensitively (the capture keeps its original case), persist,
+-- 200 with the remaining list. 404 when the item or the tag is unknown.
+removeItemTagHandler :: [(Text, Text)] -> Request -> AppM Response
+removeItemTagHandler captures req = do
+  _ <- requireAdmin req
+  case (lookup "id" captures, lookup "tag" captures) of
+    (Nothing, _) -> throwError (BadRequest "missing id capture")
+    (_, Nothing) -> throwError (BadRequest "missing tag capture")
+    (Just i, Just tg) -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just _  -> do
+          mOld <- getMetadata i
+          let old = fromMaybe emptyMetadata mOld
+          if not (any (\t -> T.toLower t == T.toLower tg) (metaTags old))
+            then throwError (NotFound ("no tag " <> tg <> " on item " <> i))
+            else do
+              let merged = old { metaTags = removeTag tg (metaTags old) }
+              setMetadata i merged
+              pure (jsonResponse (object ["Tags" .= metaTags merged]))
 
 -- | Shared shape of the name-count endpoints: 200 array of
 -- @{\"Name\": v, \"ItemCount\": n}@ sorted by name.

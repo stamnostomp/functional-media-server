@@ -5,6 +5,8 @@ module FMS.Modules.Metadata.Types
   , fieldNameFor
   , applyManualPatch
   , applyProviderMerge
+  , mergeTags
+  , removeTag
   ) where
 
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), fromJSON, object, withObject, (.!=), (.:?), (.=))
@@ -162,13 +164,32 @@ applyManualPatch m patch = foldl applyOne m (KM.toList patch)
             Just f | T.toLower f `notElem` locked -> setFieldFromValue acc f v
             _                                     -> acc
 
+-- | Pure (item tags API): append the @newTags@ that are not already
+-- present (case-insensitive comparison) after the existing ones, keeping
+-- the existing order. Duplicates inside either list are kept as-is
+-- apart from the case-insensitive check.
+mergeTags :: [Text] -> [Text] -> [Text]
+mergeTags existing newTags = foldl add existing newTags
+  where
+    add acc t
+      | any (\e -> T.toLower e == T.toLower t) acc = acc
+      | otherwise = acc ++ [t]
+
+-- | Pure (item tags API): remove every tag equal to @t@
+-- (case-insensitive) from the list.
+removeTag :: Text -> [Text] -> [Text]
+removeTag t = filter (\e -> T.toLower e /= T.toLower t)
+
 -- | Pure (milestone 4k): merge a freshly fetched provider record (@new@)
 -- over the stored one (@old@): every field listed in the OLD record's
 -- 'metaLockedFields' keeps the old value, all other fields take the new
 -- value, and 'metaLockedFields' itself is carried over from the old record.
+-- Tags are the exception: 'metaTags' is always the union of old and new
+-- ('mergeTags'), so user-added tags survive every provider refresh.
 applyProviderMerge :: MediaMetadata -> MediaMetadata -> MediaMetadata
 applyProviderMerge old new =
-  foldl keepLocked new { metaLockedFields = metaLockedFields old } locked
+  (foldl keepLocked new { metaLockedFields = metaLockedFields old } locked)
+    { metaTags = mergeTags (metaTags old) (metaTags new) }
   where
     locked = map T.toLower (metaLockedFields old)
     keepLocked acc f = case getFieldValue old f of

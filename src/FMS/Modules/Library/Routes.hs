@@ -37,7 +37,7 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import Control.Monad.Reader (asks)
 import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
@@ -46,7 +46,7 @@ import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetIte
 import FMS.Modules.Images (blurhashPairsForItem, findStoredImage, imageTagOfFile, imagesDirFor, listImageTypes)
 import FMS.Modules.Library.Folders (validateFolderPath)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
-import FMS.Modules.Metadata.Types (MediaMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata (..))
 import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.Webhooks (fireWebhooks)
 import FMS.Modules.UserData.Monad (MonadUserData (..))
@@ -157,7 +157,11 @@ itemsQueryResponse mUser qparams = do
   -- only when no fields param was given or it lists ImageBlurHashes.
   let wantBlur = null fields || "imageblurhashes" `elem` map T.toLower fields
       renderItem i = do
-        let base = projectFields fields (attachUserData mLookup i (toJSON i))
+        -- Item tags API: attach the metadata metaTags as "Tags" BEFORE
+        -- projectFields so the fields= projection governs the key.
+        let base = projectFields fields
+                     (attachTags (maybe [] metaTags (metaLookup (itemId i)))
+                       (attachUserData mLookup i (toJSON i)))
         if not enableImages
           then pure base
           else do
@@ -391,9 +395,15 @@ itemDetailHandler captures req =
               mUser <- currentUserFromReq req
               let qparams = queryParams (queryString req)
               (mLookup, _filterTokens, fields) <- resolveUserQuery qparams mUser
+              -- Item tags API: "Tags" from the metadata cache, attached
+              -- before projectFields (same literal registry key as
+              -- itemsQueryResponse; importing Metadata.Monad would cycle).
+              mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+              metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+              let tagList = maybe [] metaTags (HM.lookup i metaMap)
               -- Milestone 4n: image tags on the detail JSON too
               -- (EnableImages/imageType), same as the /items list.
-              let base = projectFields fields (attachUserData mLookup item (toJSON item))
+              let base = projectFields fields (attachTags tagList (attachUserData mLookup item (toJSON item)))
               if lookup "enableimages" qparams == Just "false"
                 then pure (jsonResponse base)
                 else do

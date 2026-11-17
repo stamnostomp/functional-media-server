@@ -159,7 +159,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] =GET /Genres= (derived from stored metadata: Name + ItemCount, sorted)
 ** DONE Box sets (=/Collections=) create/manage + =/Collections/:id/Items= (batch {"Ids":[...]} and single-item forms)
 ** DONE Playlists: =/Playlists= CRUD + =/Playlists/:id/Items= add/remove/list (persisted playlists.json)
-** TODO Custom metadata fields / tags on items
+** DONE Item tags: Tags array on item JSON (list+detail, fields=-aware, from NFO + user edits), GET/POST /Items/:id/Tags, DELETE /Items/:id/Tags/:tag (admin, case-insensitive merge/remove, persisted in metadata.json, survives replaceAll refreshes via union merge), /Tags counts derived live (m18d)
 
 * 11. Server administration :feature:
 ** DONE Dashboard: =GET /Dashboard= (admin-only) aggregates Server(+UptimeSeconds), Library{TotalItems,Counts}, Sessions, Devices, Activity(recent 20), ScheduledTasks; individual endpoints also exist (/Sessions, /Devices, /System/ActivityLog, /ScheduledTasks, /System/Info)

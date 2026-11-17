@@ -6,7 +6,7 @@ module FMS.Modules.Metadata.Monad
   , refreshAllMetadata
   ) where
 
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (foldM, when)
 import Control.Monad.IO.Class (liftIO)
@@ -28,7 +28,7 @@ import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyProviderMerge)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyProviderMerge, emptyMetadata)
 
 -- | Namespaced key under which the metadata module stashes its
 -- @TVar (HashMap Text MediaMetadata)@ in the typed registry
@@ -93,16 +93,20 @@ instance MonadMetadata AppM where
 
 -- | Milestone 4m (docs/todo.org section 3): refresh the metadata of EVERY
 -- library item sequentially (NFO first, TMDB fallback -- the same path as
--- 'refreshMetadata'). When @replaceAll@ is True the whole metadata map is
--- cleared and persisted empty first, so stale records vanish too. Returns
--- the number of items for which a refresh found metadata.
+-- 'refreshMetadata'). When @replaceAll@ is True every stored record is
+-- reset to an empty one first, so stale provider data vanishes too --
+-- except the user-curated fields (item tags 'metaTags' and the field
+-- locks 'metaLockedFields'), which are kept so manual edits (the item
+-- tags API, milestone 4k locking) survive a full refresh. Returns the
+-- number of items for which a refresh found metadata.
 refreshAllMetadata :: Bool -> AppM Int
 refreshAllMetadata replaceAll = do
   cfg <- asks envConfig
   when replaceAll $ do
     tv <- ensureMetadataTVar
-    liftIO (atomically (writeTVar tv HM.empty))
-    liftIO (saveMetadata (metadataFilePath cfg) HM.empty)
+    liftIO (atomically (modifyTVar' tv (HM.map keepUserCurated)))
+    updated <- liftIO (readTVarIO tv)
+    liftIO (saveMetadata (metadataFilePath cfg) updated)
   items <- listItems
   foldM step 0 items
   where
@@ -110,6 +114,12 @@ refreshAllMetadata replaceAll = do
     step acc item = do
       m <- refreshMetadata (itemId item)
       pure (acc + (if isJust m then 1 else 0))
+    -- replaceAll keeps only the user-curated fields of each record
+    keepUserCurated :: MediaMetadata -> MediaMetadata
+    keepUserCurated m = emptyMetadata
+      { metaTags = metaTags m
+      , metaLockedFields = metaLockedFields m
+      }
 
 -- | Milestone 4k: merge a freshly parsed provider record over the stored
 -- one so that fields the user locked (the old record's 'metaLockedFields')

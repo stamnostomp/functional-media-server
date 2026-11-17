@@ -39,7 +39,7 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachUserData, backdropImageTagsValue, imageBlurHashesValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, imageBlurHashesValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
@@ -114,7 +114,7 @@ import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
 import FMS.Modules.Playlists.Types (Playlist (..))
@@ -2953,5 +2953,43 @@ main = do
     (Just 16.5, Nothing)
     ( parseFormatDuration (LBSC.pack "{\"format\":{\"duration\":\"16.500000\",\"bit_rate\":\"123\"}}")
     , parseFormatDuration (LBSC.pack "{\"format\":{\"bit_rate\":\"123\"}}") )
+
+  -- Item tags API: mergeTags / removeTag / attachTags / provider-merge union
+  check "mergeTags: existing order kept, new appended, dedupe case-insensitive"
+    (["favorite", "hd", "Criterion"], ["favorite"], ["a", "b"])
+    ( mergeTags ["favorite", "hd"] ["HD", "Criterion", "favorite"]
+    , mergeTags ["favorite"] []
+    , mergeTags [] ["a", "b"] )
+  check "removeTag: case-insensitive removal, missing tag is a no-op"
+    (["favorite"], ["a", "b"], ["b"])
+    ( removeTag "HD" ["favorite", "hd"]
+    , removeTag "zzz" ["a", "b"]
+    , removeTag "A" ["a", "b"] )
+  let tagObj = Aeson.object [Key.fromText "Id" Aeson..= ("1" :: T.Text)]
+      tagV = attachTags ["favorite", "hd"] tagObj
+      tagJ = LBS.toStrict (Aeson.encode tagV)
+  check "attachTags inserts a Tags array into an item object"
+    [True, True] [ "\"Tags\":[\"favorite\",\"hd\"]" `BSC.isInfixOf` tagJ
+                , "\"Id\":\"1\"" `BSC.isInfixOf` tagJ ]
+  check "attachTags: empty tag list attaches nothing; non-object passes through"
+    (True, True)
+    ( Aeson.encode (attachTags [] tagObj) == Aeson.encode tagObj
+    , attachTags ["x"] (Aeson.String "s") == Aeson.String "s" )
+  check "attachTags + projectFields: Tags kept when listed, stripped otherwise (case-insensitive)"
+    (True, False)
+    ( "\"Tags\"" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (projectFields ["tags"] tagV))
+    , "\"Tags\"" `BSC.isInfixOf` LBS.toStrict (Aeson.encode (projectFields ["Name"] tagV)) )
+  check "applyProviderMerge unions tags (user tags survive provider refresh, case-insensitive dedupe)"
+    (["favorite", "HD", "Criterion"], ["favorite", "hd"])
+    ( metaTags (applyProviderMerge
+      (emptyMetadata { metaTags = ["favorite"], metaLockedFields = ["title"] })
+      (emptyMetadata { metaTags = ["HD", "Criterion", "FAVORITE"], metaTitle = Just "T" }))
+    , metaTags (applyProviderMerge
+      (emptyMetadata { metaTags = ["favorite"] })
+      (emptyMetadata { metaTags = ["FAVORITE", "hd"] })) )
+  check "tagsFromMetadata counts tags live from metadata records (nub per record, values as stored)"
+    [("favorite", 2), ("hd", 1)]
+    (tagsFromMetadata [ emptyMetadata { metaTags = ["favorite", "hd", "favorite"] }
+                      , emptyMetadata { metaTags = ["favorite"] } ])
 
   putStrLn "All tests passed."

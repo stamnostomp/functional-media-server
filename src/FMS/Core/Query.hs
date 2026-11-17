@@ -7,6 +7,7 @@ module FMS.Core.Query
   , imageTagsValue
   , backdropImageTagsValue
   , attachImageTags
+  , attachTags
   , imageBlurHashesValue
   , attachImageBlurHashes
   , filterByFolder
@@ -124,6 +125,16 @@ attachImageBlurHashes pairs v = case v of
   Object o | any (not . T.null . snd) pairs ->
     Object (KeyMap.insert "ImageBlurHashes" (imageBlurHashesValue pairs) o)
   _ -> v
+
+-- | Merge an item's custom tags (metadata 'metaTags', item tags API)
+-- into its JSON object as a @Tags@ array. Attached only when the list is
+-- non-empty; non-object values pass through unchanged. Callers apply
+-- this BEFORE 'projectFields' so the @fields=@ projection can strip or
+-- keep @Tags@ like any other key.
+attachTags :: [Text] -> Value -> Value
+attachTags tags v = case v of
+  Object o | not (null tags) -> Object (KeyMap.insert "Tags" (toJSON tags) o)
+  _                          -> v
 
 -- | Merge image tags into an item JSON object: adds @ImageTags@ (all
 -- pairs, or only the requested @imageType@ when given) and

@@ -5,6 +5,10 @@ module FMS.Modules.Metadata.Api.Tmdb
   , tmdbSearchTvUrl
   , parseTmdbTvResults
   , tmdbSearchTv
+  , tmdbFetch
+  , tmdbSearchUrlAt
+  , tmdbSearchMovieAt
+  , tmdbSearchTvAt
   ) where
 
 import Control.Exception (SomeException, try)
@@ -36,13 +40,19 @@ tmdbApiBase = "https://api.themoviedb.org/3"
 tmdbTimeoutMicros :: Int
 tmdbTimeoutMicros = 10000000
 
--- | Build the TMDB @\/search\/movie@ URL for a free-text query. Pure, so it
--- is unit-testable without network access: @tmdbSearchUrl key q@ is
+-- | Build the TMDB @\/search\/movie@ URL for a free-text query against an
+-- explicit API base (pure; a trailing slash on the base is stripped).
+-- @tmdbSearchUrlAt base key q@ is @<base>\/search\/movie?api_key=<key>&query=<url-encoded q>@.
+tmdbSearchUrlAt :: Text -> Text -> Text -> String
+tmdbSearchUrlAt base apiKey query =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/search/movie?api_key=" ++ T.unpack apiKey
+    ++ "&query=" ++ T.unpack (urlEncodeText query)
+
+-- | Build the TMDB @\/search\/movie@ URL against the default API base.
+-- Pure, so it is unit-testable without network access: @tmdbSearchUrl key q@ is
 -- @https:\/\/api.themoviedb.org\/3\/search\/movie?api_key=<key>&query=<url-encoded q>@.
 tmdbSearchUrl :: Text -> Text -> String
-tmdbSearchUrl apiKey query =
-  tmdbApiBase ++ "/search/movie?api_key=" ++ T.unpack apiKey
-    ++ "&query=" ++ T.unpack (urlEncodeText query)
+tmdbSearchUrl apiKey query = tmdbSearchUrlAt (T.pack tmdbApiBase) apiKey query
 
 -- | Percent-encode a query-string value (http-types 'urlEncode' with
 -- 'True', i.e. query-string mode: space becomes @%20@). The 'Text' is UTF-8
@@ -77,8 +87,13 @@ parseTmdbResults body = do
 -- (The manager needs no explicit close: http-client >= 0.7 closes it
 -- automatically once it is no longer referenced.)
 tmdbSearchMovie :: Text -> Text -> IO (Either String [TmdbResult])
-tmdbSearchMovie apiKey query = do
-  eres <- tmdbFetch (tmdbSearchUrl apiKey query)
+tmdbSearchMovie apiKey query = tmdbSearchMovieAt (T.pack tmdbApiBase) apiKey query
+
+-- | Like 'tmdbSearchMovie' but against an explicit API base
+-- (FMS_TMDB_BASE_URL), so tests can point it at a mock server.
+tmdbSearchMovieAt :: Text -> Text -> Text -> IO (Either String [TmdbResult])
+tmdbSearchMovieAt base apiKey query = do
+  eres <- tmdbFetch (tmdbSearchUrlAt base apiKey query)
   pure (parseTmdbResults =<< eres)
 
 -- | Shared HTTP GET for the TMDB API: 10s response timeout, 'Left' on
@@ -109,9 +124,7 @@ tmdbFetch url = do
 
 -- | Build the TMDB @\/search\/tv@ URL for a free-text query (pure).
 tmdbSearchTvUrl :: Text -> Text -> String
-tmdbSearchTvUrl apiKey query =
-  tmdbApiBase ++ "/search/tv?api_key=" ++ T.unpack apiKey
-    ++ "&query=" ++ T.unpack (urlEncodeText query)
+tmdbSearchTvUrl apiKey query = tmdbSearchTvUrlAt (T.pack tmdbApiBase) apiKey query
 
 -- | One raw hit of @\/search\/tv@.
 data TmdbTvItem = TmdbTvItem
@@ -159,6 +172,16 @@ parseTmdbTvResults body = do
 -- | Search TMDB for TV series matching the query (milestone 4m), same
 -- error behaviour as 'tmdbSearchMovie'.
 tmdbSearchTv :: Text -> Text -> IO (Either String [TmdbResult])
-tmdbSearchTv apiKey query = do
-  eres <- tmdbFetch (tmdbSearchTvUrl apiKey query)
+tmdbSearchTv apiKey query = tmdbSearchTvAt (T.pack tmdbApiBase) apiKey query
+
+-- | Like 'tmdbSearchTv' but against an explicit API base.
+tmdbSearchTvAt :: Text -> Text -> Text -> IO (Either String [TmdbResult])
+tmdbSearchTvAt base apiKey query = do
+  eres <- tmdbFetch (tmdbSearchTvUrlAt base apiKey query)
   pure (parseTmdbTvResults =<< eres)
+
+-- | @\/search\/tv@ URL against an explicit API base (pure).
+tmdbSearchTvUrlAt :: Text -> Text -> Text -> String
+tmdbSearchTvUrlAt base apiKey query =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/search/tv?api_key=" ++ T.unpack apiKey
+    ++ "&query=" ++ T.unpack (urlEncodeText query)

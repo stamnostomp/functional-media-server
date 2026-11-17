@@ -109,6 +109,7 @@ import FMS.Modules.Library.State
   , UpdateItemMeta(..)
   , initialLibraryState
   )
+import FMS.Modules.Metadata.Api.Images (tmdbImageListToDownloads, tmdbImagesUrl)
 import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, parseTmdbTvResults, tmdbSearchTvUrl, tmdbSearchUrl)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
@@ -2573,6 +2574,8 @@ main = do
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
+      , configFetchImages = False, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2694,6 +2697,8 @@ main = do
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
+        , configFetchImages = False, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -3027,5 +3032,22 @@ main = do
     ( registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty)))
     , unregisterHook "scan" "webhooks" (registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty)))
     , unregisterHook "scan" "dlna" (registerHook "scan" "dlna" (registerHook "scan" "webhooks" (registerHook "play" "webhooks" HM.empty))) )
+
+  -- TMDB artwork download: pure URL builder + images-JSON mapping
+  check "tmdbImagesUrl builds {base}/{kind}/{id}/images?api_key=.. (trailing slash stripped)"
+    "http://127.0.0.1:9999/3/movie/550/images?api_key=test"
+    (tmdbImagesUrl "http://127.0.0.1:9999/3/" "test" "movie" "550")
+  let imgJson = Aeson.decode (LBSC.pack (
+        "{\"posters\":[{\"file_path\":\"/p1.jpg\"},{\"file_path\":\"/p2.jpg\"},{\"file_path\":\"\"}],"
+        ++ "\"backdrops\":[{\"file_path\":\"/b1.jpg\"},{\"file_path\":\"/b2.jpg\"},{\"file_path\":\"/b3.jpg\"},{\"file_path\":\"/b4.jpg\"}],"
+        ++ "\"logos\":[{\"file_path\":\"/l1.png\"},{\"file_path\":\"/l2.png\"}]}"))
+  check "tmdbImageListToDownloads: caps (1 Primary, 3 Backdrops, 1 Logo), empty paths skipped"
+    (Just [("Primary", "/p1.jpg"), ("Backdrop", "/b1.jpg"), ("Backdrop", "/b2.jpg"), ("Backdrop", "/b3.jpg"), ("Logo", "/l1.png")])
+    (tmdbImageListToDownloads <$> imgJson)
+  check "tmdbImageListToDownloads: missing keys -> empty; non-object -> empty"
+    ([], [], [])
+    ( tmdbImageListToDownloads (Aeson.object [])
+    , tmdbImageListToDownloads (Aeson.String "x")
+    , tmdbImageListToDownloads (fromMaybe Aeson.Null (Aeson.decode (LBSC.pack "{\"posters\":\"nope\"}") :: Maybe Aeson.Value)) )
 
   putStrLn "All tests passed."

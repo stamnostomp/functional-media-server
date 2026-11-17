@@ -29,7 +29,9 @@ import FMS.Server (runServer)
 -- FMS_REQUIRE_AUTH, FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_RATE_LIMIT,
 -- FMS_LOG_LEVEL, FMS_CORS_ORIGINS, FMS_SECURITY_HEADERS,
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
--- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d).
+-- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d),
+-- FMS_FETCH_IMAGES, FMS_TMDB_BASE_URL, FMS_TMDB_IMAGE_BASE_URL,
+-- FMS_TMDB_IMAGE_SIZE (TMDB artwork download, opt-in via FMS_FETCH_IMAGES).
 -- FMS_ADMIN_PASSWORD is read by the auth module itself when it
 -- bootstraps the admin user.
 main :: IO ()
@@ -79,6 +81,10 @@ main = do
   mTlsC  <- lookupEnv "FMS_TLS_CERT"
   mTlsK  <- lookupEnv "FMS_TLS_KEY"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
+  mFetchImgs <- lookupEnv "FMS_FETCH_IMAGES"
+  mTmdbBase  <- lookupEnv "FMS_TMDB_BASE_URL"
+  mTmdbImgBase <- lookupEnv "FMS_TMDB_IMAGE_BASE_URL"
+  mTmdbImgSize <- lookupEnv "FMS_TMDB_IMAGE_SIZE"
   let -- CLI > env for the value-style options
       portV   = cliInt "port" <|> (mPort >>= readMaybe)
       libV    = cliV "library-path" <|> mLib
@@ -133,6 +139,10 @@ main = do
             _              -> 30 -- missing/invalid/<=0 -> default 30s (milestone 15)
         , configTlsCert = tlsCV   -- milestone 13d; both-or-neither checked by validateConfig
         , configTlsKey  = tlsKV
+        , configFetchImages = fromMaybe False (envBool mFetchImgs)  -- env-only, default False (opt-in)
+        , configTmdbBaseUrl = T.pack (fromMaybe "https://api.themoviedb.org/3" mTmdbBase)
+        , configTmdbImageBaseUrl = T.pack (fromMaybe "https://image.tmdb.org/t/p" mTmdbImgBase)
+        , configTmdbImageSize = T.pack (fromMaybe "w500" mTmdbImgSize)
         }
   cfg <- case validateConfig cfg0 of
     Left err -> do

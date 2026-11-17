@@ -32,6 +32,10 @@ data Config = Config
   , configFfmpegTimeoutSec :: !Int      -- ^ kill an ffmpeg job after this many seconds (env FMS_FFMPEG_TIMEOUT, default 30, <=0 -> 30; milestone 15)
   , configTlsCert :: !(Maybe FilePath)  -- ^ TLS certificate PEM (env FMS_TLS_CERT / --tls-cert; milestone 13d)
   , configTlsKey  :: !(Maybe FilePath)  -- ^ TLS private key PEM (env FMS_TLS_KEY / --tls-key; milestone 13d)
+  , configFetchImages :: !Bool          -- ^ download artwork from TMDB during metadata refresh (env FMS_FETCH_IMAGES, default False = opt-in; artwork milestone)
+  , configTmdbBaseUrl :: !Text          -- ^ TMDB v3 API base (env FMS_TMDB_BASE_URL, default https://api.themoviedb.org/3)
+  , configTmdbImageBaseUrl :: !Text     -- ^ TMDB image CDN base (env FMS_TMDB_IMAGE_BASE_URL, default https://image.tmdb.org/t/p)
+  , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-

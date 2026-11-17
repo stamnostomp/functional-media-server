@@ -68,6 +68,7 @@ library
                       FMS.Modules.Metadata
                       FMS.Modules.Metadata.Api.Types
                       FMS.Modules.Metadata.Api.Tmdb
+                      FMS.Modules.Metadata.Api.Images
                       FMS.Modules.Metadata.Types
                       FMS.Modules.Metadata.Nfo
                       FMS.Modules.Metadata.Persistence

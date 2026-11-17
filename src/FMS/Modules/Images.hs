@@ -12,6 +12,8 @@ module FMS.Modules.Images
   , selectBackdrop
   , blurhashForStoredImage
   , blurhashPairsForItem
+  , hasStoredImage
+  , storeImageBytes
   ) where
 
 import Control.Monad (forM, unless, when)
@@ -29,7 +31,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.List (isPrefixOf, nub, sort, stripPrefix)
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Word (Word8)
 import qualified Data.Text as T
@@ -401,6 +403,42 @@ deleteImageHandler captures req =
                   logInfo ("images: deleted " <> ty <> " for item " <> i
                            <> " (" <> T.pack (show (length targets)) <> " file(s))")
                   pure (jsonResponse (object ["status" .= ("ok" :: Text)]))
+
+-- | Does the item already have a stored image of @type@? @Backdrop@ is
+-- special: several backdrop files (@Backdrop@, @Backdrop1@, ...) count as
+-- one type. Used by the TMDB artwork fetch to avoid overwriting
+-- user-uploaded images.
+hasStoredImage :: FilePath -> Text -> Text -> IO Bool
+hasStoredImage stateDir i ty = do
+  let dir = imagesDirFor stateDir i
+  if T.toLower ty == "backdrop"
+    then do
+      files <- backdropFiles dir
+      pure (not (null files))
+    else isJust <$> findStoredImage dir ty
+
+-- | Store raw image bytes as the item's image of @ty@ in the same layout
+-- as 'uploadImageHandler', returning the path written. @Backdrop@ images
+-- go to the next free index stem (@Backdrop@, @Backdrop1@, ...) so several
+-- can coexist; other types replace any previously stored file of the same
+-- type (other extensions removed, like the upload route). Used by the
+-- TMDB artwork fetch (metadata module).
+storeImageBytes :: FilePath -> Text -> Text -> String -> BS.ByteString -> IO FilePath
+storeImageBytes stateDir i ty ext bytes = do
+  let dir = imagesDirFor stateDir i
+  stem <- if T.toLower ty == "backdrop"
+            then do
+              files <- backdropFiles dir
+              let n = length files :: Int
+              pure (if n == 0 then "Backdrop" else "Backdrop" ++ show n)
+            else pure (T.unpack ty)
+  if stem == T.unpack ty
+    then removeOtherExts dir stem ext
+    else pure ()
+  let path = dir </> (stem ++ ext)
+  createDirectoryIfMissing True (takeDirectory path)
+  BS.writeFile path bytes
+  pure path
 
 -- | The stored original of @type@ in @dir@ (a file whose base name is
 -- exactly the type — resized variants have a @-@ suffix and never

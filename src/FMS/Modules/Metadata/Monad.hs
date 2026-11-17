@@ -8,7 +8,7 @@ module FMS.Modules.Metadata.Monad
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Exception (SomeException, try)
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import qualified Data.ByteString as BS
@@ -18,13 +18,15 @@ import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, takeExtension)
 
 import FMS.Core.Monad (AppEnv (..), AppM, MonadLog (..), getState, putState)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
+import FMS.Modules.Images (hasStoredImage, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
-import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie)
+import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
@@ -184,7 +186,7 @@ refreshFromTmdb itemIdent item = do
   if T.null apiKey
     then pure Nothing
     else do
-      res <- liftIO (tmdbSearchMovie apiKey (itemTitle item))
+      res <- liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey (itemTitle item))
       case res of
         Left err -> do
           logErr ("metadata: TMDB search for \"" <> itemTitle item <> "\" failed: " <> T.pack err)
@@ -198,7 +200,54 @@ refreshFromTmdb itemIdent item = do
           setMetadata itemIdent merged
           logInfo ("metadata: \"" <> itemTitle item <> "\" matched TMDB id "
                    <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
+          -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /
+          -- backdrops / logo into the item image store, but never overwrite
+          -- an already stored (user-uploaded) image of that type.
+          when (configFetchImages cfg) $
+            fetchAndStoreTmdbImages cfg itemIdent (itemType item) (tmdbId top)
           pure (Just merged)
+
+-- | TMDB artwork download for one item (opt-in, FMS_FETCH_IMAGES): fetch
+-- the image list for the resolved TMDB id (@movie@ vs @tv@ by item type)
+-- and store each image under @stateDir/images/<id>@ via
+-- 'FMS.Modules.Images.storeImageBytes' — only when no image of that type
+-- is stored yet. Every step is failure-graceful (logged, never thrown) so
+-- a scan is never crashed by artwork; each HTTP call has the 10 s TMDB
+-- timeout.
+fetchAndStoreTmdbImages :: Config -> Text -> Text -> Int -> AppM ()
+fetchAndStoreTmdbImages cfg itemIdent itemTy tmdbIdNum = do
+  let apiKey = configTmdbApiKey cfg
+  if T.null apiKey
+    then pure ()
+    else do
+      let kind = if itemTy == "Episode" then "tv" else "movie"
+          stateDir = configStateDir cfg
+      r <- liftIO (try (fetchTmdbImages apiKey (configTmdbBaseUrl cfg) kind
+                         (T.pack (show tmdbIdNum)) (configTmdbImageBaseUrl cfg)
+                         (configTmdbImageSize cfg))
+                      :: IO (Either SomeException (Either String [(Text, Text, BS.ByteString)])))
+      case r of
+        Left e ->
+          logErr ("metadata: TMDB image fetch for item " <> itemIdent
+                  <> " failed: " <> T.pack (show e))
+        Right (Left err) ->
+          logInfo ("metadata: no TMDB images for item " <> itemIdent <> ": " <> T.pack err)
+        Right (Right dl) ->
+          forM_ dl $ \(ty, fp, bytes) -> do
+            has <- liftIO (hasStoredImage stateDir itemIdent ty)
+            if has
+              then pure ()
+              else do
+                w <- liftIO (try (storeImageBytes stateDir itemIdent ty
+                                   (takeExtension (T.unpack fp)) bytes)
+                              :: IO (Either SomeException FilePath))
+                case w of
+                  Left e ->
+                    logErr ("metadata: cannot store " <> ty <> " for item " <> itemIdent
+                            <> ": " <> T.pack (show e))
+                  Right p ->
+                    logInfo ("metadata: stored TMDB " <> ty <> " for item " <> itemIdent
+                             <> " at " <> T.pack p)
 
 -- | Map a TMDB search hit onto the stored 'MediaMetadata' shape. Fields
 -- TMDB search results do not carry (genres, runtime) stay empty; the id

@@ -3439,6 +3439,12 @@ main = do
         , "setInterval(refresh, 10000)" ]
   check "dashboardPageHtml: contains all required markers"
     (map (\m -> m `isInfixOf` dash) dashMarkers) (replicate (length dashMarkers) True)
+  let stamnoTokens =
+        [ "--void: #0a0b0d", "--gray-1: #1a1a1a", "--white: #ffffff"
+        , "Courier New", "border-radius: 0", ".btn-primary", ".btn-ghost"
+        , "bg-panel", "#1a1a1a", "b--default", "tracked-wide", "sticky-top" ]
+  check "dashboardPageHtml: stamno design tokens present (m19b restyle)"
+    (map (\m -> m `isInfixOf` dash) stamnoTokens) (replicate (length stamnoTokens) True)
   check "dashboardPageHtml: ASCII only (no bytes > 127)"
     [BS.all (<= 127) (LBS.toStrict dashboardPageHtml)] [True]
   check "dashboardBeforeCapture: webModule has Lit dashboard before Capture file"

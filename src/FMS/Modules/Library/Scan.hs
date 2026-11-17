@@ -45,10 +45,14 @@ import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
 
 -- | Extensions recognised as media files (lowercase, with dot).
+-- Milestone 2e: photos (image/*) and books (epub/mobi/pdf/cbz/cbr) are
+-- first-class library items alongside video and audio.
 mediaExtensions :: [String]
 mediaExtensions =
   [ ".mp4", ".mkv", ".avi", ".webm", ".mov"
   , ".mp3", ".flac", ".wav", ".ogg", ".m4a"
+  , ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".tiff"
+  , ".epub", ".mobi", ".pdf", ".cbz", ".cbr"
   ]
 
 -- | Is this path a media file, judging by extension?
@@ -68,6 +72,21 @@ mimeFor p = case map toLower (takeExtension p) of
   ".wav"  -> "audio/wav"
   ".ogg"  -> "audio/ogg"
   ".m4a"  -> "audio/mp4"
+  -- milestone 2e: photos
+  ".jpg"  -> "image/jpeg"
+  ".jpeg" -> "image/jpeg"
+  ".png"  -> "image/png"
+  ".gif"  -> "image/gif"
+  ".webp" -> "image/webp"
+  ".bmp"  -> "image/bmp"
+  ".heic" -> "image/heic"
+  ".tiff" -> "image/tiff"
+  -- milestone 2e: books / comics
+  ".epub" -> "application/epub+zip"
+  ".mobi" -> "application/x-mobipocket-ebook"
+  ".pdf"  -> "application/pdf"
+  ".cbz"  -> "application/vnd.comicbook+zip"
+  ".cbr"  -> "application/vnd.comicbook-rar"
   _       -> "application/octet-stream"
 
 -- | Pure (milestone 4d): detect a Kodi-style episode tag @S01E02@ /

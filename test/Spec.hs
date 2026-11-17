@@ -223,6 +223,19 @@ main = do
   check "mimeFor .mp3" "audio/mpeg" (mimeFor (scanDir </> "song.mp3"))
   check "isMediaFile .txt is False" False (isMediaFile (scanDir </> "notes.txt"))
   check "isMediaFile .MKV (case-insensitive) is True" True (isMediaFile "/x/Y.MKV")
+  -- milestone 2e: photos + books are media files with proper mimes
+  check "mimeFor photo extensions"
+    ["image/jpeg", "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/heic", "image/tiff"]
+    (map (T.unpack . mimeFor) ["a.jpg", "a.jpeg", "a.png", "a.gif", "a.webp", "a.bmp", "a.heic", "a.tiff"])
+  check "mimeFor book extensions"
+    [ "application/epub+zip", "application/x-mobipocket-ebook", "application/pdf"
+    , "application/vnd.comicbook+zip", "application/vnd.comicbook-rar" ]
+    (map (T.unpack . mimeFor) ["a.epub", "a.mobi", "a.pdf", "a.cbz", "a.cbr"])
+  check "mimeFor extension match is case-insensitive (.JPG/.PDF)"
+    ["image/jpeg", "application/pdf"] (map (T.unpack . mimeFor) ["/x/P.JPG", "/x/B.PDF"])
+  check "isMediaFile accepts .jpg/.epub/.pdf, still rejects .txt"
+    [True, True, True, False]
+    (map isMediaFile ["/x/p.jpg", "/x/b.epub", "/x/b.pdf", "/x/n.txt"])
   missing <- scanDirectory False "/tmp/fms-test-scan-does-not-exist"
   check "scan of missing dir is []" [] missing
   removeDirectoryRecursive scanDir
@@ -1507,6 +1520,17 @@ main = do
     (Right v2) (runGet safeGet (runPut (safePut v2)))
   check "itemTypeFromMime audio -> Audio" "Audio" (itemTypeFromMime "audio/mpeg")
   check "itemTypeFromMime other -> Unknown" "Unknown" (itemTypeFromMime "application/octet-stream")
+  -- milestone 2e: photo/book type matrix
+  check "itemTypeFromMime video/* -> Movie" ["Movie", "Movie"] (map itemTypeFromMime ["video/mp4", "video/x-matroska"])
+  check "itemTypeFromMime image/* -> Photo"
+    ["Photo", "Photo", "Photo"] (map itemTypeFromMime ["image/jpeg", "image/png", "image/heic"])
+  check "itemTypeFromMime book mimes -> Book"
+    ["Book", "Book", "Book", "Book", "Book"]
+    (map itemTypeFromMime
+      [ "application/pdf", "application/epub+zip", "application/x-mobipocket-ebook"
+      , "application/vnd.comicbook+zip", "application/vnd.comicbook-rar" ])
+  check "itemTypeFromMime unknown application/* -> Unknown"
+    "Unknown" (itemTypeFromMime "application/zip")
   check "SafeCopy reads v1 bytes as v4 (type from mime)"
     (Right "Movie") (itemType <$> (runGet safeGet (runPut (safePut v1))
                                    :: Either String MediaItem))
@@ -2199,6 +2223,16 @@ main = do
     (groupVersions [("/m/Movie.1080p.mkv",100),("/m/Movie.1080p.WEB-DL.mkv",900),("/m/Movie.1080p.BluRay.mkv",900)])
   check "groupVersions separates directories"
     2 (length (groupVersions [("/a/Movie.1080p.mkv",1),("/b/Movie.1080p.mkv",1)]))
+  -- milestone 2e: photos/books are never multi-version grouped by the
+  -- caller (only video/* goes into groupVersions -- FMS.Modules.Library.Monad);
+  -- groupVersions itself groups whatever it is given, so simulate the
+  -- caller's filter: photo paths are NOT passed in.
+  check "groupVersions leaves same-named photos ungrouped when caller filters to video"
+    [[("/m/Movie.1080p.mkv", 100)], [("/m/photo.jpg", 5)], [("/m/photo2.png", 6)]]
+    (let isVideo p = "video" `T.isPrefixOf` mimeFor p
+         files = [("/m/Movie.1080p.mkv", 100), ("/m/photo.jpg", 5), ("/m/photo2.png", 6)]
+     in groupVersions [ (p, s) | (p, s) <- files, isVideo p ]
+        ++ [ [(p, s)] | (p, s) <- files, not (isVideo p) ])
   let vpItem = v4 { itemVersions = ["/m/a.1080p.mkv", "/m/a.2160p.mkv"], itemPath = "/m/a.1080p.mkv" }
   check "versionParam: absent -> 0, valid -> n, invalid -> Left"
     [Right 0, Right 2, Left "invalid version parameter"]
@@ -2389,9 +2423,9 @@ main = do
     False (eventsPending [] wNow 2.0)
   check "eventsPending: any event inside counts"
     True (eventsPending [(wOld, "/x"), (wNow, "/m/b.mkv")] wNow 2.0)
-  check "watchMediaFile: media extensions pass, others do not"
-    [True, True, False, False]
-    (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "cover.jpg"])
+  check "watchMediaFile: media extensions pass, others do not (2e: photos/books are media too)"
+    [True, True, False, False, True, True]
+    (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "data.bin", "cover.jpg", "book.epub"])
 
   -- Milestone 6g (image cache tags + backdrop index): imageTag format and
   -- determinism, selectBackdrop bounds/sorting.

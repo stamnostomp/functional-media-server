@@ -97,7 +97,19 @@ itemTypeFromMime :: Text -> Text
 itemTypeFromMime mime
   | "video" `T.isPrefixOf` mime = "Movie"
   | "audio" `T.isPrefixOf` mime = "Audio"
-  | otherwise                   = "Unknown"
+  | "image" `T.isPrefixOf` mime = "Photo"
+  | mime `elem` bookMimes        = "Book"
+  | otherwise                    = "Unknown"
+  where
+    -- milestone 2e: book/comic mime types (see 'mimeFor' in
+    -- "FMS.Modules.Library.Scan")
+    bookMimes =
+      [ "application/pdf"
+      , "application/epub+zip"
+      , "application/x-mobipocket-ebook"
+      , "application/vnd.comicbook+zip"
+      , "application/vnd.comicbook-rar"
+      ]
 
 deriveSafeCopy 0 'base ''MediaItemV0
 

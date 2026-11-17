@@ -14,13 +14,15 @@ module FMS.Modules.Images
   , blurhashPairsForItem
   , hasStoredImage
   , storeImageBytes
+  , isUnderDir
+  , purgeBlurhashesForItem
   ) where
 
 import Control.Monad (forM, unless, when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
 import qualified Data.Aeson as Aeson
 import Data.CaseInsensitive (mk)
@@ -562,6 +564,25 @@ loadBlurhashCache cfg = do
 saveBlurhashCache :: Config -> HashMap FilePath BlurhashEntry -> IO ()
 saveBlurhashCache cfg m =
   BS.writeFile (blurhashCacheFile cfg) (LBS.toStrict (Aeson.encode m))
+
+-- | Pure: is path @p@ strictly under directory @dir@ (a child entry,
+-- not @dir@ itself)?
+isUnderDir :: FilePath -> FilePath -> Bool
+isUnderDir dir p = (dir ++ "/") `isPrefixOf` p
+
+-- | Purge every blurhash cache entry whose image file lives in the
+-- per-item image dir (@stateDir/images/<itemId>@) — called when an item
+-- is removed from the library (invalidation audit: derived caches of a
+-- removed item must not linger). Persists @blurhashes.json@.
+purgeBlurhashesForItem :: Text -> AppM ()
+purgeBlurhashesForItem itemId = do
+  cfg <- asks envConfig
+  let dir = imagesDirFor (configStateDir cfg) itemId
+  tv <- ensureBlurhashTVar
+  updated <- liftIO $ atomically $ do
+    modifyTVar' tv (HM.filterWithKey (\k _ -> not (isUnderDir dir k)))
+    readTVar tv
+  liftIO (saveBlurhashCache cfg updated)
 
 -- | The blurhash cache TVar, created lazily (the ensureUserDataTVar
 -- pattern); the persisted JSON is loaded on first use.

@@ -66,7 +66,7 @@ import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
 import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
 import FMS.Modules.Library.Monad (scanProgressData, withScanLock)
-import FMS.Modules.Library.Watch (eventsPending, watchMediaFile)
+import FMS.Modules.Library.Watch (eventsPending, watchFile, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
   ( chunksOf
@@ -75,14 +75,18 @@ import FMS.Modules.Library.Scan
   , extraTypeFor
   , isCircular
   , isMediaFile
+  , isNfoFile
+  , itemIdsForNfo
   , parseEpisodeFilename
   , itemFromPath
+  , mediaExtensions
   , mimeFor
   , groupVersions
   , normalizeVersionTitle
   , planRescan
   , pooledMapIO
   , scanDirectory
+  , siblingMediaPathsForNfo
   , statFile
   , versionRank
   , walk
@@ -98,7 +102,7 @@ import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
 import FMS.Modules.Hls (hlsArgs, hlsDirFor)
-import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isValidImageType, resizeArgs, selectBackdrop)
+import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isUnderDir, isValidImageType, resizeArgs, selectBackdrop)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
@@ -3301,4 +3305,43 @@ main = do
     [True, True]
     [ isNothing (Aeson.decode "{oops" :: Maybe ProgressRequest)
     , isNothing (Aeson.decode "{\"currentTime\":1,\"duration\":2}" :: Maybe ProgressRequest) ]
+
+  -- Invalidation audit (metadata/file-stat caching): NFO detection,
+  -- sidecar->item mapping, watch filter, blurhash purge predicate.
+  let tInv = read "2026-01-01 00:00:00 UTC" :: UTCTime
+      nfoItem = MediaItem
+        { itemId = "n1", itemTitle = "movie", itemPath = "/l/movie.mp4", itemSize = 1
+        , itemMime = "video/mp4", itemAddedAt = tInv, itemFolder = "1", itemType = "Movie"
+        , itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = []
+        }
+      epItem = nfoItem { itemId = "e1", itemPath = "/l/s01e01.mp4"
+                       , itemType = "Episode", itemSeries = Just "Show" }
+  check "isNfoFile: .nfo case-insensitive, other extensions rejected"
+    [True, True, False, False, False]
+    [ isNfoFile "/l/movie.nfo", isNfoFile "/l/MOVIE.NFO", isNfoFile "/l/movie.mp4"
+    , isNfoFile "/l/nfo", isNfoFile "/l/a.txt" ]
+  check "watchFile: media + nfo count, others ignored"
+    [True, True, False]
+    [ watchFile "/l/a.mp4", watchFile "/l/a.nfo", watchFile "/l/a.txt" ]
+  check "siblingMediaPathsForNfo: movie.nfo -> all media variants; tvshow.nfo -> []"
+    (True, length mediaExtensions, ([] :: [FilePath]))
+    ( "/l/movie.mp4" `elem` siblingMediaPathsForNfo "/l/movie.nfo"
+    , length (siblingMediaPathsForNfo "/l/movie.nfo")
+    , siblingMediaPathsForNfo "/l/tvshow.nfo" )
+  check "itemIdsForNfo: own sidecar, tvshow.nfo episodes in the dir, no match"
+    [["n1"], ["e1"], ([] :: [T.Text])]
+    [ itemIdsForNfo [nfoItem, epItem] "/l/movie.nfo"
+    , itemIdsForNfo [nfoItem, epItem] "/l/tvshow.nfo"
+    , itemIdsForNfo [nfoItem] "/l/other.nfo" ]
+  check "itemIdsForNfo: bare file name (hinotify dir watch) matches by name"
+    [["n1"], ["e1"]]
+    [ itemIdsForNfo [nfoItem, epItem] "movie.nfo"
+    , itemIdsForNfo [nfoItem, epItem] "tvshow.nfo" ]
+  check "isUnderDir: children only, not the dir itself nor prefix siblings"
+    [True, False, False, True]
+    [ isUnderDir "/st/images/1" "/st/images/1/a.jpg"
+    , isUnderDir "/st/images/1" "/st/images/1"
+    , isUnderDir "/st/images/1" "/st/images/12/a.jpg"
+    , isUnderDir "/st/images/1" "/st/images/1/sub/b.png" ]
   putStrLn "All tests passed."

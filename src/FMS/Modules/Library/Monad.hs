@@ -11,7 +11,7 @@ module FMS.Modules.Library.Monad
 import Control.Concurrent.STM
   ( TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO )
 import Control.Exception (SomeException, bracket_, catch, throwIO, try)
-import Control.Monad (foldM, forM, forM_)
+import Control.Monad (foldM, forM, forM_, when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, asks)
@@ -20,7 +20,7 @@ import qualified Data.HashMap.Strict as HM
 import Data.HashMap.Strict (HashMap)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (listToMaybe)
+import Data.Maybe (catMaybes, listToMaybe)
 import Data.Acid (AcidState, query, update)
 import Data.Aeson (ToJSON (..), Value, object, (.=))
 import qualified Data.Aeson.Key as Key
@@ -56,6 +56,14 @@ import FMS.Modules.Library.State
   , RekeyItem(..)
   , UpdateItemMeta(..)
   )
+import FMS.Modules.Images (purgeBlurhashesForItem)
+-- Metadata cache access uses the LITERAL registry key (importing
+-- FMS.Modules.Metadata.Monad from here would create an import cycle --
+-- it imports this module for MonadLibrary); same pattern as
+-- Library.Routes.hs. Only the cycle-free Persistence/Types modules are
+-- imported directly.
+import FMS.Modules.Metadata.Persistence (saveMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata)
 import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.Webhooks.Monad (fireWebhooks)
 
@@ -224,7 +232,13 @@ scanFoldersAndApply folders follow = do
               pure (Left p)   -- promoted
         _ -> pure (Right p) -- really gone
     let (promoted, reallyRemoved) = partitionEithers promotedOrRemoved
+    -- Invalidation audit: a REMOVED path purges the item's derived
+    -- caches -- the metadata record (metadata.cache TVar + metadata.json)
+    -- and the per-item blurhash entries (images.blurhash + blurhashes.json).
+    removedIds <- catMaybes <$> forM reallyRemoved (\p -> withAcid (`query` GetIdByPath p))
     removedCount <- withAcid (`update` RemovePaths reallyRemoved)
+    dropMetadataForItems removedIds
+    forM_ removedIds purgeBlurhashesForItem
     existingItems <- withAcid (`query` GetAllItems)   -- after promotion/removal
     let existingMeta = [ (itemPath i, Just (itemSize i, itemAddedAt i)) | i <- existingItems ]
         (_removed2, changedOrNew, _unchanged) = planRescan scanList existingMeta
@@ -232,8 +246,12 @@ scanFoldersAndApply folders follow = do
       let (s, t) = scannedMap Map.! p
       mId <- withAcid (`query` GetIdByPath p)
       case mId of
-        Just _ -> do
+        Just i -> do
           ch <- withAcid (`update` UpdateItemMeta p s t)
+          -- Invalidation audit: a CHANGED file (size/mtime differ) drops
+          -- the item's cached metadata so the next read/refresh re-reads
+          -- the NFO sidecar instead of serving a stale record.
+          when ch (dropMetadataForItems [i])
           pure (a, c + (if ch then 1 else 0))
         Nothing -> do
           case Map.lookup p pathToGroup of
@@ -285,6 +303,30 @@ modifyFolders f = do
     readTVar tv
   liftIO (saveFolders (foldersFilePath cfg) updated)
   pure updated
+
+-- Invalidation audit ----------------------------------------------------------
+
+-- | The metadata cache registry key, read LITERALLY (importing
+-- FMS.Modules.Metadata.Monad here would cycle -- it imports this module).
+metadataCacheKeyLocal :: Text
+metadataCacheKeyLocal = "metadata.cache"
+
+-- | Drop the metadata records of the given item ids from the cache TVar
+-- AND from @stateDir/metadata.json@ (used when items are removed or
+-- their file changes, so stale metadata is never served).
+dropMetadataForItems :: [Text] -> AppM ()
+dropMetadataForItems [] = pure ()
+dropMetadataForItems ids = do
+  cfg <- asks envConfig
+  mTv <- getState metadataCacheKeyLocal :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+  case mTv of
+    Nothing -> pure ()
+    Just tv -> do
+      updated <- liftIO $ atomically $ do
+        modifyTVar' tv (\m -> foldr HM.delete m ids)
+        readTVar tv
+      -- same path as FMS.Modules.Metadata.Monad.metadataFilePath
+      liftIO (saveMetadata (configStateDir cfg </> "metadata.json") updated)
 
 -- Internals ---------------------------------------------------------------
 

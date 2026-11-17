@@ -12,6 +12,7 @@ module FMS.Modules.Library.Watch
   ( startWatcher
   , eventsPending
   , watchMediaFile
+  , watchFile
   ) where
 
 import Control.Monad (forM_, when)
@@ -22,7 +23,7 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 
 import FMS.Core.Monad (AppM, MonadLog(..), envConfig)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Modules.Library.Scan (isMediaFile)
+import FMS.Modules.Library.Scan (isMediaFile, isNfoFile)
 
 #ifdef FMS_LINUX
 import Control.Concurrent (forkIO, threadDelay)
@@ -30,6 +31,7 @@ import Control.Exception (SomeException, catch)
 import Control.Monad.Reader (ask)
 import Data.Aeson (object)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (nub)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath ((</>))
 import System.INotify (Event(..), EventVariety(..), INotify, addWatch, withINotify)
@@ -38,6 +40,8 @@ import qualified Data.ByteString.Char8 as BSC
 import FMS.Core.Monad (AppEnv, runApp)
 import FMS.Core.Types.MediaFolder (MediaFolder(..))
 import FMS.Modules.Library.Monad (MonadLibrary(..))
+import FMS.Modules.Library.Scan (itemIdsForNfo)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..))
 import FMS.Modules.Socket (broadcastSocket)
 import FMS.Modules.Webhooks.Monad (fireWebhooks)
 #endif
@@ -50,9 +54,16 @@ eventsPending evs now window =
 
 -- | Pure: should a filesystem event for this path trigger a rescan?
 -- Only media files (the scanner's extension predicate) count; events
--- for dotfiles/nfo/etc. are ignored.
+-- for dotfiles/etc. are ignored.
 watchMediaFile :: FilePath -> Bool
 watchMediaFile = isMediaFile
+
+-- | Pure: should a filesystem event for this path trigger a rescan AND
+-- metadata invalidation? Media files yes; NFO sidecars ('.nfo') also count
+-- (invalidation audit: a changed sidecar must refresh the sibling item's
+-- metadata, so .nfo events are no longer dropped).
+watchFile :: FilePath -> Bool
+watchFile p = isMediaFile p || isNfoFile p
 
 -- | Entry point called from the library module's init. When
 -- 'configWatch' is False this only logs; when True (Linux) it forks the
@@ -103,13 +114,13 @@ watchDirRecursive inotify evRef dir = do
         isDir <- doesDirectoryExist p
         when isDir (watchDirRecursive inotify evRef p)
 
--- | Record media-file events (timestamped) into the IORef for the
--- debouncer; everything else is dropped.
+-- | Record media-file and NFO-sidecar events (timestamped) into the
+-- IORef for the debouncer; everything else is dropped.
 onEvent :: IORef [(UTCTime, FilePath)] -> Event -> IO ()
 onEvent evRef ev = do
   mp <- eventFile ev
   case mp of
-    Just p | watchMediaFile p -> do
+    Just p | watchFile p -> do
       now <- getCurrentTime
       modifyIORef' evRef ((now, p) :)
     _ -> pure ()
@@ -147,6 +158,16 @@ debounceLoop env evRef = do
         logInfo ("watch: " <> T.pack (show (length evs))
                  <> " change(s) detected, rescanning")
         rescanLibrary
+        -- Invalidation audit: an NFO sidecar change does not alter any
+        -- media file's size/mtime, so the rescan diff alone would not
+        -- notice it -- explicitly refresh the metadata of the sibling
+        -- item(s) (movie.nfo -> the movie; tvshow.nfo -> its episodes).
+        items <- listItems
+        let nfoPaths = [ p | (_, p) <- evs, isNfoFile p ]
+            ids      = nub (concatMap (itemIdsForNfo items) nfoPaths)
+        forM_ ids $ \i -> do
+          _ <- refreshMetadata i
+          pure ()
         broadcastSocket "LibraryChanged" (object [])
         fireWebhooks "LibraryChanged" (object [])
       case r of

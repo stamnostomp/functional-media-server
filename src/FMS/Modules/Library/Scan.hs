@@ -20,6 +20,9 @@ module FMS.Modules.Library.Scan
   , chunksOf
   , statFile
   , pooledMapIO
+  , isNfoFile
+  , siblingMediaPathsForNfo
+  , itemIdsForNfo
   ) where
 
 import Control.Applicative ((<|>))
@@ -27,7 +30,7 @@ import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (foldM, forM)
 import Data.Char (isAlpha, isDigit, isUpper, toLower)
 import Data.Either (partitionEithers)
-import Data.List (sort, sortBy, sortOn)
+import Data.List (nub, sort, sortBy, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Set (Set)
@@ -44,9 +47,10 @@ import System.Directory
   , listDirectory
   , pathIsSymbolicLink
   )
-import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
+import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
+import FMS.Modules.Metadata.Nfo (nfoPathFor)
 
 -- | Extensions recognised as media files (lowercase, with dot).
 -- Milestone 2e: photos (image/*) and books (epub/mobi/pdf/cbz/cbr) are
@@ -58,6 +62,40 @@ mediaExtensions =
   , ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".tiff"
   , ".epub", ".mobi", ".pdf", ".cbz", ".cbr"
   ]
+
+-- | Is this path an NFO sidecar (@.nfo@, case-insensitive)? NFO files are
+-- not media, but the watcher must react to them so a changed sidecar
+-- refreshes the sibling item's metadata (invalidation audit).
+isNfoFile :: FilePath -> Bool
+isNfoFile p = map toLower (takeExtension p) == ".nfo"
+
+-- | Pure: the media paths that share an NFO sidecar with @nfoPath@ —
+-- for @movie.nfo@ every media-extension variant of @movie@; for a
+-- series-level @tvshow.nfo@ no single file (the caller refreshes all
+-- episodes in the directory, see 'itemIdsForNfo').
+siblingMediaPathsForNfo :: FilePath -> [FilePath]
+siblingMediaPathsForNfo nfoPath
+  | takeFileName nfoPath == "tvshow.nfo" = []
+  | otherwise = nub [ replaceExtension (dropExtension nfoPath) ext | ext <- mediaExtensions ]
+
+-- | Pure: the ids of library items whose metadata an NFO-sidecar change
+-- at @nfoPath@ affects: items whose own sidecar this is, plus (for
+-- @tvshow.nfo@) every episode item in the same directory. hinotify
+-- directory watches report BARE file names (no directory), so when the
+-- event path carries no directory (\".\") the match is by file name
+-- alone; absolute event paths must match the directory exactly.
+itemIdsForNfo :: [MediaItem] -> FilePath -> [Text]
+itemIdsForNfo items nfoPath =
+  nub [ itemId i | i <- items, sidecarMatches i ]
+  where
+    nfoName  = takeFileName nfoPath
+    evDir    = takeDirectory nfoPath
+    isTvShow = nfoName == "tvshow.nfo"
+    dirOk itemDir = evDir `elem` [".", ""] || itemDir == evDir
+    sidecarMatches i
+      | isTvShow  = itemType i == "Episode" && dirOk (takeDirectory (itemPath i))
+      | otherwise = takeFileName (nfoPathFor (itemPath i)) == nfoName
+                    && dirOk (takeDirectory (itemPath i))
 
 -- | Is this path a media file, judging by extension?
 isMediaFile :: FilePath -> Bool

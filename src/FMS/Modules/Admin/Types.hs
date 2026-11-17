@@ -1,11 +1,17 @@
 module FMS.Modules.Admin.Types
   ( ActivityEntry(..)
   , ScheduledTask(..)
+  , countsByType
+  , uptimeSeconds
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (UTCTime, diffUTCTime)
+
+import FMS.Core.Types.MediaItem (MediaItem(..))
 
 -- | One entry of the server activity log (docs/todo.org section 11,
 -- milestone 11a): Jellyfin-shaped @/System/ActivityLog@ item. Entries are
@@ -65,3 +71,17 @@ instance FromJSON ScheduledTask where
       <*> o .:? "Enabled" .!= True
       <*> o .:? "LastRun"
       <*> o .:? "LastResult"
+
+-- Pure helpers for the /Dashboard aggregate (milestone 10d,
+-- docs/todo.org section 12), exported for unit tests.
+
+-- | Count items per 'itemType' as a JSON object (same shape as
+-- @GET /items/Counts@), keys ascending.
+countsByType :: [MediaItem] -> Value
+countsByType items =
+  object [ Key.fromText t .= n
+         | (t, n) <- Map.toAscList (Map.fromListWith (+) [ (itemType i, 1 :: Int) | i <- items ]) ]
+
+-- | Whole seconds between process start and now, never negative.
+uptimeSeconds :: UTCTime -> UTCTime -> Int
+uptimeSeconds now started = max 0 (round (diffUTCTime now started))

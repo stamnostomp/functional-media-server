@@ -12,6 +12,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as T
 import Data.Text (Text)
+import Data.Time.Clock (getCurrentTime)
 import Data.Acid (AcidState)
 import Data.Acid.Local (createCheckpointAndClose)
 import Data.Maybe (isJust)
@@ -108,6 +109,10 @@ runServer cfg = do
   shutdownMv <- newEmptyMVar :: IO (MVar Text)
   _ <- runApp appEnv $ do
     putState "system.serverConfig" scTv
+    -- Milestone 10d: process start time, read by GET /Dashboard for the
+    -- UptimeSeconds field.
+    startedAt <- liftIO getCurrentTime
+    putState "system.startedAt" startedAt
     putState "system.moduleNames" (map moduleName modules)
     putState "system.shutdown" shutdownMv
     -- Milestone 11b: the server log ring buffer (read by

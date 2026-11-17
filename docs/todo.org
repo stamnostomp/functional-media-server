@@ -162,7 +162,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Custom metadata fields / tags on items
 
 * 11. Server administration :feature:
-** TODO Dashboard: server status, active devices/sessions
+** DONE Dashboard: =GET /Dashboard= (admin-only) aggregates Server(+UptimeSeconds), Library{TotalItems,Counts}, Sessions, Devices, Activity(recent 20), ScheduledTasks; individual endpoints also exist (/Sessions, /Devices, /System/ActivityLog, /ScheduledTasks, /System/Info)
    - [X] =GET /System/ActivityLog= (ring buffer 500 + stateDir/activity.log JSON lines, newest first)
 ** DONE Scheduled tasks: =GET /ScheduledTasks=, =POST .../:id/Run=, =POST .../:id/Enable=; 10s scheduler thread; default tasks library-rescan 300s / metadata-refresh 3600s / acid-checkpoint 600s
 ** DONE Server logs endpoint + log levels: in-memory ring buffer (cap 500, "system.logbuf") fed by MonadLog; =GET /System/Logs= (file list) + =GET /System/Logs/Log?startIndex&limit= (newest-first envelope); =FMS_LOG_LEVEL= (debug/info/warn/error) gates printing, buffer ungated

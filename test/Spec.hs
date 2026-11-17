@@ -145,7 +145,7 @@ import FMS.Modules.Playback.Types
 import FMS.Modules.Sessions.Monad (expireSessions, upsertSession)
 import FMS.Modules.Sessions.Types (PlaySession (..))
 import FMS.Modules.Admin.Monad (activityLogCap, pushActivity, taskDue)
-import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..))
+import FMS.Modules.Admin.Types (ActivityEntry (..), ScheduledTask (..), countsByType, uptimeSeconds)
 import FMS.Modules.ApiDocs (methodText, routeToPath, routesToOpenApi, segmentToPathPiece)
 import FMS.Modules.Web (webPageHtml)
 
@@ -1441,6 +1441,25 @@ main = do
   check "ActivityEntry JSON uses Id/Time/Type/Message keys"
     True (all (`BSC.isInfixOf` LBS.toStrict (Aeson.encode ae))
       ["\"Id\":", "\"Time\":", "\"Type\":", "\"Message\":"])
+
+  -- Milestone 10d (/Dashboard aggregate): pure countsByType + uptimeSeconds.
+  let mkI t = MediaItem
+        { itemId = "1", itemTitle = "x", itemPath = "/x.mp4"
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = aNow, itemFolder = "1"
+        , itemType = t, itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+      cRaw = LBS.toStrict (Aeson.encode (countsByType [mkI "Movie", mkI "Movie", mkI "Photo", mkI "Episode"]))
+  check "countsByType aggregates per type"
+    [True, True, True]
+    (map (`BSC.isInfixOf` cRaw) ["\"Movie\":2", "\"Photo\":1", "\"Episode\":1"])
+  check "countsByType empty list -> empty object"
+    "{}" (BSC.unpack (LBS.toStrict (Aeson.encode (countsByType []))))
+  let t10d = aNow
+      t210d = addUTCTime 90 t10d
+  check "uptimeSeconds rounds to whole seconds"
+    [0, 90, 90] [uptimeSeconds t10d t10d, uptimeSeconds t210d t10d, uptimeSeconds (addUTCTime 90.4 t10d) t10d]
+  check "uptimeSeconds never negative (clock skew)"
+    0 (uptimeSeconds t10d t210d)
   let stk = ScheduledTask "library-rescan" "Library rescan" 300 True (Just aNow) (Just "ok")
   check "ScheduledTask JSON roundtrip"
     (Just stk) (Aeson.decode (Aeson.encode stk) :: Maybe ScheduledTask)

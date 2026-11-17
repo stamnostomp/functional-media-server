@@ -1,5 +1,6 @@
 module FMS.Modules.System
   ( systemModule
+  , currentServerConfig
   ) where
 
 import Control.Applicative ((<|>))

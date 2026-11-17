@@ -4,26 +4,68 @@ module FMS.Modules.Admin.Routes
 
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), eitherDecode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value(..), eitherDecode, object, withObject, (.:), (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Network.Wai (Request, Response, strictRequestBody)
 
 import FMS.Core.Module (Route, Segment (..), get, jsonResponse, post)
-import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Monad (AppError (..), AppM, getState)
 import FMS.Modules.Admin.Monad (MonadAdmin (..))
+import FMS.Modules.Admin.Types (ScheduledTask (..), countsByType, uptimeSeconds)
 import FMS.Modules.Auth.Monad (requireAdmin)
-import FMS.Modules.Admin.Types (ScheduledTask (..))
+import FMS.Modules.Devices.Monad (MonadDevices (..))
+import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Sessions.Monad (MonadSessions (..))
+import FMS.Modules.System (currentServerConfig)
 
 -- | The admin routes (docs/todo.org section 11, milestone 11a),
--- Jellyfin-shaped: @GET /System/ActivityLog@ and @GET/POST /ScheduledTasks...@.
+-- Jellyfin-shaped: @GET /System/ActivityLog@ and @GET/POST /ScheduledTasks...@,
+-- plus (milestone 10d) the @GET /Dashboard@ aggregate for the stamno-media
+-- UI.
 adminRoutes :: [Route]
 adminRoutes =
-  [ get  [Lit "System", Lit "ActivityLog"]                        activityLogHandler
+  [ get  [Lit "Dashboard"]                                         dashboardHandler
+  , get  [Lit "System", Lit "ActivityLog"]                        activityLogHandler
   , get  [Lit "ScheduledTasks"]                                    listTasksHandler
   , post [Lit "ScheduledTasks", Capture "id", Lit "Run"]           runTaskHandler
   , post [Lit "ScheduledTasks", Capture "id", Lit "Enable"]        enableTaskHandler
   ]
+
+-- | @GET /Dashboard@ — one aggregate JSON object (milestone 10d,
+-- docs/todo.org section 12) for the stamno-media UI:
+-- @Server@ (current config + @UptimeSeconds@), @Library@
+-- (@TotalItems@ + @Counts@ per type), @Sessions@, @Devices@,
+-- @Activity@ (newest 20), @ScheduledTasks@. Admin-only (milestone 16).
+dashboardHandler :: [(Text, Text)] -> Request -> AppM Response
+dashboardHandler _captures req = do
+  requireAdmin req  -- milestone 16
+  sc <- currentServerConfig
+  now <- liftIO getCurrentTime
+  mStarted <- getState "system.startedAt" :: AppM (Maybe UTCTime)
+  let uptime = maybe 0 (uptimeSeconds now) mStarted
+      serverJson = case toJSON sc of
+        Object o -> Object (KeyMap.insert (Key.fromText "UptimeSeconds") (toJSON uptime) o)
+        v        -> v
+  items    <- listItems
+  sessions <- listSessions
+  devices  <- listDevices
+  activity <- listActivity
+  tasks    <- listTasks
+  pure (jsonResponse (object
+    [ "Server"         .= serverJson
+    , "Library"        .= object
+        [ "TotalItems" .= length items
+        , "Counts"     .= countsByType items
+        ]
+    , "Sessions"       .= sessions
+    , "Devices"        .= devices
+    , "Activity"       .= take 20 activity
+    , "ScheduledTasks" .= tasks
+    ]))
 
 -- | @GET /System/ActivityLog@ — 200 @{\"Items\": [...], \"TotalRecordCount\": n}@,
 -- newest entries first.

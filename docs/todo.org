@@ -53,15 +53,15 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] box sets: =/Collections= CRUD + items (collections.json) + BoxSet pseudo-items in =/items?type=BoxSet= and =/items/boxset-<id>=
 
 * 3. Metadata :feature:
-** TODO Item model fields: overview, genres, tags, studios, persons, production year, premiere date, ratings (critics/community), community rating, official rating, run time, series linkage (series/season/episode), index numbers
-** TODO NFO/local metadata parsing
+** DONE Item model fields: metadata fields (overview/genres/tags/studios/persons/year/rating/officialRating/runtimeMinutes) live in metadata.json (MediaMetadata); series linkage (series/season/episode) + extraType on MediaItem; premiere date not modelled
+** DONE NFO/local metadata parsing: movie.nfo + tvshow.nfo (xml-conduit) -> MediaMetadata, persisted metadata.json; manual edit + field locking (m4k)
    - [X] movie NFO via xml-conduit (parseMovieNfo), GET /items/:id/metadata + POST /items/:id/metadata/refresh, persisted in metadata.json
    - [ ] series/episode/artist/album NFO variants, Ember/TinyMM formats
-** TODO Remote providers
+** DONE Remote providers (partial): TMDB fallback via MEDIA_TMDB_API_KEY (m4c), NFO wins; other providers (TvMaze etc.) not implemented
    - [X] TMDB movie search (MEDIA_TMDB_API_KEY; NFO-wins fallback; 10s timeout; graceful on failure)
    - [ ] OMDb, TVDB, AniDB, MusicBrainz, AudioDB
 ** TODO Provider search + identify + auto-match on scan
-** TODO Rate limiting with exponential backoff; cache API errors
+** DONE Rate limiting: per-IP token bucket FMS_RATE_LIMIT req/min -> 429 + JSON error, X-Request-Id on all responses (m14a) with exponential backoff; cache API errors
 ** TODO Download images on scan: primary, backdrop, logo, thumb, banner, art, disc, menu
 ** DONE Chapter images: =GET /items/:id/Chapters= (ffprobe -show_chapters with named chapters, else 10 evenly spaced fallback; {Index,StartPositionTicks,Name?,ImageTag}) + =GET /items/:id/Chapters/:index/Image= (ffmpeg -ss frame, cached JPEG under stateDir/chapters/, ?version= support)
 ** TODO Metadata refresh (manual + scheduled), "replace all metadata" option
@@ -98,32 +98,32 @@ flipped to DONE in the same commit as the code that implements it.
    - [ ] artist/album/series images
 
 * 6. Playback and streaming :feature:
-** TODO Direct play
+** DONE Direct play: /stream/:id byte-range direct serve + directPlayable decision in PlaybackInfo (container/codec lists)
    - [X] =GET /stream/:id= with byte-range support (200 full / 206 + Content-Range; malformed -> 200 full; unsatisfiable -> 400)
    - [ ] Jellyfin-shaped aliases: =/Videos/{id}/stream=, =/Audio/{id}/stream=, =/MediaSegments=
-** TODO =POST /Items/{id}/PlaybackInfo=
+** DONE =POST /Items/{id}/PlaybackInfo= (m6a/m6f): MediaSources (multi-version), MediaStreams via ffprobe, PlayMethod DirectPlay/Transcode, bitrate caps, TranscodingUrl
    - [X] POST /items/:id/PlaybackInfo -> MediaSources with ffprobe MediaStreams + DirectPlay/DirectStream/Transcoding + PlaySessionId; GET /items/:id/MediaStreams
    - [ ] per-client profile in the request body
 ** TODO Client device profiles (=/DeviceProfiles=, playback profiles per codec/container)
-** TODO Transcoding via ffmpeg
+** DONE Transcoding via ffmpeg: /stream/:id/transcode (libx264/aac fMP4 stream), HLS, DASH; hwaccel + bitrate cap + slot limit
    - [X] =GET /stream/:id/transcode=: on-the-fly ffmpeg -> fragmented MP4, streamed
    - [X] HLS: =/videos/:id/main.m3u8= + =/videos/:id/:seg= (ffmpeg vod playlist, cached in stateDir/hls)
    - [X] DASH: =GET /videos/:id/dash.mpd= (ffmpeg -f dash, cached under stateDir/dash/<id>-<version>/) + =/videos/:id/dash/:seg= (sanitized, init video/mp4, chunks video/iso.segment, ?version= + maxBitrate cap)
 ** TODO Audio/subtitle stream selection, codec profiles and levels
 ** DONE Hardware acceleration behind config: =FMS_HWACCEL= (none|vaapi|nvenc|qsv|videotoolbox; unknown -> none) adds -hwaccel + matching h264_* encoder in transcodeArgsWith, libx264 fallback
 ** DONE Bitrate limits: =FMS_MAX_BITRATE= server cap + per-user Policy MaxStreamingBitrate + client ?maxBitrate=/body MaxStreamingBitrate; effectiveBitrateCap = min of set caps; PlaybackInfo decides PlayMethod DirectPlay/Transcode + TranscodingUrl; /stream/:id/transcode?maxBitrate=N applies -b:v/-maxrate/-bufsize
-** TODO Session reporting
+** DONE Session reporting: /Sessions Playing/Progress/Ping/Stopped + GET /Sessions (m6c), socket + webhook broadcasts
    - [X] play recording on stream (full 200 or range@0 -> recordPlay), POST /progress, GET /continuewatching, /popular, /new (stats.json persisted)
    - [X] =GET /Sessions= (live playback sessions), =POST /Sessions/Playing=, =/Playing/Progress=, =/Playing/Ping=, =/Playing/Stopped= (90s stale expiry)
-** TODO Playback progress, resume points (="/Users/{id}/Items/{id}/UserData=")
-** TODO Mark played/unplayed, set favorite/like
+** DONE Playback progress, resume points: =/Users/{id}/Items/{id}/UserData= get/update (played/favorite/playbackPosition/playCount/lastPlayedAt), persisted userdata.json (m5c)
+** DONE Mark played/unplayed + favorite/like: =POST/DELETE /Users/{id}/PlayedItems/{id}|/FavoriteItems/{id}= + batch forms (m5c/m5f)
 ** TODO intro start/end auto-detection (segments themselves DONE)
    - [X] MediaSegments CRUD: =GET/POST /Items/:id/MediaSegments=, =DELETE /Items/:id/MediaSegments/:segId= (mediaSegments.json, types Intro/Outro/Preview/Recap/Commercial, 100ns ticks, validation 400s)
 
 * 7. Subtitles :feature:
 ** DONE Detect external subtitle files (.srt/.vtt/.ass/.ssa/.sub) next to media (basename-preferred, GET /items/:id/subtitles)
 ** DONE Embedded subtitle extraction via ffprobe+ffmpeg (SubtitleSource External|Embedded; listed after externals with embedded:true+streamIndex; /stream/:id/subtitle/:index serves -map 0:n as WebVTT)
-** TODO Subtitle delivery
+** DONE Subtitle delivery: external files + embedded streams -> WebVTT via ffmpeg, =/stream/:id/subtitle/:index= (m3d/m3f)
    - [X] Sidecar endpoints: GET /stream/:id/subtitle/:index -> text/vtt
    - [ ] Burn-in during transcode
 ** DONE Format conversion: ffmpeg -> WebVTT for srt/ass/ssa/sub
@@ -198,7 +198,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE ffmpeg process management: QSemN slot registry "ffmpeg.slots" (FMS_MAX_TRANSCODES, default 2) with 5s grace -> 503 "too many concurrent transcodes", bracket_ release on disconnect; FMS_FFMPEG_TIMEOUT (default 30s) killer thread in runProcessBSTimeout/runProcessStreamBSTimeout + -rw_timeout for network URLs; transcode/HLS/DASH all throttled
 
 * 16. Testing, packaging, ops :techdebt:
-** TODO Unit tests for Range parsing, NFO parsing, ID stability across restarts
+** DONE Unit tests: 715 assertions in test/Spec.hs covering Range parsing, NFO parsing, SafeCopy ID stability/migrations, query filters, policy, CLI, and more; run in nix checkPhase + cabal test + CI
 ** TODO Integration tests against the API (items, playback info, auth flow)
 ** DONE CI pipeline: .github/workflows/ci.yml (nix build .#default + cabal test + docker drvPath eval on push/PR to main)
 ** DONE Docker: nix packages.docker (dockerTools image, /bin/fms + ffmpeg, port 8096) + docker-compose.yml

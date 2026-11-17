@@ -2,6 +2,11 @@ module FMS.Core.Query
   ( queryParams
   , normalizeQueryParams
   , searchItems
+  , searchItemsMeta
+  , notInAnyCollection
+  , imageTagsValue
+  , backdropImageTagsValue
+  , attachImageTags
   , filterByFolder
   , filterByParent
   , filterByType
@@ -72,6 +77,54 @@ normalizeQueryParams = map (\(k, v) -> (T.toLower k, v))
 searchItems :: Text -> [MediaItem] -> [MediaItem]
 searchItems term =
   filter (\i -> T.toLower term `T.isInfixOf` T.toLower (itemTitle i))
+
+-- | Milestone 4n (docs/todo.org section 4): metadata-aware search --
+-- case-insensitive substring match on the title OR on any person
+-- ('metaPersons') of the item's metadata record. Items without metadata
+-- match on title only.
+searchItemsMeta :: (Text -> Maybe MediaMetadata) -> Text -> [MediaItem] -> [MediaItem]
+searchItemsMeta metaLookup term items =
+  filter (\i -> let t = T.toLower term
+                in t `T.isInfixOf` T.toLower (itemTitle i)
+                   || any (\p -> t `T.isInfixOf` T.toLower p)
+                          (maybe [] metaPersons (metaLookup (itemId i)))) items
+
+-- | Milestone 4n (docs/todo.org section 10): the "exclusive" filter --
+-- keep only items whose id is in NO collection (the predicate says
+-- whether an item id appears in some collection).
+notInAnyCollection :: (Text -> Bool) -> [MediaItem] -> [MediaItem]
+notInAnyCollection inAnyCollection = filter (not . inAnyCollection . itemId)
+
+-- Milestone 4n (docs/todo.org section 4): image tags on the item JSON.
+
+-- | @ImageTags@ object: @{type: tag}@ pairs, keys as stored
+-- (e.g. @Primary@, @Backdrop@).
+imageTagsValue :: [(Text, Text)] -> Value
+imageTagsValue pairs = object [ Key.fromText ty .= tag | (ty, tag) <- pairs ]
+
+-- | @BackdropImageTags@ array: the tags of all @Backdrop@ images
+-- (case-insensitive type match).
+backdropImageTagsValue :: [(Text, Text)] -> Value
+backdropImageTagsValue pairs =
+  toJSON [ tag | (ty, tag) <- pairs, T.toLower ty == "backdrop" ]
+
+-- | Merge image tags into an item JSON object: adds @ImageTags@ (all
+-- pairs, or only the requested @imageType@ when given) and
+-- @BackdropImageTags@ when backdrops exist. Attached only when there is
+-- something to attach; non-object values pass through unchanged.
+attachImageTags :: Maybe Text -> [(Text, Text)] -> Value -> Value
+attachImageTags mOnlyType pairs v = case v of
+  Object o ->
+    let filtered = case mOnlyType of
+          Just ty -> [ (t, g) | (t, g) <- pairs, T.toLower t == T.toLower ty ]
+          Nothing -> pairs
+        backdrops = [ g | (t, g) <- pairs, T.toLower t == "backdrop" ]
+    in if null filtered && null backdrops
+         then v
+         else Object
+                (KeyMap.insert "BackdropImageTags" (toJSON backdrops)
+                  (KeyMap.insert "ImageTags" (imageTagsValue filtered) o))
+  _ -> v
 
 -- | Keep only items scanned from the given media folder (milestone 2c).
 -- 'Nothing' (no @libraryId@ param) keeps everything.

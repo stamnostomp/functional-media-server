@@ -38,7 +38,7 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageTags, attachUserData, backdropImageTagsValue, filterByFolder, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
 import FMS.Core.Router (allowedOriginsHeader, isOpenPath, matchSegments, normalizeSegments, parseCorsOrigins, parseTokenHeader, securityHeaders)
@@ -636,6 +636,56 @@ main = do
   check "searchItems substring (SONG in 'gamma song')" ["gamma song"] (map itemTitle (searchItems "SONG" items4))
   check "searchItems no match -> []" [] (map itemTitle (searchItems "zzz" items4))
   check "searchItems empty term matches all" 4 (length (searchItems "" items4))
+
+  -- Milestone 4n: metadata-aware search, image tags, exclusive filter.
+  let meta4n = HM.fromList
+        [ ("1", emptyMetadata { metaPersons = ["Keanu Reeves", "Carrie-Anne Moss"] })
+        , ("2", emptyMetadata { metaPersons = ["Harrison Ford"] })
+        ]
+      lookup4n i = HM.lookup i meta4n
+      items4n = [ (qi4n "1" "The Matrix"), (qi4n "2" "Blade Runner"), (qi4n "3" "Some Doc") ]
+      qi4n i t = MediaItem
+        { itemId = i, itemTitle = t, itemPath = "/" ++ T.unpack t ++ ".mp4"
+        , itemSize = 1, itemMime = "video/mp4", itemAddedAt = t4n, itemFolder = "1"
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+      t4n = read "2026-01-01 00:00:00 UTC" :: UTCTime
+  check "searchItemsMeta matches title" ["The Matrix"]
+    (map itemTitle (searchItemsMeta lookup4n "matrix" items4n))
+  check "searchItemsMeta matches a person (case-insensitive)" ["Blade Runner"]
+    (map itemTitle (searchItemsMeta lookup4n "HANNOVER" items4n) ++
+     map itemTitle (searchItemsMeta lookup4n "harrison" items4n))
+  check "searchItemsMeta no match -> []" ([] :: [MediaItem])
+    (searchItemsMeta lookup4n "spielberg" items4n)
+  check "searchItemsMeta item without metadata matches on title only" ["Some Doc"]
+    (map itemTitle (searchItemsMeta lookup4n "doc" items4n))
+  let tagPairs = [("Primary", "p1"), ("Backdrop", "b1"), ("backdrop", "b2"), ("Logo", "l1")]
+      itRaw = LBS.toStrict (Aeson.encode (imageTagsValue tagPairs))
+      bdRaw = LBS.toStrict (Aeson.encode (backdropImageTagsValue tagPairs))
+  check "imageTagsValue object maps type -> tag"
+    [True, True, True, True]
+    (map (`BSC.isInfixOf` itRaw) ["\"Primary\":\"p1\"", "\"Backdrop\":\"b1\"", "\"backdrop\":\"b2\"", "\"Logo\":\"l1\""])
+  check "backdropImageTagsValue lists only backdrop tags (case-insensitive)"
+    "[\"b1\",\"b2\"]" (BSC.unpack bdRaw)
+  let baseItem = Aeson.toJSON (qi4n "1" "The Matrix")
+      withTags = attachImageTags Nothing tagPairs baseItem
+      withType = attachImageTags (Just "logo") tagPairs baseItem
+      noTags   = attachImageTags Nothing [] baseItem
+      wtRaw = LBS.toStrict (Aeson.encode withTags)
+      wtyRaw = LBS.toStrict (Aeson.encode withType)
+  check "attachImageTags adds ImageTags + BackdropImageTags to the item object"
+    [True, True, True, True]
+    (map (`BSC.isInfixOf` wtRaw)
+      [ "\"ImageTags\":{", "\"Primary\":\"p1\"", "\"BackdropImageTags\":[\"b1\",\"b2\"]", "\"Name\":\"The Matrix\"" ])
+  check "attachImageTags with imageType=Logo limits ImageTags to that type"
+    [True, False]
+    (map (`BSC.isInfixOf` wtyRaw) [ "\"ImageTags\":{\"Logo\":\"l1\"}", "\"Primary\":\"p1\"" ])
+  check "attachImageTags with no images leaves the value unchanged"
+    baseItem noTags
+  check "notInAnyCollection keeps only items in no collection"
+    ["1", "3"] (map (T.unpack . itemId) (notInAnyCollection (== "2") items4n))
+  check "notInAnyCollection with all collected -> []"
+    ([] :: [MediaItem]) (notInAnyCollection (const True) items4n)
 
   -- sortItems: title asc by default, size desc, addedAt, unknown -> title.
   check "sortItems default is title asc"

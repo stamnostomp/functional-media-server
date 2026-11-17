@@ -34,13 +34,16 @@ import System.Directory (getFileSize)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError(..), AppM, getState)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByParent, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import Control.Monad.Reader (asks)
+import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
+import FMS.Core.Types.Config (Config(..))
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageTags, attachUserData, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Collections.Types (Collection (..), boxSetIdPrefix, boxSetItemValue, isBoxSetId)
+import FMS.Modules.Images (findStoredImage, imageTagOfFile, imagesDirFor, listImageTypes)
 import FMS.Modules.Library.Folders (validateFolderPath)
 import FMS.Modules.Library.Monad (MonadLibrary(..))
 import FMS.Modules.Metadata.Types (MediaMetadata)
@@ -137,14 +140,46 @@ itemsQueryResponse mUser qparams = do
       items = case (mLookup, lookup "sortby" qparams) of
         (Just lk, Just s) | isUserDataSortKey s -> sortByUserDataField s lk itemsU
         _                                       -> itemsU
-      (total, page) = applyItemQuery qparams items
       startIndex = fromMaybe (0 :: Int) (lookup "startindex" qparams >>= readMaybe . T.unpack)
-      renderItem i = projectFields fields (attachUserData mLookup i (toJSON i))
+  -- Milestone 4n: the "exclusive" filter (items in NO collection) and
+  -- image tags (EnableImages/imageType) on the rendered item JSON.
+  cm <- collectionsMap
+  let inAnyCollection i = any (i `elem`) (map colItemIds (HM.elems cm))
+      itemsE = if "exclusive" `elem` map T.toLower filterTokens
+                 then notInAnyCollection inAnyCollection items
+                 else items
+      (totalE, pageE) = applyItemQuery qparams itemsE
+      enableImages = lookup "enableimages" qparams /= Just "false"
+      mImageType = lookup "imagetype" qparams
+  cfg <- asks envConfig
+  let renderItem i = do
+        let base = projectFields fields (attachUserData mLookup i (toJSON i))
+        if not enableImages
+          then pure base
+          else do
+            pairs <- imageTagPairsFor cfg (itemId i)
+            pure (attachImageTags mImageType pairs base)
+  pageWithTags <- mapM renderItem pageE
   pure (jsonResponse (object
-    [ "Items" .= (map renderItem page ++ map (projectFields fields) boxVals)
-    , "TotalRecordCount" .= (total + length boxVals)
+    [ "Items" .= (pageWithTags ++ map (projectFields fields) boxVals)
+    , "TotalRecordCount" .= (totalE + length boxVals)
     , "StartIndex" .= startIndex
     ]))
+
+-- | Milestone 4n: the @(imageType, tag)@ pairs of a stored item image,
+-- read from @stateDir/images/<itemId>@ (the Images module's layout).
+imageTagPairsFor :: Config -> Text -> AppM [(Text, Text)]
+imageTagPairsFor cfg i = do
+  let stateDir = configStateDir cfg
+      dir = imagesDirFor stateDir i
+  types <- liftIO (listImageTypes stateDir i)
+  forM types $ \ty -> do
+    mF <- liftIO (findStoredImage dir ty)
+    case mF of
+      Just (fp, _) -> do
+        tag <- liftIO (imageTagOfFile fp)
+        pure (ty, tag)
+      Nothing -> pure (ty, "")
 
 -- | Milestone 5e shared helper for @\/items@ and @\/items\/:id@: resolve the
 -- optional @userId@ query param into a 'UserData' lookup (403 'Forbidden'
@@ -347,7 +382,15 @@ itemDetailHandler captures req =
               mUser <- currentUserFromReq req
               let qparams = queryParams (queryString req)
               (mLookup, _filterTokens, fields) <- resolveUserQuery qparams mUser
-              pure (jsonResponse (projectFields fields (attachUserData mLookup item (toJSON item))))
+              -- Milestone 4n: image tags on the detail JSON too
+              -- (EnableImages/imageType), same as the /items list.
+              let base = projectFields fields (attachUserData mLookup item (toJSON item))
+              if lookup "enableimages" qparams == Just "false"
+                then pure (jsonResponse base)
+                else do
+                  cfg <- asks envConfig
+                  pairs <- imageTagPairsFor cfg (itemId item)
+                  pure (jsonResponse (attachImageTags (lookup "imagetype" qparams) pairs base))
 
 -- | Milestone 7: @GET \/items\/boxset-<colId>@ — the collection's BoxSet
 -- pseudo-item JSON; 404 when the collection does not exist or is not
@@ -442,9 +485,14 @@ searchHintsHandler _captures req = do
         Just t  -> t
         Nothing -> fromMaybe "" (lookup "term" qparams)
       limit = fromMaybe (20 :: Int) (lookup "limit" qparams >>= readMaybe . T.unpack)
-      hits = if T.null term
+  -- Milestone 4n: search people too -- read the metadata cache via the
+  -- literal registry key (same cycle-avoidance pattern as itemsQueryResponse).
+  mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+  metaMap <- maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+  let hits = if T.null term
                then []
-               else take limit (sortBy (comparing itemTitle) (searchItems term items))
+               else take limit (sortBy (comparing itemTitle)
+                                (searchItemsMeta (flip HM.lookup metaMap) term items))
   pure (jsonResponse
     [ object ([ "ItemId" .= itemId i, "Name" .= itemTitle i, "Type" .= itemType i ]
               ++ maybe [] (\s -> ["Series" .= s]) (itemSeries i))

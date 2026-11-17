@@ -70,13 +70,13 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Identify/failures queue: =GET /Items/Unmatched= (items without metadata, requester-visible) (m4m)
 
 * 4. Items API :feature:
-** TODO =GET /Items= with filters: exclusive
+** DONE =GET /Items= with filters: exclusive (filters=exclusive excludes collection members; m4n)
    - [X] genres=, studios=, persons= (comma lists, case-insensitive ANY-intersect, AND across params; from metadata.json, applied before count/pagination)
    - [X] recursive (accepted, flat library), includeItemTypes, years (match-when-present; MediaItem has no year field yet), search + searchTerm alias, type, series, sortBy/sortOrder, startIndex/limit
    - [X] =GET /items?search=...= (case-insensitive title match)
 ** DONE Sorting (sortBy + sortOrder) + pagination (startIndex/limit)
    - [X] =GET /items?sortBy=title|size|addedAt&sortOrder=asc|desc&startIndex&limit= -> {Items, TotalRecordCount, StartIndex}
-** TODO =EnableImages=, image type selection
+** DONE =EnableImages=/=imageType=: item JSON carries ImageTags + BackdropImageTags (computed from stored images, size-mtime tags) unless enableImages=false; imageType= limits ImageTags (m4n)
    - [X] =fields= projection on /items and /items/:id (case-insensitive, id always kept, UserData attachable)
 ** DONE User-scoped queries: =userId=, filters IsPlayed/Unplayed/IsFavorite/IsResumable/IsLiked (ANDed, case-insensitive; 403 for non-admin cross-user userId; UserData attached to items; TotalRecordCount after filters, before pagination)
 ** DONE =GET /Items/{id}/Similar= (genre-based via metadata: shared-genre count desc, title asc, self excluded, limit param default 12, envelope {Items,TotalRecordCount})
@@ -86,7 +86,7 @@ flipped to DONE in the same commit as the code that implements it.
    - [X] next-up for series: =GET /Shows/:name/NextUp=
    - [X] breadcrumb: CollectionFolder crumb -> Series crumb (episodes) -> item
 ** DONE Item counts per library, =GET /Items/Counts= (counts by item type over visible items)
-** TODO full-text search across people (titles done)
+** DONE full-text search across people: /Search/Hints?searchTerm= matches title OR persons (metadata) case-insensitively (m4n); /items?search= stays title-only
    - [X] =GET /Search/Hints?searchTerm=|term=&limit= (case-insensitive title substring, sorted, capped)
 
 * 5. Images API :feature:

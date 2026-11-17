@@ -4,6 +4,9 @@ module FMS.Modules.Images
   , isValidImageType
   , resizeArgs
   , imagePathFor
+  , imagesDirFor
+  , listImageTypes
+  , findStoredImage
   , imageTag
   , imageTagOfFile
   , selectBackdrop

@@ -46,7 +46,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** DONE Symlink policy (skip default, FMS_FOLLOW_SYMLINKS follows, circular chains logged) + scan lock (scan.lock, stale recovery)
 ** DONE Filesystem watching (Linux inotify via hinotify, =FMS_WATCH=1=, default off): recursive per-folder watches, media-file filter, 2s debounce -> incremental rescan + LibraryChanged socket/webhook broadcast; cabal if os(linux) + CPP FMS_LINUX guard
    - [X] incremental rescan: add/change/remove detected via planRescan + acid events, ids stable on modify
-** TODO Scan progress reporting via WebSocket; scheduled scans (tasks)
+** DONE Scan progress via WebSocket+webhooks: ScanProgress {Status:Scanning,Folder,FolderId} per folder + {Status:Completed,Added,Changed,Removed} (+Failed) on every rescan (manual/watcher/scheduler/boot); scheduled scans via library-rescan task (m11a)
 ** DONE Multi-version media: files with same normalized title in one dir group into ONE MediaItem (MediaItem v4 itemVersions, SafeCopy v3->v4); primary = best rank/size, promoted on rescan when deleted; =GET /items/:id/MediaSources=; =?version=N= on /stream + /transcode (400 invalid); PlaybackInfo MediaSources array
 ** DONE Extras: trailers, behind-the-scenes, deleted scenes, featurettes, shorts, theme songs (MediaItem v3 itemExtraType; type=Extra; extra match wins over Episode for video files)
 ** DONE Playlists and box sets as first-class virtual items

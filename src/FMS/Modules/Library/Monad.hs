@@ -5,15 +5,16 @@ module FMS.Modules.Library.Monad
   , initFolders
   , withScanLock
   , scanLockStaleSeconds
+  , scanProgressData
   ) where
 
 import Control.Concurrent.STM
   ( TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO )
 import Control.Exception (SomeException, bracket_, catch, throwIO, try)
-import Control.Monad (forM, forM_)
+import Control.Monad (foldM, forM, forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (asks)
+import Control.Monad.Reader (ask, asks)
 import Data.Either (partitionEithers)
 import qualified Data.HashMap.Strict as HM
 import Data.HashMap.Strict (HashMap)
@@ -21,6 +22,8 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
 import Data.Acid (AcidState, query, update)
+import Data.Aeson (ToJSON (..), Value, object, (.=))
+import qualified Data.Aeson.Key as Key
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
@@ -34,7 +37,7 @@ import System.Directory
   )
 import System.FilePath ((</>))
 
-import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig, getState, putState)
+import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig, getState, putState, runApp)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaFolder (MediaFolder(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
@@ -54,6 +57,8 @@ import FMS.Modules.Library.State
   , RekeyItem(..)
   , UpdateItemMeta(..)
   )
+import FMS.Modules.Socket (broadcastSocket)
+import FMS.Modules.Webhooks.Monad (fireWebhooks)
 
 -- | Namespaced key under which the module stashes its 'AcidState' in the
 -- typed registry (docs/modules.org: the core never knows module state).
@@ -128,33 +133,69 @@ instance MonadLibrary AppM where
   -- keep both their id and their stored record.
   rescanLibrary = do
     cfg <- asks envConfig
+    env <- ask
     let follow  = configFollowSymlinks cfg
         lockDir = configStateDir cfg </> "scan.lock"
     folders <- listFolders
-    (scannedStats, folderOf, loops) <- liftIO $ withScanLock lockDir $ do
-      perFolder <- forM folders $ \f -> do
-        (files, loops) <- walkWithLoops follow (folderPath f)
-        stats <- forM (filter isMediaFile files) $ \p -> do
-          s <- getFileSize p
-          t <- getModificationTime p
-          pure (p, s, t)
-        pure (stats, loops, folderId f)
-      let scannedStats = concat [ ss | (ss, _, _) <- perFolder ]
-          allLoops     = concat [ ls | (_, ls, _) <- perFolder ]
-          folderOf     = Map.fromList
-            [ (p, fid) | (ss, _, fid) <- perFolder, (p, _, _) <- ss ]
-      pure (scannedStats, folderOf, allLoops)
-    forM_ loops $ \l ->
-      logInfo ("library: skipping circular symlink " <> T.pack l)
+    -- Milestone 11c (docs/todo.org section 2): scan progress events.
+    -- The walk+diff runs under the scan lock in IO (so the lock's bracket
+    -- still covers everything), but via 'runApp env' so the per-folder
+    -- body below can broadcast/fire events from AppM. "Scanning" is sent
+    -- before EACH folder is walked; "Completed"/"Failed" once at the end.
+    eres <- liftIO (withScanLock lockDir (runApp env (scanFoldersAndApply folders follow)))
+    case eres of
+      Left e -> do
+        emitScanProgress "Failed" [("Error", toJSON (T.pack (show e)))]
+        throwError e
+      Right (loops, added, changed, removedCount, promoted, scannedCount) -> do
+        forM_ loops $ \l ->
+          logInfo ("library: skipping circular symlink " <> T.pack l)
+        logInfo (T.pack (unwords
+          [ "library rescan:"
+          , show added, "added,", show changed, "changed,"
+          , show removedCount, "removed,"
+          , show (length promoted), "version-promoted,"
+          , show scannedCount, "media file(s) found in"
+          , show (length folders), "folder(s)"
+          ]))
+        emitScanProgress "Completed"
+          [ ("Added",   toJSON added)
+          , ("Changed", toJSON changed)
+          , ("Removed", toJSON removedCount)
+          ]
+        pure ()
+
+-- | The body of 'rescanLibrary' (milestone 11c): walk every folder (after
+-- emitting a "Scanning" progress event for it), then run the incremental
+-- diff under the scan lock. Returns the loops seen plus the counters for
+-- the "Completed" event.
+scanFoldersAndApply
+  :: [MediaFolder] -> Bool -> AppM ([FilePath], Int, Int, Int, [FilePath], Int)
+scanFoldersAndApply folders follow = do
+    let isVideo p = "video" `T.isPrefixOf` mimeFor p
+    perFolder <- forM folders $ \f -> do
+      emitScanProgress "Scanning"
+        [ ("FolderId", toJSON (folderId f))
+        , ("Folder",   toJSON (folderName f))
+        ]
+      (files, loops) <- liftIO (walkWithLoops follow (folderPath f))
+      stats <- forM (filter isMediaFile files) $ \p -> liftIO $ do
+        s <- getFileSize p
+        t <- getModificationTime p
+        pure (p, s, t)
+      pure (stats, loops, folderId f)
+    let scannedStats = concat [ ss | (ss, _, _) <- perFolder ]
+        allLoops     = concat [ ls | (_, ls, _) <- perFolder ]
+        folderOf     = Map.fromList
+          [ (p, fid) | (ss, _, fid) <- perFolder, (p, _, _) <- ss ]
     -- Milestone 4j (multi-version media): video files are grouped by
     -- (directory, normalizeVersionTitle basename); each group becomes ONE
     -- item keyed by its best path (the group's primary). Non-video files
     -- stay singletons. The diff below runs over group primaries, so a
-    -- version file appearing/disappearing does not create/remove an item —
+    -- version file appearing/disappearing does not create/remove an item --
     -- only a disappearing PRIMARY does, and then the next surviving
     -- version is promoted (same item id) when possible.
-    let isVideo p = "video" `T.isPrefixOf` mimeFor p
-        scannedMap  = Map.fromList [ (p, (s, t)) | (p, s, t) <- scannedStats ]
+    let scannedMap  = Map.fromList [ (p, (s, t)) | (p, s, t) <- scannedStats ]
         videoGroups = groupVersions [ (p, s) | (p, s, _) <- scannedStats, isVideo p ]
         groupPaths  g = map fst g                       -- best first
         primaryOf   g = case g of ((p, _) : _) -> p; [] -> ""  -- groups are non-empty
@@ -186,23 +227,23 @@ instance MonadLibrary AppM where
     existingItems <- withAcid (`query` GetAllItems)   -- after promotion/removal
     let existingMeta = [ (itemPath i, Just (itemSize i, itemAddedAt i)) | i <- existingItems ]
         (_removed2, changedOrNew, _unchanged) = planRescan scanList existingMeta
-    applied <- forM changedOrNew $ \p -> do
+    (added, changed) <- foldM (\(a, c) p -> do
       let (s, t) = scannedMap Map.! p
       mId <- withAcid (`query` GetIdByPath p)
       case mId of
         Just _ -> do
-          changed <- withAcid (`update` UpdateItemMeta p s t)
-          pure (if changed then (1 :: Int) else 0)
+          ch <- withAcid (`update` UpdateItemMeta p s t)
+          pure (a, c + (if ch then 1 else 0))
         Nothing -> do
           case Map.lookup p pathToGroup of
             Just g -> do
               item <- liftIO (itemFromGroup (folderOf Map.! p) (groupPaths g))
               _ <- withAcid (`update` RegisterItem p item)
-              pure 1
+              pure (a + 1, c)
             Nothing -> do
               item <- liftIO (itemFromPath (folderOf Map.! p) p)
               _ <- withAcid (`update` RegisterItem p item)
-              pure 1
+              pure (a + 1, c)) (0, 0) changedOrNew
     -- refresh the version list of every surviving group whose primary is
     -- already registered (covers unchanged primaries whose membership
     -- changed)
@@ -216,14 +257,7 @@ instance MonadLibrary AppM where
           _ <- withAcid (`update` RekeyItem p p vers)
           pure ()
         Nothing -> pure ()
-    logInfo (T.pack (unwords
-      [ "library rescan:"
-      , show (length applied), "added/changed,"
-      , show removedCount, "removed,"
-      , show (length promoted), "version-promoted,"
-      , show (length scannedStats), "media file(s) found in"
-      , show (length folders), "folder(s)"
-      ]))
+    pure (allLoops, added, changed, removedCount, promoted, length scannedStats)
 
 -- | Module init part: load @stateDir/folders.json@ (or the single default
 -- folder rooted at the configured library path), persist it back (so the
@@ -300,3 +334,21 @@ acquireScanLock lockDir = do
 releaseScanLock :: FilePath -> IO ()
 releaseScanLock lockDir =
   removeDirectory lockDir `catch` \(_ :: SomeException) -> pure ()
+
+-- Milestone 11c (docs/todo.org section 2): scan progress events.
+
+-- | Pure: the @Data@ payload of a @ScanProgress@ socket/webhook event --
+-- @{"Status": status, ...fields}@ (the socket layer adds @MessageType@,
+-- the webhook layer adds @Event@/@Timestamp@/@ServerId@).
+scanProgressData :: Text -> [(Text, Value)] -> Value
+scanProgressData status fields =
+  object (("Status" .= status) : [ (Key.fromText k, v) | (k, v) <- fields ])
+
+-- | Emit one ScanProgress event to every connected socket client AND to
+-- every matching webhook. Both sinks are registry lookups that no-op when
+-- their module is not loaded, so this never crashes the scan.
+emitScanProgress :: Text -> [(Text, Value)] -> AppM ()
+emitScanProgress status fields = do
+  let dat = scanProgressData status fields
+  broadcastSocket "ScanProgress" dat
+  fireWebhooks "ScanProgress" dat

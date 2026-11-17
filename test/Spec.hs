@@ -60,7 +60,7 @@ import FMS.Core.Types.User (User(..), checkPasswordPolicy, toInternalJSON)
 import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
 import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
-import FMS.Modules.Library.Monad (withScanLock)
+import FMS.Modules.Library.Monad (scanProgressData, withScanLock)
 import FMS.Modules.Library.Watch (eventsPending, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
@@ -2484,6 +2484,26 @@ main = do
   check "watchMediaFile: media extensions pass, others do not (2e: photos/books are media too)"
     [True, True, False, False, True, True]
     (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "data.bin", "cover.jpg", "book.epub"])
+
+  -- Milestone 11c: ScanProgress event payload shapes (docs/todo.org
+  -- section 2).
+  let evScan  = scanProgressData "Scanning" [("FolderId", Aeson.String "1"), ("Folder", Aeson.String "Movies")]
+      evDone  = scanProgressData "Completed" [("Added", Aeson.Number 2), ("Changed", Aeson.Number 1), ("Removed", Aeson.Number 0)]
+      evFail  = scanProgressData "Failed" [("Error", Aeson.String "boom")]
+      evRaw v = LBS.toStrict (Aeson.encode v)
+  check "scanProgressData Scanning has Status + Folder fields"
+    [True, True, True]
+    (map (`BSC.isInfixOf` evRaw evScan)
+      [ "\"Status\":\"Scanning\"", "\"FolderId\":\"1\"", "\"Folder\":\"Movies\"" ])
+  check "scanProgressData Completed has Status + Added/Changed/Removed counts"
+    [True, True, True, True]
+    (map (`BSC.isInfixOf` evRaw evDone)
+      [ "\"Status\":\"Completed\"", "\"Added\":2", "\"Changed\":1", "\"Removed\":0" ])
+  check "scanProgressData Failed has Status + Error"
+    [True, True]
+    (map (`BSC.isInfixOf` evRaw evFail) [ "\"Status\":\"Failed\"", "\"Error\":\"boom\"" ])
+  check "scanProgressData with no extra fields is just Status"
+    "{\"Status\":\"Scanning\"}" (BSC.unpack (evRaw (scanProgressData "Scanning" [])))
 
   -- Milestone 6g (image cache tags + backdrop index): imageTag format and
   -- determinism, selectBackdrop bounds/sorting.

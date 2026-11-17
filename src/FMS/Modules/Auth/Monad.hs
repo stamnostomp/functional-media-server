@@ -18,6 +18,7 @@ module FMS.Modules.Auth.Monad
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Monad.Except (throwError)
+import Data.Acid (AcidState, query)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.HashMap.Strict (HashMap)
@@ -51,7 +52,7 @@ import FMS.Modules.Auth.State
   , usersFilePath
   , verifyPassword
   )
-import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Library.State (GetItemById(..), LibraryState)
 -- FMS.Modules.Metadata.Types is aeson-only, so importing it here cannot
 -- create a cycle (FMS.Core.Query already does the same, milestone 4h).
 import FMS.Modules.Metadata.Types (MediaMetadata)
@@ -261,7 +262,7 @@ visibleItems mUser items = case mUser of
 -- outside the user's schedule or the item is blocked by parental controls.
 getItemWithAccess :: Request -> Text -> AppM (Maybe MediaItem)
 getItemWithAccess req i = do
-  mItem <- getItem i
+  mItem <- getItemByIdLocal i
   case mItem of
     Nothing   -> pure Nothing
     Just item -> do
@@ -278,6 +279,18 @@ getItemWithAccess req i = do
                 then pure (Just item)
                 else throwError (Forbidden "item blocked by parental controls")
         _ -> pure (Just item)
+
+-- | Read one item straight from the library acid-state via the LITERAL
+-- registry key "library.acid" (the docs/modules.org pattern that keeps
+-- module graphs acyclic: FMS.Modules.Socket -> Auth.Monad must not pull
+-- in FMS.Modules.Library.Monad, so milestone 11c can have the library
+-- module broadcast scan progress over the socket).
+getItemByIdLocal :: Text -> AppM (Maybe MediaItem)
+getItemByIdLocal i = do
+  mAcid <- getState "library.acid" :: AppM (Maybe (AcidState LibraryState))
+  case mAcid of
+    Nothing   -> pure Nothing
+    Just acid -> liftIO (query acid (GetItemById i))
 
 -- | Apply an update to the users TVar AND persist @users.json@ after every
 -- mutation (in-memory state for reads, JSON on disk for restarts — the same

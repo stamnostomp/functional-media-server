@@ -27,7 +27,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
   ( Header, Method, ResponseHeaders
-  , status204, status400, status401, status403, status404, status429, status500
+  , status204, status400, status401, status403, status404, status429, status500, status503
   )
 import Network.Socket (SockAddr (..), hostAddressToTuple)
 import Network.Wai
@@ -348,6 +348,7 @@ errorResponse reqId err =
         Forbidden      m -> (status403, m)
         NotFound       m -> (status404, m)
         TooManyRequests m -> (status429, m)
+        ServiceUnavailable m -> (status503, m)  -- milestone 15
         InternalError  m -> (status500, m)
   in responseLBS st jsonContentType
        (encode (object ["error" .= msg, "requestId" .= reqId]))

@@ -194,7 +194,7 @@ flipped to DONE in the same commit as the code that implements it.
 ** TODO Lazy streaming of large files; memory monitoring
 ** TODO Metadata and file-stat caching with invalidation
 ** TODO Parallel scanning; in-memory index refresh without restart
-** TODO ffmpeg process management: timeouts, cleanup, concurrent transcode limits
+** DONE ffmpeg process management: QSemN slot registry "ffmpeg.slots" (FMS_MAX_TRANSCODES, default 2) with 5s grace -> 503 "too many concurrent transcodes", bracket_ release on disconnect; FMS_FFMPEG_TIMEOUT (default 30s) killer thread in runProcessBSTimeout/runProcessStreamBSTimeout + -rw_timeout for network URLs; transcode/HLS/DASH all throttled
 
 * 16. Testing, packaging, ops :techdebt:
 ** TODO Unit tests for Range parsing, NFO parsing, ID stability across restarts

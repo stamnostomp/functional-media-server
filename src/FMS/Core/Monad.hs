@@ -7,12 +7,16 @@ module FMS.Core.Monad
   , MonadLog(..)
   , putState
   , getState
+  , acquireFfmpegSlot
+  , releaseFfmpegSlot
+  , ffmpegSlotGraceSec
   ) where
 
+import Control.Concurrent.QSemN (QSemN, signalQSemN)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO)
 import Control.Exception (SomeException, catch)
 import Control.Monad (when)
-import Control.Monad.Except (ExceptT, MonadError, runExceptT)
+import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, runReaderT)
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
@@ -25,6 +29,7 @@ import Data.Time.Clock (getCurrentTime)
 import Data.Typeable (Typeable)
 import System.IO (hPutStrLn, stderr)
 
+import FMS.Core.Process (ffmpegSlotsKey, tryAcquireSlot)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.Log (LogEntry (..), logBufferCap, logLevelAllows, pushLogEntry)
 
@@ -36,6 +41,7 @@ data AppError
   | Unauthorized Text
   | Forbidden Text      -- ^ milestone 5e; maps to HTTP 403
   | TooManyRequests Text  -- ^ milestone 14a rate limiting; maps to HTTP 429
+  | ServiceUnavailable Text -- ^ milestone 15 ffmpeg slot exhaustion; maps to HTTP 503
   | InternalError Text
   deriving (Show, Eq)
 
@@ -112,3 +118,34 @@ getState key = do
   env <- ask
   m <- liftIO (readIORef (envState env))
   pure (HashMap.lookup key m >>= fromDynamic)
+
+-- Milestone 15 (ffmpeg process management, docs/todo.org section 13) ------
+
+-- | Grace period in seconds when waiting for a free ffmpeg slot before
+-- answering 503 (polled via 'tryAcquireSlot').
+ffmpegSlotGraceSec :: Int
+ffmpegSlotGraceSec = 5
+
+-- | Take one unit of the global ffmpeg slot semaphore (registry key
+-- 'ffmpegSlotsKey', created in @runServer@ with 'configMaxTranscodes'
+-- units). Returns 'Just sem' when a slot was acquired and must be
+-- released with 'releaseFfmpegSlot' when the job ends, or 'Nothing'
+-- when no semaphore is registered (unit tests): the job then runs
+-- unthrottled. Throws 'ServiceUnavailable' (HTTP 503) when no slot frees
+-- up within 'ffmpegSlotGraceSec' seconds.
+acquireFfmpegSlot :: AppM (Maybe QSemN)
+acquireFfmpegSlot = do
+  mSem <- getState ffmpegSlotsKey
+  case mSem of
+    Nothing  -> pure Nothing
+    Just sem -> do
+      ok <- liftIO (tryAcquireSlot sem ffmpegSlotGraceSec)
+      if ok
+        then pure (Just sem)
+        else throwError (ServiceUnavailable "too many concurrent transcodes")
+
+-- | Release a slot taken with 'acquireFfmpegSlot' ('Nothing' is a no-op).
+-- Plain IO so it can run in the streaming body's cleanup (a client
+-- disconnect mid-transcode must still free the slot).
+releaseFfmpegSlot :: Maybe QSemN -> IO ()
+releaseFfmpegSlot = maybe (pure ()) (`signalQSemN` 1)

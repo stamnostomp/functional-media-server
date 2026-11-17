@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Control.Concurrent.QSemN (newQSemN, signalQSemN)
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
@@ -36,7 +37,7 @@ import System.FilePath ((</>))
 import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
-import FMS.Core.Process (runProcessBS, showBS)
+import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
 import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachUserData, filterByFolder, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, paginate, projectFields, queryParams, searchItems, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.RateLimit (Bucket (..), newBucket, refill, requestIdHex, tryTake)
@@ -2308,7 +2309,7 @@ main = do
       , configRateLimit = Nothing, configLogLevel = "info"
       , configCorsOrigins = ["*"], configSecurityHeaders = True
       , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
-      , configWatch = False
+      , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2408,7 +2409,7 @@ main = do
         , configRateLimit = Nothing, configLogLevel = "INFO"
         , configCorsOrigins = ["*"], configSecurityHeaders = True
         , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "VAAPI"
-        , configWatch = False
+        , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -2468,5 +2469,25 @@ main = do
   check "MediaMetadata JSON roundtrip carries lockedFields"
     (Just (base4k { metaLockedFields = ["year"] }))
     (Aeson.decode (Aeson.encode (base4k { metaLockedFields = ["year"] })) :: Maybe MediaMetadata)
+
+  -- Milestone 15 (ffmpeg process management, docs/todo.org section 13):
+  -- the slot semaphore helper and the input-timeout ffmpeg args.
+  do sem <- newQSemN 1
+     slot1 <- tryAcquireSlot sem 0
+     slot2 <- tryAcquireSlot sem 1  -- slot held: waits 1s -> False
+     signalQSemN sem 1
+     slot3 <- tryAcquireSlot sem 0  -- released: immediate True
+     check "tryAcquireSlot: acquire when free, timeout when held, ok after release"
+       (True, False, True) (slot1, slot2, slot3)
+  check "ffmpegTimeoutArgs: <=0 -> [], network input -> -rw_timeout us, local file -> []"
+    ([], ["-rw_timeout", "30000000"], [], ["-rw_timeout", "5000000"])
+    ( ffmpegTimeoutArgs 0 "http://x/y.mp4"
+    , ffmpegTimeoutArgs 30 "http://x/y.mp4"
+    , ffmpegTimeoutArgs 30 "/lib/movie.mp4"
+    , ffmpegTimeoutArgs 5 "rtsp://cam/stream" )
+  check "validateConfig: maxTranscodes / ffmpegTimeout below 1 rejected"
+    [True, True]
+    [ isLeft' (validateConfig (cfg1d { configMaxTranscodes = 0 }))
+    , isLeft' (validateConfig (cfg1d { configFfmpegTimeoutSec = 0 })) ]
 
   putStrLn "All tests passed."

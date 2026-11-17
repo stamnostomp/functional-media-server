@@ -27,6 +27,8 @@ data Config = Config
   , configMaxBitrate :: !Int             -- ^ server-wide transcode bitrate cap in bps (env FMS_MAX_BITRATE, default 0 = unlimited; milestone 6f)
   , configHwAccel    :: !Text            -- ^ transcode hardware acceleration: none|vaapi|nvenc|qsv|videotoolbox (env FMS_HWACCEL, default \"none\"; milestone 6f)
   , configWatch      :: !Bool            -- ^ inotify auto-rescan on media changes (env FMS_WATCH, default False; milestone 2d)
+  , configMaxTranscodes :: !Int         -- ^ max concurrent ffmpeg jobs (env FMS_MAX_TRANSCODES, default 2, <=0 -> 2; milestone 15)
+  , configFfmpegTimeoutSec :: !Int      -- ^ kill an ffmpeg job after this many seconds (env FMS_FFMPEG_TIMEOUT, default 30, <=0 -> 30; milestone 15)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -63,6 +65,10 @@ validateConfig cfg
       Left "password min length must be >= 0"
   | configMaxBitrate cfg < 0 =
       Left "max bitrate must be >= 0"
+  | configMaxTranscodes cfg < 1 =
+      Left "max transcodes must be >= 1"
+  | configFfmpegTimeoutSec cfg < 1 =
+      Left "ffmpeg timeout must be >= 1 second"
   | otherwise = Right cfg
       { configLogLevel = T.pack logLvl
       , configHwAccel  = normalizeHwAccel (configHwAccel cfg)

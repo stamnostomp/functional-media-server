@@ -7,6 +7,8 @@ module FMS.Modules.Transcode
   , normalizeHwAccel  -- re-exported from FMS.Core.Types.Config
   ) where
 
+import Control.Concurrent.QSemN (QSemN)
+import Control.Exception (bracket_)
 import Control.Monad.Except (throwError)
 import Control.Monad.Reader (asks)
 import Data.ByteString.Builder (Builder, byteString)
@@ -18,8 +20,8 @@ import Network.Wai (Request, Response, queryString, responseStream)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
-import FMS.Core.Monad (AppError(..), AppM, envConfig)
-import FMS.Core.Process (runProcessStreamBS)
+import FMS.Core.Monad (AppError(..), AppM, acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
+import FMS.Core.Process (ffmpegTimeoutArgs, runProcessStreamBSTimeout)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Types.Config (Config(..), normalizeHwAccel)
 import FMS.Core.Types.Policy (UserPolicy(..))
@@ -134,21 +136,32 @@ transcodeHandler captures req =
               -- invalid maxBitrate is ignored (documented), not a 400
               clientCap = lookup "maxBitrate" qparams >>= \v -> readMaybe (T.unpack v)
               cap = effectiveBitrateCap policyCap clientCap (configMaxBitrate cfg)
-              args = transcodeArgsWith (configHwAccel cfg) cap path
+              -- milestone 15: ffmpeg's own read timeout for network inputs
+              -- (before -i), on top of the killer-thread guard below
+              args = ffmpegTimeoutArgs (configFfmpegTimeoutSec cfg) path
+                     ++ transcodeArgsWith (configHwAccel cfg) cap path
+          -- milestone 15: take an ffmpeg slot (5s grace) or answer 503
+          mRelease <- acquireFfmpegSlot
           pure (responseStream status200
                   [("Content-Type", "video/mp4")]
-                  (streamTranscode args))
+                  (streamTranscode (configFfmpegTimeoutSec cfg) mRelease args))
 
 -- | The 'Network.Wai.StreamingBody' used with 'responseStream': run
 -- ffmpeg with @args@ and write its stdout to the WAI sink in chunks of
 -- 64 KiB, like 'FMS.Modules.Subtitles.streamToVtt'.
--- 'runProcessStreamBS' streams stdout chunk-by-chunk and drains stderr as
--- raw bytes concurrently (never locale-decoded), and it always closes
--- the pipes and reaps ffmpeg — even if the client disconnects mid-stream
--- and the sink throws.
+-- 'runProcessStreamBSTimeout' streams stdout chunk-by-chunk and drains
+-- stderr as raw bytes concurrently (never locale-decoded), and it always
+-- closes the pipes and reaps ffmpeg — even if the client disconnects
+-- mid-stream and the sink throws. Milestone 15: @timeoutSec@ bounds the
+-- whole ffmpeg job (killer thread, <= 0 disables) and @mRelease@ frees
+-- the ffmpeg slot taken by 'acquireFfmpegSlot' when streaming ends for
+-- any reason (bracket_ releases it even on a client disconnect).
 streamTranscode
-  :: [String]
+  :: Int
+  -> Maybe QSemN
+  -> [String]
   -> (Builder -> IO ()) -> IO () -> IO ()
-streamTranscode args send flush = do
-  _ <- runProcessStreamBS "ffmpeg" args (send . byteString)
-  flush
+streamTranscode timeoutSec mRelease args send flush =
+  bracket_ (pure ()) (releaseFfmpegSlot mRelease) $ do
+    _ <- runProcessStreamBSTimeout timeoutSec "ffmpeg" args (send . byteString)
+    flush

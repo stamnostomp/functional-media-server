@@ -5,10 +5,12 @@ module FMS.Modules.Hls
   , ensureHls
   ) where
 
+import Control.Exception (bracket_)
 import Control.Monad (unless)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
+-- bracket_ is IO-level; the AppM result handling happens after it returns
 import Data.Char (isAlphaNum)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -21,8 +23,8 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>), dropFileName)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
-import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
-import FMS.Core.Process (runProcessBS, showBS)
+import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
+import FMS.Core.Process (runProcessBSTimeout, showBS)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
@@ -85,10 +87,16 @@ ensureHls cfg item = do
   unless exists $ do
     liftIO (createDirectoryIfMissing True dir)
     logInfo ("hls: packaging item " <> itemId item <> " into " <> T.pack dir)
-    (ec, _out, err) <- liftIO (runProcessBS "ffmpeg" (hlsArgs (itemPath item) m3u8))
-    case ec of
-      ExitSuccess -> pure ()
-      ExitFailure n ->
+    -- milestone 15: run packaging under the ffmpeg slot semaphore (503 on
+    -- exhaustion) with the wall-clock killer timeout; the slot is released
+    -- when the job ends either way
+    mRelease <- acquireFfmpegSlot
+    r <- liftIO $ bracket_ (pure ()) (releaseFfmpegSlot mRelease)
+           (runProcessBSTimeout (configFfmpegTimeoutSec cfg)
+              "ffmpeg" (hlsArgs (itemPath item) m3u8))
+    case r of
+      (ExitSuccess, _out, _err) -> pure ()
+      (ExitFailure n, _out, err) ->
         throwError (InternalError
           ("ffmpeg HLS packaging failed (exit " <> T.pack (show n) <> "): "
            <> T.pack (take 2000 (showBS (LBS.toStrict err)))))

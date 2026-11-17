@@ -71,6 +71,8 @@ main = do
   mMaxBr <- lookupEnv "FMS_MAX_BITRATE"
   mHwAcc <- lookupEnv "FMS_HWACCEL"
   mWatch <- lookupEnv "FMS_WATCH"
+  mMaxTr <- lookupEnv "FMS_MAX_TRANSCODES"
+  mFfTo  <- lookupEnv "FMS_FFMPEG_TIMEOUT"
   mTmdb  <- lookupEnv "MEDIA_TMDB_API_KEY"
   let -- CLI > env for the value-style options
       portV   = cliInt "port" <|> (mPort >>= readMaybe)
@@ -116,6 +118,12 @@ main = do
             _              -> 0   -- missing/invalid/0 -> unlimited (milestone 6f)
         , configHwAccel = maybe "none" (normalizeHwAccel . T.pack) hwAccV  -- milestone 6f
         , configWatch = boolV "watch" mWatch False  -- default off (milestone 2d)
+        , configMaxTranscodes = case mMaxTr >>= readMaybe of
+            Just n | n > 0 -> n
+            _              -> 2  -- missing/invalid/<=0 -> default 2 (milestone 15)
+        , configFfmpegTimeoutSec = case mFfTo >>= readMaybe of
+            Just n | n > 0 -> n
+            _              -> 30 -- missing/invalid/<=0 -> default 30s (milestone 15)
         }
   cfg <- case validateConfig cfg0 of
     Left err -> do

@@ -7,6 +7,7 @@ module FMS.Modules.Dash
   , isValidDashSegName
   ) where
 
+import Control.Exception (bracket_)
 import Control.Monad (unless)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -24,8 +25,8 @@ import System.FilePath ((</>))
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
-import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
-import FMS.Core.Process (runProcessBS, showBS)
+import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
+import FMS.Core.Process (runProcessBSTimeout, showBS)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
@@ -123,10 +124,16 @@ ensureDash cfg item version mCap = do
     liftIO (createDirectoryIfMissing True dir)
     logInfo ("dash: packaging item " <> itemId item <> " version "
              <> T.pack (show version) <> " into " <> T.pack dir)
-    (ec, _out, err) <- liftIO (runProcessBS "ffmpeg" (dashArgsWith mCap input mpd))
-    case ec of
-      ExitSuccess   -> pure ()
-      ExitFailure n ->
+    -- milestone 15: run packaging under the ffmpeg slot semaphore (503 on
+    -- exhaustion) with the wall-clock killer timeout; the slot is released
+    -- when the job ends either way
+    mRelease <- acquireFfmpegSlot
+    r <- liftIO $ bracket_ (pure ()) (releaseFfmpegSlot mRelease)
+           (runProcessBSTimeout (configFfmpegTimeoutSec cfg)
+              "ffmpeg" (dashArgsWith mCap input mpd))
+    case r of
+      (ExitSuccess, _out, _err)   -> pure ()
+      (ExitFailure n, _out, err) ->
         logErr ("dash: ffmpeg packaging failed (exit " <> T.pack (show n) <> "): "
                 <> T.pack (take 2000 (showBS (LBS.toStrict err))))
   pure mpd

@@ -5,6 +5,7 @@ module FMS.Server
 
 import Control.Concurrent
   ( MVar, forkIO, killThread, newEmptyMVar, takeMVar, threadDelay )
+import Control.Concurrent.QSemN (newQSemN)
 import Control.Concurrent.STM (newTVarIO)
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
@@ -27,6 +28,7 @@ import System.Process (CreateProcess (..), createProcess, proc)
 import FMS (name, version)
 import FMS.Core.Module (Module(..))
 import FMS.Core.Monad (AppError, AppM, getState, newAppEnv, putState, runApp)
+import FMS.Core.Process (ffmpegSlotsKey)
 import FMS.Core.RateLimit (Bucket, rateLimitBucketsKey)
 import FMS.Core.Router (buildApplication)
 import FMS.Core.Types.Config (Config(..))
@@ -115,6 +117,11 @@ runServer cfg = do
     -- (read by the router under "ratelimit.buckets").
     rlTv <- liftIO (newTVarIO (HM.empty :: HM.HashMap Text Bucket))
     putState rateLimitBucketsKey rlTv
+    -- Milestone 15: the global ffmpeg slot semaphore bounding concurrent
+    -- transcode / HLS / DASH jobs (read via acquireFfmpegSlot under
+    -- "ffmpeg.slots").
+    ffSem <- liftIO (newQSemN (max 1 (configMaxTranscodes cfg)))
+    putState ffmpegSlotsKey ffSem
     -- Milestone 1c: the module list itself, so the api-docs module can
     -- generate the OpenAPI spec from the actual route table.
     putState "system.modules" modules

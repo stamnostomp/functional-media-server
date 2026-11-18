@@ -49,7 +49,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
 import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
-import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, isOpenRoutePattern, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, openRoutePatterns, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, isOpenRoutePattern, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, openRoutePatterns, parseCorsOrigins, parseTokenHeader, securityHeaders, tokenFromQuery, tokenFromRequestParts)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3, simpleItemJson)
@@ -1087,6 +1087,25 @@ main = do
     Nothing (parseTokenHeader [(BSC.pack "X-Emby-Token", BSC.pack "")])
   check "parseTokenHeader unrelated headers -> Nothing"
     Nothing (parseTokenHeader [(BSC.pack "Host", BSC.pack "localhost:8117")])
+  -- m32: api_key query-param credential (Jellyfin-style, for <video src>)
+  check "tokenFromQuery api_key"
+    (Just "q1") (tokenFromQuery [(BSC.pack "api_key", Just (BSC.pack "q1"))])
+  check "tokenFromQuery param name case-insensitive (API_KEY, X-Emby-Token, token)"
+    [ tokenFromQuery [(BSC.pack "API_KEY", Just (BSC.pack "q2"))]
+    , tokenFromQuery [(BSC.pack "X-Emby-Token", Just (BSC.pack "q3"))]
+    , tokenFromQuery [(BSC.pack "Token", Just (BSC.pack "q4"))] ]
+    [ Just "q2", Just "q3", Just "q4" ]
+  check "tokenFromQuery empty/missing value -> Nothing, first non-empty wins"
+    [ tokenFromQuery [(BSC.pack "api_key", Just (BSC.pack ""))]
+    , tokenFromQuery [(BSC.pack "api_key", Nothing)]
+    , tokenFromQuery [(BSC.pack "api_key", Just (BSC.pack "")), (BSC.pack "api_key", Just (BSC.pack "q5"))]
+    , tokenFromQuery [] ]
+    [ Nothing, Nothing, Just "q5", Nothing ]
+  check "tokenFromRequestParts: header wins over query; query fallback; none -> Nothing"
+    [ tokenFromRequestParts [(BSC.pack "X-Emby-Token", BSC.pack "hdr")] [(BSC.pack "api_key", Just (BSC.pack "q"))]
+    , tokenFromRequestParts [] [(BSC.pack "api_key", Just (BSC.pack "q"))]
+    , tokenFromRequestParts [] [] ]
+    [ Just "hdr", Just "q", Nothing ]
 
   -- bcrypt roundtrip. Cost-14 hashing is slowish (~1s per op here), so keep
   -- the op count at three: one hash + two verifies.

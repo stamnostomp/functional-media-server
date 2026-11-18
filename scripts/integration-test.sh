@@ -198,6 +198,14 @@ else
   bad "stream-content-range-header" "$(grep -i content-range "$HDRS" || echo none)"
 fi
 
+# m32: api_key query-param auth (Jellyfin-style) so <video src=/stream/:id?api_key=..> works
+code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -H 'Range: bytes=0-1023' "$BASE$STREAM_URL_PATH?api_key=$TOKEN")"
+check_code "stream-range-206-api-key-query ($STREAM_URL_PATH?api_key=...)" 206 "$code"
+code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -H 'Range: bytes=0-1023' "$BASE$STREAM_URL_PATH")"
+check_code "stream-range-401-no-creds" 401 "$code"
+code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -H 'Range: bytes=0-1023' "$BASE$STREAM_URL_PATH?api_key=definitely-wrong")"
+check_code "stream-range-401-bad-api-key" 401 "$code"
+
 code="$(req GET "/Items/$VID/Images" "" "$TOKEN")"
 check_code "images-list-200" 200 "$code"
 check_eq "images-is-list" True "$(jget "isinstance(d, list)")"

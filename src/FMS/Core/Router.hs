@@ -9,6 +9,8 @@ module FMS.Core.Router
   , openPathsExact
   , openRoutePatterns
   , parseTokenHeader
+  , tokenFromQuery
+  , tokenFromRequestParts
   , tokenFromRequest
   , parseCorsOrigins
   , allowedOriginsHeader
@@ -42,7 +44,7 @@ import Network.Socket (SockAddr (..), hostAddressToTuple)
 import Text.Read (readMaybe)
 import Network.Wai
   ( Application, Request, Response
-  , getRequestBodyChunk, mapResponseHeaders, pathInfo, remoteHost
+  , getRequestBodyChunk, mapResponseHeaders, pathInfo, queryString, remoteHost
   , requestHeaders, requestMethod, responseLBS, setRequestBodyChunks
   )
 
@@ -335,10 +337,35 @@ parseTokenHeader hs =
     findHeader name =
       listToMaybe [v | (k, v) <- hs, T.toLower (TE.decodeUtf8 k) == name]
 
+-- | m32: Jellyfin-style query-param credential (for media URLs like
+-- @/stream/:id?api_key=...@ that cannot carry an @X-Emby-Token@ header,
+-- e.g. a @<video src>@). Looks up @api_key@ (also @x-emby-token@ and
+-- @token@; the param NAME compares case-insensitively) and returns the
+-- first non-empty value. Pure, exported for tests.
+tokenFromQuery :: [(B.ByteString, Maybe B.ByteString)] -> Maybe Text
+tokenFromQuery qs =
+  listToMaybe [ TE.decodeUtf8 v
+              | (k, mv) <- qs
+              , T.toLower (TE.decodeUtf8 k) `elem` ["api_key", "x-emby-token", "token"]
+              , Just v <- [mv]
+              , not (B.null v) ]
+
+-- | Combined credential lookup, pure on the parts (exported for tests):
+-- the header token wins; otherwise the query-param token (m32).
+tokenFromRequestParts
+  :: [(B.ByteString, B.ByteString)]        -- ^ raw headers
+  -> [(B.ByteString, Maybe B.ByteString)]  -- ^ query string
+  -> Maybe Text
+tokenFromRequestParts hs qs =
+  case parseTokenHeader hs of
+    Just t  -> Just t
+    Nothing -> tokenFromQuery qs
+
 -- | The credential carried by a request, if any: 'parseTokenHeader' over
--- the raw (unwrapped) header list.
+-- the raw (unwrapped) header list, falling back to the query string
+-- ('tokenFromQuery', m32 api_key=) when no header token is present.
 tokenFromRequest :: Request -> Maybe Text
-tokenFromRequest req = parseTokenHeader (rawHeaders req)
+tokenFromRequest req = tokenFromRequestParts (rawHeaders req) (queryString req)
 
 -- | WAI header names are @CI ByteString@; unwrap them to plain
 -- 'B.ByteString' so 'parseTokenHeader' stays a pure function on a plain

@@ -33,7 +33,7 @@ import FMS.Modules.Images (hasStoredImage, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
 import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt)
-import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), applyProviderMerge, emptyMetadata, metadataSettingsFromConfig)
@@ -248,26 +248,35 @@ refreshFromTmdb itemIdent item = do
   if T.null apiKey
     then pure Nothing
     else do
-      res <- liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey (itemTitle item))
+      -- m36: clean scene/release names (Shrek.2001.1080p... -> "Shrek" 2001)
+      -- before searching, and prefer the hit whose year matches
+      let (cleanQ, mYear) = cleanTitleForProvider (itemTitle item)
+      res0 <- liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey cleanQ)
+      res <- case res0 of
+        Right [] | cleanQ /= itemTitle item ->
+          liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey (itemTitle item))
+        _ -> pure res0
       case res of
         Left err -> do
-          logErr ("metadata: TMDB search for \"" <> itemTitle item <> "\" failed: " <> T.pack err)
+          logErr ("metadata: TMDB search for \"" <> cleanQ <> "\" failed: " <> T.pack err)
           pure Nothing
-        Right [] -> do
-          logInfo ("metadata: TMDB has no results for \"" <> itemTitle item <> "\"")
-          pure Nothing
-        Right (top : _) -> do
-          let fresh = tmdbResultToMetadata top
-          merged <- mergeWithStored itemIdent fresh
-          setMetadata itemIdent merged
-          logInfo ("metadata: \"" <> itemTitle item <> "\" matched TMDB id "
-                   <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
-          -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /
-          -- backdrops / logo into the item image store, but never overwrite
-          -- an already stored (user-uploaded) image of that type.
-          when (msFetchImages ms) $   -- m35: effective fetch-images flag
-            fetchAndStoreTmdbImages cfg itemIdent (itemType item) (tmdbId top)
-          pure (Just merged)
+        Right rs -> case pickTmdbResult mYear rs of
+          Nothing -> do
+            logInfo ("metadata: TMDB has no results for \"" <> cleanQ <> "\"")
+            pure Nothing
+          Just top -> do
+            let fresh = tmdbResultToMetadata top
+            merged <- mergeWithStored itemIdent fresh
+            setMetadata itemIdent merged
+            logInfo ("metadata: \"" <> itemTitle item <> "\" (cleaned \"" <> cleanQ
+                     <> "\") matched TMDB id "
+                     <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
+            -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /
+            -- backdrops / logo into the item image store, but never overwrite
+            -- an already stored (user-uploaded) image of that type.
+            when (msFetchImages ms) $   -- m35: effective fetch-images flag
+              fetchAndStoreTmdbImages cfg itemIdent (itemType item) (tmdbId top)
+            pure (Just merged)
 
 -- | TMDB artwork download for one item (opt-in, FMS_FETCH_IMAGES): fetch
 -- the image list for the resolved TMDB id (@movie@ vs @tv@ by item type)

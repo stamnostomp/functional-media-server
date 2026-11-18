@@ -154,7 +154,7 @@ import FMS.Modules.Metadata.Api.Tmdb
   , tmdbSearchTvUrl
   , tmdbSearchUrl
   )
-import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
@@ -4173,6 +4173,36 @@ main = do
                 (any ("ENVKEY" `isInfixOf`) callLines) False
               check "m35 mock: image CDN was hit for poster+backdrop"
                 (length (filter ("/img/" `isPrefixOf`) callLines)) 2)
+
+  -- milestone 36: clean release names before TMDB matching
+  check "m36 cleanTitleForProvider: scene examples from the spec"
+    [ cleanTitleForProvider "Shrek.2001.1080p.BluRay.x265-LAMA"
+    , cleanTitleForProvider "The.Matrix.1999.2160p.UHD.BluRay.REMUX-FraMeSToR"
+    , cleanTitleForProvider "sample-long"
+    , cleanTitleForProvider "Fight Club" ]
+    [ ("Shrek", Just 2001), ("The Matrix", Just 1999), ("sample long", Nothing), ("Fight Club", Nothing) ]
+  check "m36 cleanTitleForProvider: year in the middle, multiple dots, no year, brackets"
+    [ cleanTitleForProvider "The Movie 2001 Returns"
+    , cleanTitleForProvider "a.b.c"
+    , cleanTitleForProvider "Movie (Extended Edition) 2010"
+    , cleanTitleForProvider "Amelie" ]
+    [ ("The Movie Returns", Just 2001), ("a b c", Nothing), ("Movie", Just 2010), ("Amelie", Nothing) ]
+  check "m36 cleanTitleForProvider: already-clean title unchanged, year out of range ignored"
+    [ cleanTitleForProvider "Fight Club"
+    , cleanTitleForProvider "Movie 1850 Tag" ]
+    [ ("Fight Club", Nothing), ("Movie 1850 Tag", Nothing) ]
+  let mkRes i y = TmdbResult { tmdbId = i, tmdbTitle = "T" <> T.pack (show i)
+                             , tmdbOverview = Nothing, tmdbReleaseYear = y
+                             , tmdbVoteAverage = Nothing, tmdbPoster = Nothing }
+      rs36 = [mkRes 1 (Just 2000), mkRes 2 (Just 1999), mkRes 3 Nothing]
+  check "m36 pickTmdbResult: year match preferred over first"
+    (fmap tmdbId (pickTmdbResult (Just 1999) rs36)) (Just 2)
+  check "m36 pickTmdbResult: no year match -> first result"
+    (fmap tmdbId (pickTmdbResult (Just 2001) rs36)) (Just 1)
+  check "m36 pickTmdbResult: no extracted year -> first result"
+    (fmap tmdbId (pickTmdbResult Nothing rs36)) (Just 1)
+  check "m36 pickTmdbResult: empty list -> Nothing"
+    (pickTmdbResult (Just 1999) []) Nothing
 
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"

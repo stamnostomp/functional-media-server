@@ -60,6 +60,8 @@ requestToPersist r = object
   , "sourceIndexer" .= reqSourceIndexer r
   , "sourceRelease" .= reqSourceRelease r
   , "sourceUrl"     .= reqSourceUrl r
+  , "magnet"        .= reqMagnet r
+  , "downloadUrl"   .= reqDownloadUrl r
   , "createdAt"     .= reqCreatedAt r
   , "updatedAt"     .= reqUpdatedAt r
   , "approvedBy"    .= reqApprovedBy r
@@ -81,6 +83,8 @@ requestFromPersist = withObject "request" $ \o ->
     <*> o .:? "sourceIndexer"
     <*> o .:? "sourceRelease"
     <*> o .:? "sourceUrl"
+    <*> o .:? "magnet"
+    <*> o .:? "downloadUrl"
     <*> o .:  "createdAt"
     <*> o .:  "updatedAt"
     <*> o .:? "approvedBy"

@@ -64,6 +64,8 @@ data Request = Request
   , reqSourceIndexer :: !(Maybe Text)
   , reqSourceRelease :: !(Maybe Text)
   , reqSourceUrl    :: !(Maybe Text)   -- ^ release link (torrent/magnet); stored, not secret
+  , reqMagnet       :: !(Maybe Text)   -- ^ m20b: magnet URI chosen for download
+  , reqDownloadUrl  :: !(Maybe Text)   -- ^ m20b: .torrent URL chosen for download
   , reqCreatedAt    :: !UTCTime
   , reqUpdatedAt    :: !UTCTime
   , reqApprovedBy   :: !(Maybe Text)
@@ -85,6 +87,8 @@ instance ToJSON Request where
     , "SourceIndexer" .= reqSourceIndexer r
     , "SourceRelease" .= reqSourceRelease r
     , "SourceUrl"    .= reqSourceUrl r
+    , "Magnet"       .= reqMagnet r
+    , "DownloadUrl"  .= reqDownloadUrl r
     , "CreatedAt"    .= reqCreatedAt r
     , "UpdatedAt"    .= reqUpdatedAt r
     , "ApprovedBy"   .= reqApprovedBy r
@@ -106,6 +110,8 @@ instance FromJSON Request where
       <*> o .:? "SourceIndexer"
       <*> o .:? "SourceRelease"
       <*> o .:? "SourceUrl"
+      <*> o .:? "Magnet"
+      <*> o .:? "DownloadUrl"
       <*> o .:  "CreatedAt"
       <*> o .:  "UpdatedAt"
       <*> o .:? "ApprovedBy"

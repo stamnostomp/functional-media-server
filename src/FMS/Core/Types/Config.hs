@@ -42,6 +42,12 @@ data Config = Config
   , configMemoryWarnMb :: !Int           -- ^ RSS warn threshold in MB (env FMS_MEMORY_WARN_MB, default 1024; memory monitoring)
   , configMemorySampleSecs :: !Int       -- ^ RSS sampling interval in seconds (env FMS_MEMORY_SAMPLE_SECS, default 30; 0 = disabled)
   , configUiDir :: !(Maybe FilePath)     -- ^ serve the stamno-media Elm UI from this dir (env FMS_UI_DIR / --ui-dir / config.json "uiDir"; Nothing = built-in page)
+  , configJackettUrl :: !(Maybe Text)     -- ^ Jackett base URL (env FMS_JACKETT_URL; with FMS_JACKETT_API_KEY seeds the "jackett" tracker on first boot; m20b)
+  , configJackettApiKey :: !(Maybe Text)  -- ^ Jackett API key (env FMS_JACKETT_API_KEY; m20b)
+  , configDelugeUrl :: !Text              -- ^ Deluge web JSON-RPC endpoint (env FMS_DELUGE_URL, default http://127.0.0.1:8112/json; m20b)
+  , configDelugePassword :: !Text         -- ^ Deluge web password (env FMS_DELUGE_PASSWORD, default empty = login will fail and the file fallback is used; m20b)
+  , configDownloadDir :: !FilePath        -- ^ download dir pushed to Deluge AND auto-imported as a library folder (env FMS_DOWNLOAD_DIR, default <stateDir>/downloads; m20b)
+  , configRequestAutoApproveGb :: !Int    -- ^ requests at or under this many GiB are auto-approved and pushed (env FMS_REQUEST_AUTO_APPROVE_GB, default 5, must be >= 0; m20b)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-
@@ -94,6 +100,8 @@ validateConfig cfg
       Left "ffmpeg timeout must be >= 1 second"
   | isJust (configTlsCert cfg) /= isJust (configTlsKey cfg) =
       Left "TLS cert and key must be set together (FMS_TLS_CERT / FMS_TLS_KEY)"
+  | configRequestAutoApproveGb cfg < 0 =
+      Left "request auto-approve threshold must be >= 0 GB (FMS_REQUEST_AUTO_APPROVE_GB)"
   | otherwise = Right cfg
       { configLogLevel = T.pack logLvl
       , configHwAccel  = normalizeHwAccel (configHwAccel cfg)

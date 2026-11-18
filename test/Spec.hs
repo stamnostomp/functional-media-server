@@ -98,7 +98,10 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, slugify)
 import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus, normalizeTitle)
+import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
+import FMS.Modules.Trackers.Types (Release (..), Tracker (..), trackerPublicJson)
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
@@ -2698,6 +2701,12 @@ main = do
       , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       , configUiDir = Nothing
+      , configJackettUrl = Nothing
+      , configJackettApiKey = Nothing
+      , configDelugeUrl = "http://127.0.0.1:8112/json"
+      , configDelugePassword = ""
+      , configDownloadDir = "/tmp/fms-test-downloads"
+      , configRequestAutoApproveGb = 5
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2823,6 +2832,12 @@ main = do
         , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
+      , configJackettUrl = Nothing
+      , configJackettApiKey = Nothing
+      , configDelugeUrl = "http://127.0.0.1:8112/json"
+      , configDelugePassword = ""
+      , configDownloadDir = "/tmp/fms-test-downloads"
+      , configRequestAutoApproveGb = 5
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -3494,7 +3509,8 @@ main = do
         { reqId = "r1", reqUserId = "u1", reqUserName = "bob", reqTitle = t
         , reqYear = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
         , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
-        , reqSourceUrl = Nothing, reqCreatedAt = reqT0, reqUpdatedAt = reqT0
+        , reqSourceUrl = Nothing, reqMagnet = Nothing, reqDownloadUrl = Nothing
+        , reqCreatedAt = reqT0, reqUpdatedAt = reqT0
         , reqApprovedBy = Nothing, reqError = Nothing }
       reqT0 = UTCTime (fromGregorian 2026 1 1) 0
   check "duplicateOf: active match, rejected ignored, other title no"
@@ -3509,9 +3525,9 @@ main = do
         _ -> []
   check "Request ToJSON: PascalCase API keys"
     reqKeys
-    [ "ApprovedBy", "CreatedAt", "Error", "Id", "MediaType", "Query", "SizeBytes"
-    , "SourceIndexer", "SourceRelease", "SourceUrl", "Status", "Title", "UpdatedAt"
-    , "UserId", "UserName", "Year" ]
+    [ "ApprovedBy", "CreatedAt", "DownloadUrl", "Error", "Id", "Magnet", "MediaType"
+    , "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl", "Status"
+    , "Title", "UpdatedAt", "UserId", "UserName", "Year" ]
   check "Request JSON roundtrip (PascalCase)"
     [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
     [True]
@@ -3520,4 +3536,79 @@ main = do
         Aeson.Object o -> KeyMap.lookup (Key.fromText "Status") o
         _ -> Nothing ]
     [Just (Aeson.String "Pending")]
+  -- milestone 20b: trackers + push pipeline pure helpers
+  let torznabSample = LBSC.pack (unlines
+        [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        , "<rss version=\"2.0\"><channel><title>Jackett</title>"
+        , "<item>"
+        , "  <title>The Matrix 1999 1080p BluRay</title>"
+        , "  <size>2147483648</size>"
+        , "  <attr name=\"seeders\" value=\"42\"/>"
+        , "  <attr name=\"magneturl\" value=\"magnet:?xt=urn:btih:abc\"/>"
+        , "  <enclosure url=\"http://tracker/dl/1.torrent\" type=\"application/x-bittorrent\" length=\"123\"/>"
+        , "</item>"
+        , "<item><title>NoAttrs</title></item>"
+        , "<item><size>10</size></item>"
+        , "</channel></rss>" ])
+      parsed = parseTorznabResults torznabSample
+      tr = Tracker { trackerId = "jackett", trackerName = "Jackett", trackerUrl = "http://j:9117", trackerApiKey = "SECRET", trackerEnabled = True }
+  check "parseTorznabResults: item titles parsed, no-title items skipped"
+    [ ["The Matrix 1999 1080p BluRay", "NoAttrs"] ] [ relTitle <$> parsed ]
+  check "parseTorznabResults: item count" [ 2 ] [ length parsed ]
+  check "parseTorznabResults: item sizes" [ [Just 2147483648, Nothing] ] [ relSizeBytes <$> parsed ]
+  check "parseTorznabResults: item seeders" [ [Just 42, Nothing] ] [ relSeeders <$> parsed ]
+  check "parseTorznabResults: item magnets"
+    [ [Just "magnet:?xt=urn:btih:abc", Nothing] ] [ relMagnet <$> parsed ]
+  check "parseTorznabResults: item download urls"
+    [ [Just "http://tracker/dl/1.torrent", Nothing] ] [ relDownloadUrl <$> parsed ]
+  check "parseTorznabResults: non-XML -> []" [parseTorznabResults (LBSC.pack "not xml")] [[]]
+  check "jackettSearchUrl: movie/tv cat + encoding"
+    [ jackettSearchUrl "http://j:9117/" "jackett" "KEY" "the matrix" (Just "movie")
+    , jackettSearchUrl "http://j:9117" "jackett" "KEY" "the matrix" (Just "tv")
+    , jackettSearchUrl "http://j:9117" "jackett" "KEY" "a b" Nothing ]
+    [ "http://j:9117/api/v2.0/indexers/jackett/results?apikey=KEY&t=search&q=the%20matrix&cat=2000"
+    , "http://j:9117/api/v2.0/indexers/jackett/results?apikey=KEY&t=search&q=the%20matrix&cat=5000"
+    , "http://j:9117/api/v2.0/indexers/jackett/results?apikey=KEY&t=search&q=a%20b" ]
+  check "trackerPublicJson: admin sees key, non-admin gets Null"
+    [ case trackerPublicJson True tr of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing
+    , case trackerPublicJson False tr of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing ]
+    [ Just (Aeson.String "SECRET"), Just Aeson.Null ]
+  check "slugify" [slugify "The Matrix (1999)!", slugify "", slugify "a  b"] ["the-matrix-1999", "request", "a-b"]
+  check "autoApproveSize: Nothing approves, at/under threshold approves, over rejects"
+    [ autoApproveSize Nothing 100, autoApproveSize (Just 100) 100, autoApproveSize (Just 101) 100 ]
+    [True, True, False]
+  check "matchesDownload: exact normalized match, extension stripped, year suffix ok"
+    [ matchesDownload "The Matrix" ["/dl/the matrix (1999).mkv", "/dl/other.mp4"]
+    , matchesDownload "The Matrix" ["/dl/The.Matrix.Reloaded.mkv"]
+    , matchesDownload "Dune" ["/dl/DUNE.2021.mp4"]
+    , matchesDownload "Dune" ["/dl/dune2.mkv"]
+    , matchesDownload "Dune" ["/dl/dune.srt"] ]
+    [ True, False, True, False, True ]
+  check "base64Encode RFC4648 vectors"
+    [ base64Encode (BSC.pack "f"), base64Encode (BSC.pack "fo"), base64Encode (BSC.pack "foo")
+    , base64Encode (BSC.pack "foob"), base64Encode (BSC.pack "fooba"), base64Encode (BSC.pack "foobar")
+    , base64Encode BS.empty ]
+    [ "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy", "" ]
+  let dlb = delugeLoginBody "pw" 1
+      dmb = delugeAddMagnetBody "magnet:?x" "/dl" 2
+      dfb = delugeAddFileBody "n.torrent" "QUJD" "/dl" 2
+      methodOf v = case v of
+        Aeson.Object o -> KeyMap.lookup (Key.fromText "method") o
+        _ -> Nothing
+      paramsOf v = case v of
+        Aeson.Object o -> KeyMap.lookup (Key.fromText "params") o
+        _ -> Nothing
+  check "deluge RPC bodies: methods"
+    [ methodOf dlb, methodOf dmb, methodOf dfb ]
+    [ Just (Aeson.String "auth.login"), Just (Aeson.String "core.add_torrent_magnet")
+    , Just (Aeson.String "core.add_torrent_file") ]
+  check "deluge RPC bodies: params encoded"
+    [ LBSC.unpack (Aeson.encode (paramsOf dlb)), LBSC.unpack (Aeson.encode (paramsOf dmb))
+    , LBSC.unpack (Aeson.encode (paramsOf dfb)) ]
+    [ "[\"pw\"]"
+    , "[\"magnet:?x\",{\"download_location\":\"/dl\"}]"
+    , "[\"n.torrent\",\"QUJD\",{\"download_location\":\"/dl\"}]" ]
+  check "deluge RPC bodies: id"
+    [ case dlb of Aeson.Object o -> KeyMap.lookup (Key.fromText "id") o; _ -> Nothing ]
+    [ Just (Aeson.Number 1) ]
   putStrLn "All tests passed."

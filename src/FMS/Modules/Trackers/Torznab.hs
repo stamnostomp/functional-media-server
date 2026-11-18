@@ -1,0 +1,113 @@
+module FMS.Modules.Trackers.Torznab
+  ( jackettSearchUrl
+  , parseTorznabResults
+  , jackettSearch
+  ) where
+
+import Control.Applicative ((<|>))
+import Control.Exception (SomeException, try)
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
+import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Text.Read (decimal)
+import Network.HTTP.Client (managerResponseTimeout, responseBody, responseStatus, responseTimeoutMicro)
+import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types (statusCode, urlEncode)
+import Text.XML (parseLBS)
+import qualified Text.XML as XML
+import Text.XML.Cursor (Cursor, attribute, child, content, descendant, fromDocument, laxElement)
+
+import FMS.Modules.Trackers.Types (Release (..))
+
+-- | Response-header timeout for tracker calls: 10s in microseconds.
+trackerTimeoutMicros :: Int
+trackerTimeoutMicros = 10000000
+
+-- | Pure: build the Jackett Torznab search URL for one tracker:
+-- @<url>/api/v2.0/indexers/<id>/results?apikey=<key>&t=search&q=<enc>[@&cat=2000|5000]@.
+-- @cat@ is 2000 (movies) or 5000 (TV) when a media type is given.
+jackettSearchUrl :: Text -> Text -> Text -> Text -> Maybe Text -> String
+jackettSearchUrl base trackerId apiKey q mType =
+  T.unpack (T.dropWhileEnd (== '/') base)
+    ++ "/api/v2.0/indexers/" ++ T.unpack trackerId
+    ++ "/results?apikey=" ++ T.unpack apiKey
+    ++ "&t=search&q=" ++ T.unpack (urlEncodeText q)
+    ++ maybe "" (\t -> "&cat=" ++ catFor t) mType
+  where
+    catFor "tv" = "5000"
+    catFor _    = "2000"
+
+-- | Percent-encode a query-string value (http-types 'urlEncode' query mode).
+urlEncodeText :: Text -> Text
+urlEncodeText = T.pack . BSC.unpack . urlEncode True . TE.encodeUtf8
+
+-- | Pure: parse a Torznab RSS/XML response into releases. Reads, per
+-- @<item>@: @<title>@, @<size>@ (bytes), @<attr name="seeders" value=".."/>@,
+-- @<attr name="download" value=".."/>@ or @<enclosure url=".."/>@, and
+-- @<attr name="magneturl" value=".."/>@. Items without a title are
+-- skipped; a non-XML body yields [].
+parseTorznabResults :: LBS.ByteString -> [Release]
+parseTorznabResults bs =
+  case parseLBS XML.def bs of
+    Left _    -> []
+    Right doc -> mapMaybe itemToRelease (descendant (fromDocument doc) >>= laxElement "item")
+
+-- | Child elements of @c@ with the given local name ('laxElement' filters
+-- the node it is applied to, so go through 'child' first, like Nfo.hs).
+childElems :: Text -> Cursor -> [Cursor]
+childElems name c = child c >>= laxElement name
+
+-- | Text content of the first child element with the given local name.
+childText :: Text -> Cursor -> Maybe Text
+childText name c =
+  listToMaybe [ t | e <- childElems name c, t <- child e >>= content ]
+
+itemToRelease :: Cursor -> Maybe Release
+itemToRelease c =
+  case childText "title" c of
+    Nothing -> Nothing
+    Just t  ->
+      let attrs = [ (T.toLower n, v)
+                  | a <- childElems "attr" c
+                  , Just n <- [listToMaybe (attribute (XML.Name "name" Nothing Nothing) a)]
+                  , Just v <- [listToMaybe (attribute (XML.Name "value" Nothing Nothing) a)]
+                  ]
+          enclosureUrl = listToMaybe
+            [ u | e <- childElems "enclosure" c
+                , Just u <- [listToMaybe (attribute (XML.Name "url" Nothing Nothing) e)] ]
+      in Just Release
+           { relTitle = T.strip t
+           , relSizeBytes = childText "size" c >>= readInteger
+           , relSeeders = lookup "seeders" attrs >>= readInt
+           , relDownloadUrl = lookup "download" attrs <|> enclosureUrl
+           , relMagnet = lookup "magneturl" attrs
+           }
+  where
+    readInteger t = case decimal t of
+      Right (n, rest) | T.null rest -> Just n
+      _ -> Nothing
+    readInt t = case decimal t of
+      Right (n, rest) | T.null rest -> Just (fromIntegral (n :: Integer))
+      _ -> Nothing
+
+-- | IO: GET a Jackett search URL (10s timeout), parse the Torznab XML.
+jackettSearch :: String -> IO (Either String [Release])
+jackettSearch url = do
+  manager <- newManager settings
+  eres <- try (httpLbs (parseRequest_ url) manager)
+  case eres of
+    Left (e :: SomeException) ->
+      pure (Left ("tracker request failed: " ++ show e))
+    Right resp
+      | statusCode (responseStatus resp) /= 200 ->
+          pure (Left ("tracker returned HTTP " ++ show (statusCode (responseStatus resp))))
+      | otherwise ->
+          pure (Right (parseTorznabResults (responseBody resp)))
+  where
+    settings = tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro trackerTimeoutMicros
+      }

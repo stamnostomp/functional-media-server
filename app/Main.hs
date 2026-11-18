@@ -9,6 +9,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, stderr, stdout)
+import System.FilePath ((</>))
 import Text.Read (readMaybe)
 
 import FMS (name, version)
@@ -93,6 +94,12 @@ main = do
   mTmdbBase  <- lookupEnv "FMS_TMDB_BASE_URL"
   mTmdbImgBase <- lookupEnv "FMS_TMDB_IMAGE_BASE_URL"
   mTmdbImgSize <- lookupEnv "FMS_TMDB_IMAGE_SIZE"
+  mJackettUrl <- lookupEnv "FMS_JACKETT_URL"
+  mJackettKey <- lookupEnv "FMS_JACKETT_API_KEY"
+  mDelugeUrl  <- lookupEnv "FMS_DELUGE_URL"
+  mDelugePw   <- lookupEnv "FMS_DELUGE_PASSWORD"
+  mDlDir      <- lookupEnv "FMS_DOWNLOAD_DIR"
+  mAutoAppr   <- lookupEnv "FMS_REQUEST_AUTO_APPROVE_GB"
   let -- CLI > env for the value-style options
       portV   = cliInt "port" <|> (mPort >>= readMaybe)
       libV    = cliV "library-path" <|> mLib
@@ -161,6 +168,12 @@ main = do
         , configMemoryWarnMb = fromMaybe 1024 (mMemWarn >>= readMaybe)      -- default 1024 MB; negative rejected by validateConfig
         , configMemorySampleSecs = fromMaybe 30 (mMemSamp >>= readMaybe)    -- default 30s; 0 = disabled; negative rejected by validateConfig
         , configUiDir = scUiDir sc    -- Elm UI dir; existence checked below (exit 2)
+        , configJackettUrl = T.pack <$> mJackettUrl
+        , configJackettApiKey = T.pack <$> mJackettKey
+        , configDelugeUrl = T.pack (fromMaybe "http://127.0.0.1:8112/json" mDelugeUrl)
+        , configDelugePassword = T.pack (fromMaybe "" mDelugePw)
+        , configDownloadDir = fromMaybe (stateDir </> "downloads") mDlDir
+        , configRequestAutoApproveGb = fromMaybe 5 (mAutoAppr >>= readMaybe)  -- default 5 GiB; negative rejected by validateConfig
         }
   cfg0v <- case validateConfig cfg0 of
     Left err -> do

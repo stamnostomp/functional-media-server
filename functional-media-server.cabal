@@ -116,6 +116,13 @@ library
                       FMS.Modules.Requests.Persistence
                       FMS.Modules.Requests.Monad
                       FMS.Modules.Requests.Routes
+                      FMS.Modules.Requests.Push
+                      FMS.Modules.Trackers
+                      FMS.Modules.Trackers.Types
+                      FMS.Modules.Trackers.Persistence
+                      FMS.Modules.Trackers.Monad
+                      FMS.Modules.Trackers.Routes
+                      FMS.Modules.Trackers.Torznab
                       FMS.Modules.Webhooks
                       FMS.Modules.Webhooks.Types
                       FMS.Modules.Webhooks.Persistence
@@ -198,4 +205,5 @@ executable fms
     build-depends:    base >=4.14 && <5
                     , text
                     , directory
+                    , filepath
                     , functional-media-server

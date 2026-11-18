@@ -45,6 +45,7 @@ import FMS.Modules.Collections (collectionsModule)
 import FMS.Modules.Devices (devicesModule)
 import FMS.Modules.Plugins (pluginsModule)
 import FMS.Modules.Requests (requestsModule)
+import FMS.Modules.Trackers (trackersModule)
 import FMS.Modules.Images (imagesModule)
 import FMS.Modules.Library (libraryModule)
 import FMS.Modules.Library.State (LibraryState)
@@ -87,6 +88,7 @@ modules =
   , devicesModule
   , pluginsModule
   , requestsModule
+  , trackersModule
   , webhooksModule
   , webModule, apiDocsModule
   ]

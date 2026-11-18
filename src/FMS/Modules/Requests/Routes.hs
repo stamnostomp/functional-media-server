@@ -3,8 +3,11 @@ module FMS.Modules.Requests.Routes
   , CreateRequest (..)
   ) where
 
+import Control.Applicative ((<|>))
+import Control.Exception (SomeException, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (asks)
 import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -12,13 +15,17 @@ import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types (ResponseHeaders, status201, status204)
 import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
 import qualified Network.Wai as Wai
+import System.Directory (listDirectory)
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Monad (AppError (..), AppM, envConfig)
 import FMS.Core.Query (queryParams)
+import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
+import FMS.Modules.Library.Scan (isMediaFile)
 import FMS.Modules.Requests.Monad (MonadRequests (..), newRequestId)
+import FMS.Modules.Requests.Push (autoApproveSize, matchesDownload, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus)
 
 jsonCT :: ResponseHeaders
@@ -48,6 +55,9 @@ data CreateRequest = CreateRequest
   , crIndexer  :: Maybe Text
   , crRelease  :: Maybe Text
   , crSourceUrl :: Maybe Text
+  , crTrackerId :: Maybe Text
+  , crDownloadUrl :: Maybe Text
+  , crMagnet   :: Maybe Text
   }
 
 instance FromJSON CreateRequest where
@@ -61,15 +71,36 @@ instance FromJSON CreateRequest where
       <*> o .:? "Indexer"
       <*> o .:? "Release"
       <*> o .:? "SourceUrl"
+      <*> o .:? "TrackerId"
+      <*> o .:? "DownloadUrl"
+      <*> o .:? "Magnet"
 
 -- Handlers ------------------------------------------------------------------
 
+-- | m20b: mark Downloading requests as Imported when a media file whose
+-- (extension-stripped) name normalizes to the request title appears in
+-- the download dir. Persists the status change.
+markImported :: [Request] -> AppM ()
+markImported reqs = do
+  cfg <- asks envConfig
+  let dir = configDownloadDir cfg
+  efiles <- liftIO (try (listDirectory dir) :: IO (Either SomeException [FilePath]))
+  let files = filter isMediaFile (either (const []) id efiles)
+  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesDownload (reqTitle r) files ]
+  where
+    markOne r = do
+      _ <- setRequestStatus (reqId r) Imported Nothing
+      pure ()
+
 -- | @GET /Requests@ -> @{\"Requests\": [...], \"TotalRecordCount\": n}@.
 -- Non-admins see only their own requests; admins see all. The optional
--- @userId@ filter is admin-only (403 otherwise).
+-- @userId@ filter is admin-only (403 otherwise). m20b: Downloading
+-- requests are first checked against the download dir (auto-import).
 listRequestsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 listRequestsHandler _captures req = do
   mUser <- currentUserFromReq req
+  all0 <- listRequests
+  markImported all0
   all' <- listRequests
   let isAdminUser = maybe True isAdmin mUser  -- open mode (no user) sees all
       qparams = queryParams (queryString req)
@@ -92,6 +123,8 @@ getRequestHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 getRequestHandler captures req = do
   rid <- captureId captures
   mUser <- currentUserFromReq req
+  all0 <- listRequests
+  markImported all0
   m <- getRequest rid
   case m of
     Nothing -> throwError (NotFound ("no request with id " <> rid))
@@ -122,10 +155,13 @@ createRequestHandler _captures req = do
     Nothing -> do
       now <- liftIO getCurrentTime
       rid <- liftIO newRequestId
+      cfg <- asks envConfig
       let (uid, uname) = case mUser of
             Just u  -> (userId u, userName u)
             Nothing -> ("", "")
-          r = Request
+          threshold = fromIntegral (configRequestAutoApproveGb cfg) * 1024 * 1024 * 1024 :: Integer
+          autoAppr = autoApproveSize (crSizeBytes cr) threshold
+          r0 = Request
             { reqId = rid
             , reqUserId = uid
             , reqUserName = uname
@@ -133,18 +169,22 @@ createRequestHandler _captures req = do
             , reqYear = crYear cr
             , reqMediaType = crType cr
             , reqQuery = maybe (crTitle cr) id (crQuery cr)
-            , reqStatus = Pending
+            , reqStatus = if autoAppr then Approved else Pending
             , reqSizeBytes = crSizeBytes cr
-            , reqSourceIndexer = crIndexer cr
+            , reqSourceIndexer = crIndexer cr <|> crTrackerId cr
             , reqSourceRelease = crRelease cr
             , reqSourceUrl = crSourceUrl cr
+            , reqMagnet = crMagnet cr
+            , reqDownloadUrl = crDownloadUrl cr <|> crSourceUrl cr
             , reqCreatedAt = now
             , reqUpdatedAt = now
             , reqApprovedBy = Nothing
             , reqError = Nothing
             }
-      _ <- insertRequest r
-      pure (responseLBS status201 jsonCT (encode r))
+      _ <- insertRequest r0
+      -- m20b: auto-approved requests are pushed immediately
+      r1 <- if autoAppr then pushAndAdvance r0 else pure r0
+      pure (responseLBS status201 jsonCT (encode r1))
 
 -- | @POST /Requests/:id/Approve@ and @.../Reject@ (admin only): transition
 -- from Pending to the given status (400 otherwise), bumping UpdatedAt;
@@ -163,7 +203,10 @@ transitionHandler target captures req = do
       | otherwise -> do
           m' <- setRequestStatus rid target (userName <$> mAdmin)
           case m' of
-            Just r' -> pure (jsonResponse r')
+            Just r' -> do
+              -- m20b: an approved request with a download source is pushed
+              r'' <- if target == Approved then pushAndAdvance r' else pure r'
+              pure (jsonResponse r'')
             Nothing -> throwError (NotFound ("no request with id " <> rid))
 
 -- | @DELETE /Requests/:id@ — owner or admin; only while the request is
@@ -188,6 +231,23 @@ deleteRequestHandler captures req = do
           pure (responseLBS status204 [] "")
 
 -- Internals -----------------------------------------------------------------
+
+-- | Push the request's release to Deluge (or the download-dir fallback)
+-- and advance the status to Downloading, or Failed with the error text.
+pushAndAdvance :: Request -> AppM Request
+pushAndAdvance r = do
+  cfg <- asks envConfig
+  eres <- liftIO (pushRequest (configDelugeUrl cfg) (configDelugePassword cfg)
+                (configDownloadDir cfg) (reqMagnet r) (reqDownloadUrl r) (reqTitle r))
+  case eres of
+    Right () -> do
+      m <- setRequestStatus (reqId r) Downloading Nothing
+      pure (maybe r id m)
+    Left err -> do
+      m <- setRequestStatus (reqId r) Failed Nothing
+      case m of
+        Just r' -> pure r' { reqError = Just (T.pack err) }
+        Nothing -> pure r
 
 captureId :: [(Text, Text)] -> AppM Text
 captureId captures =

@@ -45,6 +45,7 @@ data AppError
   | TooManyRequests Text  -- ^ milestone 14a rate limiting; maps to HTTP 429
   | ServiceUnavailable Text -- ^ milestone 15 ffmpeg slot exhaustion; maps to HTTP 503
   | PayloadTooLarge Text  -- ^ input-validation hardening: body over FMS_MAX_BODY_BYTES; maps to HTTP 413
+  | Conflict Text         -- ^ milestone 20a: duplicate resource (e.g. request already in progress); maps to HTTP 409
   | InternalError Text
   deriving (Show, Eq)
 
@@ -59,6 +60,7 @@ statusForError e = case e of
   TooManyRequests _ -> 429
   ServiceUnavailable _ -> 503
   PayloadTooLarge _ -> 413
+  Conflict _       -> 409
   InternalError _  -> 500
 
 -- | Milestone (error model): the human-readable message of an 'AppError'.
@@ -72,6 +74,7 @@ errorMessage e = case e of
   TooManyRequests m -> m
   ServiceUnavailable m -> m
   PayloadTooLarge m -> m
+  Conflict m       -> m
   InternalError m  -> m
 
 -- | Read-only environment plus the typed state registry that modules use to

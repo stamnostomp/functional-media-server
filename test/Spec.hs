@@ -98,6 +98,7 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
+import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus, normalizeTitle)
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
@@ -3231,18 +3232,20 @@ main = do
      removeDirectoryRecursive poolDir
 
   -- Error model: one body shape {"error","status","requestId"} everywhere
-  check "statusForError maps all 8 AppError constructors to 400/401/403/404/429/503/413/500"
-    [400, 401, 403, 404, 429, 503, 413, 500]
+  check "statusForError maps all 9 AppError constructors to 400/401/403/404/429/503/413/409/500"
+    [400, 401, 403, 404, 429, 503, 413, 409, 500]
     [ statusForError (BadRequest "x"), statusForError (Unauthorized "x")
     , statusForError (Forbidden "x"), statusForError (NotFound "x")
     , statusForError (TooManyRequests "x"), statusForError (ServiceUnavailable "x")
-    , statusForError (PayloadTooLarge "x"), statusForError (InternalError "x") ]
+    , statusForError (PayloadTooLarge "x"), statusForError (Conflict "x")
+    , statusForError (InternalError "x") ]
   check "errorMessage extracts the message of each constructor"
-    ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"]
+    ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]
     [ errorMessage (BadRequest "m1"), errorMessage (Unauthorized "m2")
     , errorMessage (Forbidden "m3"), errorMessage (NotFound "m4")
     , errorMessage (TooManyRequests "m5"), errorMessage (ServiceUnavailable "m6")
-    , errorMessage (PayloadTooLarge "m7"), errorMessage (InternalError "m8") ]
+    , errorMessage (PayloadTooLarge "m7"), errorMessage (Conflict "m8")
+    , errorMessage (InternalError "m9") ]
   let eb = LBS.toStrict (Aeson.encode (errorBody "boom" 404 "00ff"))
   check "errorBody has exactly error+status+requestId with correct values"
     (True, True, True, True)
@@ -3477,4 +3480,44 @@ main = do
     [dashboardBeforeCapture (reverse (moduleRoutes webModule))] [False]
   check "dashboardBeforeCapture: no dashboard route is False"
     [dashboardBeforeCapture [get [Capture "file"] undefined, get [] undefined]] [False]
+  -- milestone 20a: media Requests core (pure helpers + JSON shape)
+  check "normalizeTitle: case/punct/space collapsing"
+    [ normalizeTitle "The Matrix (1999)", normalizeTitle "the matrix 1999"
+    , normalizeTitle "  Spider-Man:  Far From Home! ", normalizeTitle "spiderman far from home"
+    , normalizeTitle "", normalizeTitle "---" ]
+    [ "the matrix 1999", "the matrix 1999", "spider man far from home"
+    , "spiderman far from home", "", "" ]
+  check "isActiveStatus matrix"
+    (map isActiveStatus [Pending, Approved, Downloading, Imported, Rejected, Failed])
+    [True, True, True, False, False, False]
+  let mkReq t st = Request
+        { reqId = "r1", reqUserId = "u1", reqUserName = "bob", reqTitle = t
+        , reqYear = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
+        , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
+        , reqSourceUrl = Nothing, reqCreatedAt = reqT0, reqUpdatedAt = reqT0
+        , reqApprovedBy = Nothing, reqError = Nothing }
+      reqT0 = UTCTime (fromGregorian 2026 1 1) 0
+  check "duplicateOf: active match, rejected ignored, other title no"
+    [ fmap reqId (duplicateOf "The Matrix" [mkReq "the matrix" Pending])
+    , fmap reqId (duplicateOf "The Matrix" [mkReq "the matrix" Rejected])
+    , fmap reqId (duplicateOf "The Matrix" [mkReq "other movie" Pending])
+    , fmap reqId (duplicateOf "the matrix 1999" [mkReq "The Matrix (1999)" Approved]) ]
+    [Just "r1", Nothing, Nothing, Just "r1"]
+  let reqJson = Aeson.toJSON (mkReq "Dune" Pending)
+      reqKeys = case reqJson of
+        Aeson.Object o -> sort (map Key.toText (KeyMap.keys o))
+        _ -> []
+  check "Request ToJSON: PascalCase API keys"
+    reqKeys
+    [ "ApprovedBy", "CreatedAt", "Error", "Id", "MediaType", "Query", "SizeBytes"
+    , "SourceIndexer", "SourceRelease", "SourceUrl", "Status", "Title", "UpdatedAt"
+    , "UserId", "UserName", "Year" ]
+  check "Request JSON roundtrip (PascalCase)"
+    [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
+    [True]
+  check "Request Status serializes as the constructor name string"
+    [ case reqJson of
+        Aeson.Object o -> KeyMap.lookup (Key.fromText "Status") o
+        _ -> Nothing ]
+    [Just (Aeson.String "Pending")]
   putStrLn "All tests passed."

@@ -109,8 +109,13 @@ import FMS.Modules.Indexers.Types
   , categoriesParam
   , hostMatches
   , hostOf
+  , indexerCookieHeader
   , indexerPublicJson
   , indexerSearchUrl
+  , parseTorrentDayJson
+  , torrentDaySearchUrl
+  , validAuthType
+  , validResponseFormat
   )
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
@@ -3656,8 +3661,12 @@ main = do
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"
                     , indexerApiKey = "SECRET", indexerCategories = [2000, 5000], indexerType = "torznab"
-                    , indexerEnabled = True, indexerLastTestAt = Nothing, indexerLastTestOk = Nothing }
+                    , indexerEnabled = True, indexerLastTestAt = Nothing, indexerLastTestOk = Nothing
+                    , indexerAuthType = "apikey", indexerCookie = ""
+                    , indexerResponseFormat = "torznab", indexerSearchPath = "/api" }
       idxNz = idx { indexerType = "newznab" }
+      idxCk = idx { indexerAuthType = "cookie", indexerCookie = "session=ok"
+                  , indexerResponseFormat = "torrentday-json" }
   check "indexerSearchUrl: torznab cats joined, movie/tv narrow, q encoded, newznab drops cat"
     [ indexerSearchUrl idx Nothing "the matrix"
     , indexerSearchUrl idx (Just "movie") "the matrix"
@@ -3697,4 +3706,50 @@ main = do
     [ case indexerPublicJson True idx of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing
     , case indexerPublicJson False idx of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing ]
     [ Just (Aeson.String "SECRET"), Just Aeson.Null ]
+  -- milestone 23: cookie-auth indexers + TorrentDay t.json mode
+  check "indexerSearchUrl m23: cookie auth omits apikey param, custom searchPath used"
+    [ indexerSearchUrl idxCk Nothing "the matrix"
+    , indexerSearchUrl (idx { indexerSearchPath = "/torznab" }) Nothing "x" ]
+    [ "http://127.0.0.1:9117/api?t=search&q=the%20matrix&cat=2000,5000"
+    , "http://127.0.0.1:9117/torznab?t=search&q=x&apikey=SECRET&cat=2000,5000" ]
+  check "torrentDaySearchUrl: semicolon cats + encoded q, empty cats"
+    [ torrentDaySearchUrl idx "loop movie", torrentDaySearchUrl (idx { indexerCategories = [] }) "a b" ]
+    [ "http://127.0.0.1:9117/t.json?2000;5000;q=loop%20movie", "http://127.0.0.1:9117/t.json?q=a%20b" ]
+  let tdSample = LBSC.pack (unwords
+        [ "[{\"name\":\"Loop Movie 2020\",\"t\":7,\"size\":2000000000,\"seeders\":9,\"c\":1,\"ctime\":1700000000},"
+        , "{\"name\":\"NoSize\",\"t\":8}]" ])
+      td = parseTorrentDayJson "http://td/" tdSample
+  check "parseTorrentDayJson: titles parsed" [ map relTitle td ] [ ["Loop Movie 2020", "NoSize"] ]
+  check "parseTorrentDayJson: sizes, missing tolerated"
+    [ map relSizeBytes td ] [ [Just 2000000000, Nothing] ]
+  check "parseTorrentDayJson: seeders, missing tolerated"
+    [ map relSeeders td ] [ [Just 9, Nothing] ]
+  check "parseTorrentDayJson: derived download.php urls"
+    [ map relDownloadUrl td ]
+    [ [Just "http://td/download.php/7/7.torrent", Just "http://td/download.php/8/8.torrent"] ]
+  check "parseTorrentDayJson: non-array / garbage -> []"
+    [ parseTorrentDayJson "http://td/" (LBSC.pack "{\"a\":1}")
+    , parseTorrentDayJson "http://td/" (LBSC.pack "nope") ]
+    [ [], [] ]
+  check "validAuthType / validResponseFormat matrices"
+    [ validAuthType "apikey", validAuthType "cookie", validAuthType "COOKIE", validAuthType "x"
+    , validResponseFormat "torznab", validResponseFormat "torrentday-json", validResponseFormat "xml" ]
+    [ True, True, True, False, True, True, False ]
+  check "indexerPublicJson m23: Cookie redacted like ApiKey; admin sees it"
+    [ case indexerPublicJson False idxCk of Aeson.Object o -> KeyMap.lookup (Key.fromText "Cookie") o; _ -> Nothing
+    , case indexerPublicJson False idxCk of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing
+    , case indexerPublicJson True idxCk of Aeson.Object o -> KeyMap.lookup (Key.fromText "Cookie") o; _ -> Nothing ]
+    [ Just Aeson.Null, Just Aeson.Null, Just (Aeson.String "session=ok") ]
+  check "indexerCookieHeader: cookie auth emits header, apikey does not"
+    [ indexerCookieHeader idxCk, indexerCookieHeader idx ] [ [("Cookie", "session=ok")], [] ]
+  check "Indexer FromJSON: old PascalCase indexers.json decodes with m23 text defaults"
+    [ case Aeson.decode (LBSC.pack "{\"Id\":\"x\",\"Name\":\"n\",\"BaseUrl\":\"http://b\",\"ApiKey\":\"k\",\"Enabled\":true}") of
+        Just i  -> [indexerAuthType i, indexerCookie i, indexerResponseFormat i, indexerSearchPath i]
+        Nothing -> [] ]
+    [ ["apikey", "", "torznab", "/api"] ]
+  check "Indexer FromJSON: old PascalCase file gets default categories"
+    [ case Aeson.decode (LBSC.pack "{\"Id\":\"x\",\"Name\":\"n\",\"BaseUrl\":\"http://b\"}") of
+        Just i  -> indexerCategories i
+        Nothing -> [] ]
+    [ [2000, 5000] ]
   putStrLn "All tests passed."

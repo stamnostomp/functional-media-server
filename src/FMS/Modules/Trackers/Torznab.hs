@@ -2,6 +2,7 @@ module FMS.Modules.Trackers.Torznab
   ( jackettSearchUrl
   , parseTorznabResults
   , jackettSearch
+  , fetchUrl
   ) where
 
 import Control.Applicative ((<|>))
@@ -13,10 +14,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Read (decimal)
-import Network.HTTP.Client (managerResponseTimeout, responseBody, responseStatus, responseTimeoutMicro)
+import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseStatus, responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Types (statusCode, urlEncode)
+import Network.HTTP.Types (Header, statusCode, urlEncode)
 import Text.XML (parseLBS)
 import qualified Text.XML as XML
 import Text.XML.Cursor (Cursor, attribute, child, content, descendant, fromDocument, laxElement)
@@ -94,20 +95,36 @@ itemToRelease c =
       Right (n, rest) | T.null rest -> Just (fromIntegral (n :: Integer))
       _ -> Nothing
 
+-- | IO: GET a URL with extra request headers (e.g. a Cookie for cookie-auth
+-- indexers, m23) and a timeout in microseconds. Returns the HTTP status
+-- code and body; 'Left' only on transport errors. Redirects are followed
+-- by http-client, so a cookie-less indexer that redirects to login.php
+-- still ends at a non-200 or a login page -- callers treat non-200 as
+-- "not logged in".
+fetchUrl :: [Header] -> Int -> String -> IO (Either String (Int, LBS.ByteString))
+fetchUrl extraHeaders micros url = do
+  manager <- newManager settings
+  let req0 = parseRequest_ url
+      req = if null extraHeaders then req0 else req0 { requestHeaders = extraHeaders ++ requestHeaders req0 }
+  eres <- try (httpLbs req manager)
+  case eres of
+    Left (e :: SomeException) ->
+      pure (Left ("request failed: " ++ show e))
+    Right resp ->
+      pure (Right (statusCode (responseStatus resp), responseBody resp))
+  where
+    settings = tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro micros
+      }
+
 -- | IO: GET a Jackett search URL (10s timeout), parse the Torznab XML.
 jackettSearch :: String -> IO (Either String [Release])
 jackettSearch url = do
-  manager <- newManager settings
-  eres <- try (httpLbs (parseRequest_ url) manager)
+  eres <- fetchUrl [] trackerTimeoutMicros url
   case eres of
-    Left (e :: SomeException) ->
-      pure (Left ("tracker request failed: " ++ show e))
-    Right resp
-      | statusCode (responseStatus resp) /= 200 ->
-          pure (Left ("tracker returned HTTP " ++ show (statusCode (responseStatus resp))))
+    Left err -> pure (Left err)
+    Right (code, body)
+      | code /= 200 ->
+          pure (Left ("tracker returned HTTP " ++ show code))
       | otherwise ->
-          pure (Right (parseTorznabResults (responseBody resp)))
-  where
-    settings = tlsManagerSettings
-      { managerResponseTimeout = responseTimeoutMicro trackerTimeoutMicros
-      }
+          pure (Right (parseTorznabResults body))

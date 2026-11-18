@@ -19,10 +19,11 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.List (partition)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Client (managerResponseTimeout, responseBody, responseStatus, responseTimeoutMicro)
+import qualified Data.Text.Encoding as TE
+import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseStatus, responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Types (ResponseHeaders, status200, status201, status204, statusCode)
+import Network.HTTP.Types (HeaderName, ResponseHeaders, hCookie, status200, status201, status204, statusCode)
 import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
 import qualified Network.Wai as Wai
 
@@ -37,12 +38,19 @@ import FMS.Modules.Indexers.Types
   , base64UrlDecode
   , base64UrlEncode
   , defaultCategories
+  , defaultSearchPath
   , hostMatches
+  , indexerCookieHeader
+  , indexerFullJson
   , indexerPublicJson
   , indexerSearchUrl
+  , parseTorrentDayJson
+  , torrentDaySearchUrl
+  , validAuthType
+  , validResponseFormat
   )
 import FMS.Modules.Requests.Push (slugify)
-import FMS.Modules.Trackers.Torznab (jackettSearch)
+import FMS.Modules.Trackers.Torznab (fetchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..))
 
 jsonCT :: ResponseHeaders
@@ -65,14 +73,19 @@ indexersRoutes =
   , get    [Lit "Indexers", Capture "id", Lit "Download"] downloadHandler
   ]
 
--- | Body of @POST /Indexers@ (admin).
+-- | Body of @POST /Indexers@ (admin); m23 adds AuthType/Cookie/
+-- ResponseFormat/SearchPath.
 data CreateIndexer = CreateIndexer
-  { ciName       :: Text
-  , ciBaseUrl    :: Text
-  , ciApiKey     :: Text
-  , ciCategories :: [Int]
-  , ciType       :: Text
-  , ciEnabled    :: Bool
+  { ciName           :: Text
+  , ciBaseUrl        :: Text
+  , ciApiKey         :: Text
+  , ciCategories     :: [Int]
+  , ciType           :: Text
+  , ciEnabled        :: Bool
+  , ciAuthType       :: Text
+  , ciCookie         :: Text
+  , ciResponseFormat :: Text
+  , ciSearchPath     :: Text
   }
 
 instance FromJSON CreateIndexer where
@@ -84,6 +97,10 @@ instance FromJSON CreateIndexer where
       <*> o .:? "Categories" .!= defaultCategories
       <*> o .:? "Type" .!= "torznab"
       <*> o .:? "Enabled" .!= True
+      <*> o .:? "AuthType" .!= "apikey"
+      <*> o .:? "Cookie" .!= ""
+      <*> o .:? "ResponseFormat" .!= "torznab"
+      <*> o .:? "SearchPath" .!= defaultSearchPath
 
 -- Handlers ------------------------------------------------------------------
 
@@ -126,6 +143,14 @@ createIndexerHandler _captures req = do
   let ty = T.toLower (ciType ci)
   unless (ty == "torznab" || ty == "newznab")
     (throwError (BadRequest "Type must be torznab or newznab"))
+  let at = T.toLower (ciAuthType ci)
+  unless (validAuthType at)
+    (throwError (BadRequest "AuthType must be apikey or cookie"))
+  let rf = T.toLower (ciResponseFormat ci)
+  unless (validResponseFormat rf)
+    (throwError (BadRequest "ResponseFormat must be torznab or torrentday-json"))
+  when (at == "cookie" && T.null (T.strip (ciCookie ci)))
+    (throwError (BadRequest "Cookie is required when AuthType is cookie"))
   iid <- liftIO newIndexerId
   let i = Indexer { indexerId = iid
                   , indexerName = ciName ci
@@ -135,9 +160,13 @@ createIndexerHandler _captures req = do
                   , indexerType = ty
                   , indexerEnabled = ciEnabled ci
                   , indexerLastTestAt = Nothing
-                  , indexerLastTestOk = Nothing }
+                  , indexerLastTestOk = Nothing
+                  , indexerAuthType = at
+                  , indexerCookie = ciCookie ci
+                  , indexerResponseFormat = rf
+                  , indexerSearchPath = ciSearchPath ci }
   _ <- insertIndexer i
-  pure (responseLBS status201 jsonCT (encode i))
+  pure (responseLBS status201 jsonCT (encode (indexerFullJson i)))
 
 -- | @DELETE /Indexers/:id@ (admin) — 204, 404 unknown.
 deleteIndexerHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
@@ -161,7 +190,7 @@ setEnabledHandler enabled captures req = do
     else do
       m <- getIndexer iid
       case m of
-        Just i  -> pure (jsonResponse i)
+        Just i  -> pure (jsonResponse (indexerFullJson i))
         Nothing -> throwError (NotFound ("no indexer with id " <> iid))
 
 -- | @GET /Indexers/Search?q=&type=movie|tv&indexerId=@ — any authenticated
@@ -188,7 +217,7 @@ searchHandler _captures req = do
     Nothing -> pure (filter indexerEnabled allIndexers)
   perIndexer <- liftIO (mapConcurrently
     (\i -> do
-      eres <- jackettSearch (indexerSearchUrl i mType q)
+      eres <- searchIndexer i mType q
       pure (i, eres))
     selected)
   let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perIndexer
@@ -269,7 +298,7 @@ resolveReleaseBytes iid r = do
         else if not (hostMatches raw (indexerBaseUrl idx))
           then pure (Left "download url host does not match indexer base url")
           else do
-            eres <- liftIO (fetchUrlBytes 15000000 (T.unpack raw))
+            eres <- liftIO (fetchUrlBytes (cookieHeaders idx) 15000000 (T.unpack raw))
             pure (fmap (\b -> (raw, b)) eres)
 
 -- | @POST /Indexers/:id/Test@ (admin) — run a q=test search against the
@@ -282,7 +311,7 @@ testIndexerHandler captures req = do
   case m of
     Nothing -> throwError (NotFound ("no indexer with id " <> iid))
     Just idx -> do
-      eres <- liftIO (jackettSearch (indexerSearchUrl idx (Just "movie") "test"))
+      eres <- liftIO (searchIndexer idx (Just "movie") "test")
       let (ok, mErr) = case eres of
             Right _   -> (True, Nothing)
             Left msg  -> (False, Just (T.pack msg))
@@ -309,13 +338,16 @@ slugFor raw =
       s = slugify seg
   in if null s || s == "request" then "release" else s
 
--- | GET a URL with a timeout (microseconds), returning the raw body
--- bytes on HTTP 200. Used for the proxied .torrent download.
-fetchUrlBytes :: Int -> String -> IO (Either String BS.ByteString)
-fetchUrlBytes micros url = do
+-- | GET a URL with extra headers (e.g. the indexer Cookie for cookie-auth
+-- proxied downloads, m23) and a timeout (microseconds), returning the raw
+-- body bytes on HTTP 200. Used for the proxied .torrent download.
+fetchUrlBytes :: [(HeaderName, BS.ByteString)] -> Int -> String -> IO (Either String BS.ByteString)
+fetchUrlBytes extraHeaders micros url = do
   manager <- newManager (tlsManagerSettings
     { managerResponseTimeout = responseTimeoutMicro micros })
-  eres <- try (httpLbs (parseRequest_ url) manager)
+  let req0 = parseRequest_ url
+      req = if null extraHeaders then req0 else req0 { requestHeaders = extraHeaders ++ requestHeaders req0 }
+  eres <- try (httpLbs req manager)
   case eres of
     Left (e :: SomeException) ->
       pure (Left ("fetch failed: " ++ show e))
@@ -324,3 +356,32 @@ fetchUrlBytes micros url = do
           pure (Right (LBS.toStrict (responseBody resp)))
       | otherwise ->
           pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))
+
+-- | Cookie request header for cookie-auth indexers (m23), as raw header
+-- pairs for 'fetchUrlBytes'.
+cookieHeaders :: Indexer -> [(HeaderName, BS.ByteString)]
+cookieHeaders idx =
+  [ (hCookie, TE.encodeUtf8 c) | ("Cookie", c) <- indexerCookieHeader idx ]
+
+-- | Search one indexer (m23: format- and auth-aware). Torznab/Newznab
+-- goes to @<searchPath>?t=search...@ and is parsed as XML; TorrentDay
+-- t.json goes to @/t.json?<cats>;q=...@ and is parsed as JSON. Cookie
+-- auth sends the Cookie header (and omits the apikey param). A non-200
+-- response on a cookie indexer is reported as "not logged in".
+searchIndexer :: Indexer -> Maybe Text -> Text -> IO (Either String [Release])
+searchIndexer idx mType q = do
+  let headers = [ (hCookie, TE.encodeUtf8 c) | ("Cookie", c) <- indexerCookieHeader idx ]
+      isJson = indexerResponseFormat idx == "torrentday-json"
+      url = if isJson
+              then torrentDaySearchUrl idx q
+              else indexerSearchUrl idx mType q
+  eres <- fetchUrl headers 10000000 url
+  case eres of
+    Left err -> pure (Left err)
+    Right (code, body)
+      | code /= 200 ->
+          pure (Left (if indexerAuthType idx == "cookie"
+                         then "not logged in (cookie missing/expired)"
+                         else "indexer returned HTTP " ++ show code))
+      | isJson -> pure (Right (parseTorrentDayJson (indexerBaseUrl idx) body))
+      | otherwise -> pure (Right (parseTorznabResults body))

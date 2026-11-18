@@ -1,90 +1,170 @@
 module FMS.Modules.Indexers.Types
   ( Indexer (..)
+  , indexerFullJson
   , indexerPublicJson
   , indexerSearchUrl
+  , torrentDaySearchUrl
+  , parseTorrentDayJson
   , categoriesParam
   , base64UrlEncode
   , base64UrlDecode
   , hostOf
   , hostMatches
+  , indexerCookieHeader
   , defaultCategories
+  , defaultSearchPath
+  , validAuthType
+  , validResponseFormat
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.=))
+import Data.Aeson.Types (Parser)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
+import Data.Char (toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
-import Data.Word (Word8)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime)
+import Data.Word (Word8)
 import Network.HTTP.Types (urlEncode)
 
 import FMS.Modules.Requests.Push (base64Encode)
+import FMS.Modules.Trackers.Types (Release (..))
 
 -- | Default Torznab categories for a seeded/configured indexer: movies
 -- (2000) + TV (5000).
 defaultCategories :: [Int]
 defaultCategories = [2000, 5000]
 
--- | One direct Torznab/Newznab indexer (m21). The API key is SECRET: it
--- is only ever sent to the indexer itself and is redacted from non-admin
--- API responses ('indexerPublicJson').
+-- | Default Torznab/Newznab search path (Jackett-style @/api@).
+defaultSearchPath :: Text
+defaultSearchPath = "/api"
+
+-- | Valid 'indexerAuthType' values: @apikey@ (default) or @cookie@ (m23).
+validAuthType :: Text -> Bool
+validAuthType t = T.toLower t `elem` ["apikey", "cookie"]
+
+-- | Valid 'indexerResponseFormat' values: @torznab@ (default XML) or
+-- @torrentday-json@ (TorrentDay t.json JSON array, m23).
+validResponseFormat :: Text -> Bool
+validResponseFormat t = T.toLower t `elem` ["torznab", "torrentday-json"]
+
+-- | One direct indexer (m21, extended m23 with cookie auth + t.json).
+-- ApiKey AND Cookie are SECRET: they are only ever sent to the indexer
+-- itself and are redacted from non-admin API responses
+-- ('indexerPublicJson').
 data Indexer = Indexer
-  { indexerId         :: !Text
-  , indexerName       :: !Text
-  , indexerBaseUrl    :: !Text          -- ^ e.g. http://127.0.0.1:9117
-  , indexerApiKey     :: !Text
-  , indexerCategories :: ![Int]         -- ^ Torznab cats, default [2000,5000]
-  , indexerType       :: !Text          -- ^ "torznab" | "newznab"
-  , indexerEnabled    :: !Bool
-  , indexerLastTestAt :: !(Maybe UTCTime)
-  , indexerLastTestOk :: !(Maybe Bool)
+  { indexerId             :: !Text
+  , indexerName           :: !Text
+  , indexerBaseUrl        :: !Text          -- ^ e.g. http://127.0.0.1:9117
+  , indexerApiKey         :: !Text
+  , indexerCategories     :: ![Int]         -- ^ Torznab cats, default [2000,5000]
+  , indexerType           :: !Text          -- ^ "torznab" | "newznab"
+  , indexerEnabled        :: !Bool
+  , indexerLastTestAt     :: !(Maybe UTCTime)
+  , indexerLastTestOk     :: !(Maybe Bool)
+  , indexerAuthType       :: !Text          -- ^ "apikey" (default) | "cookie" (m23)
+  , indexerCookie         :: !Text          -- ^ Cookie header value for cookie auth (m23)
+  , indexerResponseFormat :: !Text          -- ^ "torznab" (default) | "torrentday-json" (m23)
+  , indexerSearchPath     :: !Text          -- ^ torznab search path, default "/api" (m23)
   } deriving (Eq, Show)
 
+-- | Persist with LOWERCASE keys (m23); 'fieldDef' decodes both the new
+-- lowercase keys and the old PascalCase keys, so pre-m23 indexers.json
+-- files keep working and missing fields get defaults.
 instance ToJSON Indexer where
   toJSON i = object
-    [ "Id"         .= indexerId i
-    , "Name"       .= indexerName i
-    , "BaseUrl"    .= indexerBaseUrl i
-    , "ApiKey"     .= indexerApiKey i
-    , "Categories" .= indexerCategories i
-    , "Type"       .= indexerType i
-    , "Enabled"    .= indexerEnabled i
-    , "LastTestAt" .= indexerLastTestAt i
-    , "LastTestOk" .= indexerLastTestOk i
+    [ "id"             .= indexerId i
+    , "name"           .= indexerName i
+    , "baseUrl"        .= indexerBaseUrl i
+    , "apiKey"         .= indexerApiKey i
+    , "categories"     .= indexerCategories i
+    , "type"           .= indexerType i
+    , "enabled"        .= indexerEnabled i
+    , "lastTestAt"     .= indexerLastTestAt i
+    , "lastTestOk"     .= indexerLastTestOk i
+    , "authType"       .= indexerAuthType i
+    , "cookie"         .= indexerCookie i
+    , "responseFormat" .= indexerResponseFormat i
+    , "searchPath"     .= indexerSearchPath i
     ]
+
+-- | Read a field accepting both PascalCase (old files) and camelCase
+-- lowercase-first (new files) keys, with a default when absent.
+fieldDef :: FromJSON a => a -> Text -> KeyMap.KeyMap Value -> Parser a
+fieldDef def name o =
+  case KeyMap.lookup (Key.fromText name) o of
+    Just v  -> parseJSON v
+    Nothing -> case KeyMap.lookup (Key.fromText (lowerFirst name)) o of
+      Just v  -> parseJSON v
+      Nothing -> pure def
+  where
+    lowerFirst t = case T.uncons t of
+      Just (c, rest) -> T.cons (toLower c) rest
+      Nothing        -> t
 
 instance FromJSON Indexer where
   parseJSON = withObject "Indexer" $ \o ->
     Indexer
-      <$> o .:  "Id"
-      <*> o .:  "Name"
-      <*> o .:  "BaseUrl"
-      <*> o .:? "ApiKey" .!= ""
-      <*> o .:? "Categories" .!= defaultCategories
-      <*> o .:? "Type" .!= "torznab"
-      <*> o .:? "Enabled" .!= True
-      <*> o .:? "LastTestAt"
-      <*> o .:? "LastTestOk"
+      <$> fieldDef "" "Id" o
+      <*> fieldDef "" "Name" o
+      <*> fieldDef "" "BaseUrl" o
+      <*> fieldDef "" "ApiKey" o
+      <*> fieldDef defaultCategories "Categories" o
+      <*> fieldDef "torznab" "Type" o
+      <*> fieldDef True "Enabled" o
+      <*> fieldDef Nothing "LastTestAt" o
+      <*> fieldDef Nothing "LastTestOk" o
+      <*> fieldDef "apikey" "AuthType" o
+      <*> fieldDef "" "Cookie" o
+      <*> fieldDef "torznab" "ResponseFormat" o
+      <*> fieldDef defaultSearchPath "SearchPath" o
 
--- | API JSON with the ApiKey redacted (null) for non-admins; admins get
--- the full record. SECURITY: never expose the key to non-admins.
+-- | Full API JSON (PascalCase, includes ApiKey/Cookie) for ADMINS only.
+-- Persistence uses the lowercase 'ToJSON' instance instead.
+indexerFullJson :: Indexer -> Value
+indexerFullJson i = object
+  [ "Id"             .= indexerId i
+  , "Name"           .= indexerName i
+  , "BaseUrl"        .= indexerBaseUrl i
+  , "ApiKey"         .= indexerApiKey i
+  , "Categories"     .= indexerCategories i
+  , "Type"           .= indexerType i
+  , "Enabled"        .= indexerEnabled i
+  , "LastTestAt"     .= indexerLastTestAt i
+  , "LastTestOk"     .= indexerLastTestOk i
+  , "AuthType"       .= indexerAuthType i
+  , "Cookie"         .= indexerCookie i
+  , "ResponseFormat" .= indexerResponseFormat i
+  , "SearchPath"     .= indexerSearchPath i
+  ]
+
+-- | API JSON with ApiKey AND Cookie redacted (null) for non-admins;
+-- admins get the full record. SECURITY: never expose either secret to
+-- non-admins.
 indexerPublicJson :: Bool -> Indexer -> Value
 indexerPublicJson isAdmin i
-  | isAdmin   = toJSON i
+  | isAdmin   = indexerFullJson i
   | otherwise = object
-      [ "Id"         .= indexerId i
-      , "Name"       .= indexerName i
-      , "BaseUrl"    .= indexerBaseUrl i
-      , "ApiKey"     .= Aeson.Null
-      , "Categories" .= indexerCategories i
-      , "Type"       .= indexerType i
-      , "Enabled"    .= indexerEnabled i
-      , "LastTestAt" .= indexerLastTestAt i
-      , "LastTestOk" .= indexerLastTestOk i
+      [ "Id"             .= indexerId i
+      , "Name"           .= indexerName i
+      , "BaseUrl"        .= indexerBaseUrl i
+      , "ApiKey"         .= Aeson.Null
+      , "Categories"     .= indexerCategories i
+      , "Type"           .= indexerType i
+      , "Enabled"        .= indexerEnabled i
+      , "LastTestAt"     .= indexerLastTestAt i
+      , "LastTestOk"     .= indexerLastTestOk i
+      , "AuthType"       .= indexerAuthType i
+      , "Cookie"         .= Aeson.Null
+      , "ResponseFormat" .= indexerResponseFormat i
+      , "SearchPath"     .= indexerSearchPath i
       ]
 
 -- | Effective Torznab cat list for a search: when the caller asks for
@@ -106,18 +186,75 @@ categoriesParam cats mType =
 
 -- | Pure: build the Torznab/Newznab search URL for a DIRECT indexer
 -- (FMS itself acts as the aggregator, Jackett-style):
--- @<base>/api?t=search&q=<enc>&apikey=<key>&cat=<cats>@ for torznab,
--- @<base>/api?t=search&q=<enc>&apikey=<key>@ for newznab.
+-- @<base><searchPath>?t=search&q=<enc>&apikey=<key>&cat=<cats>@ for
+-- newznab/torznab with apikey auth; when @authType=cookie@ the apikey
+-- param is omitted (the Cookie header carries the auth instead, see
+-- 'indexerCookieHeader'). @cat@ is dropped for newznab.
 indexerSearchUrl :: Indexer -> Maybe Text -> Text -> String
 indexerSearchUrl idx mType q =
   T.unpack (T.dropWhileEnd (== '/') (indexerBaseUrl idx))
-    ++ "/api?t=search&q=" ++ T.unpack (urlEncodeText q)
-    ++ "&apikey=" ++ T.unpack (indexerApiKey idx)
+    ++ T.unpack (indexerSearchPath idx)
+    ++ "?t=search&q=" ++ T.unpack (urlEncodeText q)
+    ++ keyPart
     ++ catPart
   where
+    keyPart
+      | indexerAuthType idx == "cookie" = ""
+      | otherwise = "&apikey=" ++ T.unpack (indexerApiKey idx)
     catPart
       | indexerType idx == "newznab" = ""
       | otherwise = "&cat=" ++ T.unpack (T.intercalate "," (map (T.pack . show) (categoriesParam (indexerCategories idx) mType)))
+
+-- | Pure: TorrentDay t.json search URL (m23):
+-- @<base>/t.json?<cat1>;<cat2>;...;q=<enc>@ -- TorrentDay takes the
+-- categories as bare semicolon-separated params before @q@.
+torrentDaySearchUrl :: Indexer -> Text -> String
+torrentDaySearchUrl idx q =
+  T.unpack (T.dropWhileEnd (== '/') (indexerBaseUrl idx))
+    ++ "/t.json?"
+    ++ (if null cats then "" else T.unpack (T.intercalate ";" (map (T.pack . show) cats)) ++ ";")
+    ++ "q=" ++ T.unpack (urlEncodeText q)
+  where
+    cats = indexerCategories idx
+
+-- | Pure: parse a TorrentDay t.json response (a JSON array of rows) into
+-- releases. Each row looks like
+-- @{"name":"...","t":7,"size":2000000000,"seeders":9,"c":1,"ctime":...}@;
+-- the .torrent download URL is derived as
+-- @<base>/download.php/<t>/<t>.torrent@. Missing/unknown fields are
+-- tolerated; a non-array body yields [].
+parseTorrentDayJson :: Text -> LBS.ByteString -> [Release]
+parseTorrentDayJson baseUrl bs =
+  case Aeson.decode bs of
+    Just (Aeson.Array rows) -> mapMaybeRow rows
+    _                       -> []
+  where
+    mapMaybeRow rows = [ r | Aeson.Object o <- foldr (:) [] rows, Just r <- [rowToRelease o] ]
+    rowToRelease o = do
+      name <- KeyMap.lookup (Key.fromText "name") o >>= asText
+      t <- KeyMap.lookup (Key.fromText "t") o >>= asInt
+      let sizeB = KeyMap.lookup (Key.fromText "size") o >>= asInt
+          seeders = fromIntegral <$> (KeyMap.lookup (Key.fromText "seeders") o >>= asInt) :: Maybe Int
+          dl = baseUrl' <> "/download.php/" <> T.pack (show t) <> "/" <> T.pack (show t) <> ".torrent"
+      pure Release
+        { relTitle = name
+        , relSizeBytes = sizeB
+        , relSeeders = seeders
+        , relDownloadUrl = Just dl
+        , relMagnet = Nothing
+        }
+    baseUrl' = T.dropWhileEnd (== '/') baseUrl
+    asText (Aeson.String s) = Just s
+    asText _ = Nothing
+    asInt (Aeson.Number n) = Just (round n :: Integer)
+    asInt _ = Nothing
+
+-- | The Cookie header value for cookie-auth indexers (m23), if any.
+indexerCookieHeader :: Indexer -> [(Text, Text)]
+indexerCookieHeader idx
+  | indexerAuthType idx == "cookie" && not (T.null (indexerCookie idx)) =
+      [("Cookie", indexerCookie idx)]
+  | otherwise = []
 
 -- | Percent-encode a query-string value (http-types 'urlEncode' query mode).
 urlEncodeText :: Text -> Text

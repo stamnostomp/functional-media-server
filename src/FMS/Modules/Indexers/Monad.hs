@@ -24,7 +24,7 @@ import System.Random (newStdGen, randomRs)
 import FMS.Core.Monad (AppM, envConfig, getState, putState)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Modules.Indexers.Persistence (loadIndexers, saveIndexers)
-import FMS.Modules.Indexers.Types (Indexer (..), defaultCategories)
+import FMS.Modules.Indexers.Types (Indexer (..), defaultCategories, defaultSearchPath)
 
 -- | Namespaced key under which the indexers module stashes its
 -- @TVar (HashMap Text Indexer)@ in the typed registry.
@@ -107,7 +107,11 @@ loadIndexersIntoState = do
                         , indexerType = "torznab"
                         , indexerEnabled = True
                         , indexerLastTestAt = Nothing
-                        , indexerLastTestOk = Nothing }
+                        , indexerLastTestOk = Nothing
+                        , indexerAuthType = "apikey"
+                        , indexerCookie = ""
+                        , indexerResponseFormat = "torznab"
+                        , indexerSearchPath = defaultSearchPath }
         unless exists (liftIO (saveIndexers path (HM.singleton "seed" i)))
         pure (HM.singleton "seed" i)
   unless exists (liftIO (saveIndexers path seeded))  -- seed file on first boot

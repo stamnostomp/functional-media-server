@@ -2,6 +2,7 @@ module FMS.Modules.Requests.Push
   ( slugify
   , autoApproveSize
   , matchesDownload
+  , matchesRequestDownload
   , base64Encode
   , delugeLoginBody
   , delugeGetHostsBody
@@ -77,6 +78,15 @@ matchesDownload title files =
             yearSuffix r = not (T.null target) && T.length (T.strip r) == 4 && T.all isDigit (T.strip r)
         in nf == target || maybe False yearSuffix (T.stripPrefix target nf)
   in any matches files
+
+-- | m31: like 'matchesDownload' but also tries the SOURCE RELEASE name
+-- (Deluge names files after the release, not the request title -- e.g.
+-- title \"Shrek 2001\" vs file \"Shrek.2001.1080p.BluRay.x265-LAMA.mkv\").
+-- Pure: title match OR release match.
+matchesRequestDownload :: Text -> Maybe Text -> [FilePath] -> Bool
+matchesRequestDownload title mRelease files =
+  matchesDownload title files
+  || maybe False (\rel -> matchesDownload rel files) mRelease
 
 -- | Pure base64 encoder (RFC 4648 with padding; the @base64@ package is
 -- not a dependency, so this is implemented here with bytestring only).

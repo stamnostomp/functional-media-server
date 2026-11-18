@@ -25,7 +25,7 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
-import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, matchesDownload, parseProxiedPath, pushRequest)
+import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, matchesRequestDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
 jsonCT :: ResponseHeaders
@@ -94,7 +94,7 @@ markImported reqs = do
   let dir = T.unpack (rsDownloadDir s)
   efiles <- liftIO (try (scanDirectory False dir) :: IO (Either SomeException [FilePath]))
   let files = either (const []) id efiles
-  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesDownload (reqTitle r) files ]
+  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesRequestDownload (reqTitle r) (reqSourceRelease r) files ]
   where
     markOne r = do
       _ <- setRequestStatus (reqId r) Imported Nothing

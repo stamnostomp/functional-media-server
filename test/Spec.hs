@@ -102,7 +102,7 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, getFirstHostId, matchesDownload, parseProxiedPath, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, getFirstHostId, matchesDownload, matchesRequestDownload, parseProxiedPath, pushRequest, slugify)
 import FMS.Modules.Requests.Routes (requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
@@ -3824,6 +3824,18 @@ main = do
   m30missing <- scanDirectory False (m30dir </> "no-such-dir")
   check "m30 scanDirectory on a missing dir yields []"
     [ null m30missing ] [ True ]
+  -- milestone 31: match the download by the SOURCE RELEASE name too
+  let m31files = [ "/dl/Shrek.2001.1080p.BluRay.x265-LAMA/Shrek.2001.1080p.BluRay.x265-LAMA.mkv" ]
+  check "m31 matchesRequestDownload: release name matches even when the title does not"
+    [ matchesDownload "Shrek 2001" m31files  -- title alone does NOT match
+    , matchesRequestDownload "Shrek 2001" (Just "Shrek 2001 1080p BluRay x265-LAMA") m31files ]
+    [ False, True ]
+  check "m31 matchesRequestDownload: title-only match still works, no release"
+    [ matchesRequestDownload "Shrek 2001" Nothing [ "/dl/Shrek 2001.mkv" ] ] [ True ]
+  check "m31 matchesRequestDownload: neither title nor release matches -> False"
+    [ matchesRequestDownload "Dune" (Just "Some Other Release") m31files
+    , matchesRequestDownload "Dune" Nothing m31files ]
+    [ False, False ]
   check "base64Encode RFC4648 vectors"
     [ base64Encode (BSC.pack "f"), base64Encode (BSC.pack "fo"), base64Encode (BSC.pack "foo")
     , base64Encode (BSC.pack "foob"), base64Encode (BSC.pack "fooba"), base64Encode (BSC.pack "foobar")

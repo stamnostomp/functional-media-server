@@ -139,11 +139,20 @@ import FMS.Modules.Library.State
   , initialLibraryState
   )
 import FMS.Modules.Metadata.Api.Images (tmdbImageListToDownloads, tmdbImagesUrl)
-import FMS.Modules.Metadata.Api.Tmdb (parseTmdbResults, parseTmdbTvResults, tmdbSearchTvUrl, tmdbSearchUrl)
+import FMS.Modules.Metadata.Api.Tmdb
+  ( parseTmdbResults
+  , parseTmdbTvResults
+  , tmdbPopularMoviesUrl
+  , tmdbPopularMoviesUrlAt
+  , tmdbPopularTvUrl
+  , tmdbPopularTvUrlAt
+  , tmdbSearchTvUrl
+  , tmdbSearchUrl
+  )
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
@@ -1206,19 +1215,19 @@ main = do
         , "]}"
         ]))
       tmdbExpected =
-        [ TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433)
-        , TmdbResult 680 "Pulp Fiction" Nothing (Just 1994) (Just 8.5)
+        [ TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing
+        , TmdbResult 680 "Pulp Fiction" Nothing (Just 1994) (Just 8.5) Nothing
         ]
   check "parseTmdbResults parses a 2-result fixture (year extraction, missing overview -> Nothing)"
     (Right tmdbExpected) (parseTmdbResults tmdbFixture)
   check "parseTmdbResults on an empty results array is Right []"
     (Right []) (parseTmdbResults (LBS.fromStrict (BSC.pack "{\"results\":[]}")))
   check "parseTmdbResults: empty release_date -> year Nothing, vote_average 0 -> Just 0.0"
-    (Right [TmdbResult 7 "X" Nothing Nothing (Just 0.0)])
+    (Right [TmdbResult 7 "X" Nothing Nothing (Just 0.0) Nothing])
     (parseTmdbResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":7,\"title\":\"X\",\"release_date\":\"\",\"vote_average\":0}]}")))
   check "parseTmdbResults: malformed release_date -> year Nothing"
-    (Right [TmdbResult 8 "Y" Nothing Nothing (Just 7.0)])
+    (Right [TmdbResult 8 "Y" Nothing Nothing (Just 7.0) Nothing])
     (parseTmdbResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":8,\"title\":\"Y\",\"release_date\":\"soon\",\"vote_average\":7}]}")))
   let isLeftStr :: Either String a -> Bool
@@ -1239,12 +1248,46 @@ main = do
         , "]}"
         ]))
   check "parseTmdbTvResults maps name/first_air_date onto TmdbResult"
-    (Right [ TmdbResult 1399 "Game of Thrones" (Just "Seven noble families fight.") (Just 2011) (Just 8.4)
-           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing ])
+    (Right [ TmdbResult 1399 "Game of Thrones" (Just "Seven noble families fight.") (Just 2011) (Just 8.4) Nothing
+           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing Nothing ])
     (parseTmdbTvResults tvFixture)
   check "parseTmdbTvResults on invalid JSON is Left"
     True (isLeftStr (parseTmdbTvResults (LBS.fromStrict (BSC.pack "nope"))))
-  let hit = tmdbResultToSearchHit "Movie" (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433))
+  -- milestone 26: /Discover/Popular (TMDB popular movies+shows, poster_path)
+  check "tmdbPopular URL builders: movie/tv popular, page, trailing slash stripped"
+    [ tmdbPopularMoviesUrlAt "http://127.0.0.1:9999/3/" "K" 1
+    , tmdbPopularTvUrlAt "http://127.0.0.1:9999/3" "K" 2
+    , tmdbPopularMoviesUrl "K" 1
+    , tmdbPopularTvUrl "K" 3 ]
+    [ "http://127.0.0.1:9999/3/movie/popular?api_key=K&page=1"
+    , "http://127.0.0.1:9999/3/tv/popular?api_key=K&page=2"
+    , "https://api.themoviedb.org/3/movie/popular?api_key=K&page=1"
+    , "https://api.themoviedb.org/3/tv/popular?api_key=K&page=3" ]
+  check "parseTmdbResults decodes poster_path (m26)"
+    (Right [TmdbResult 550 "Fight Club" Nothing (Just 1999) Nothing (Just "/p550.jpg")])
+    (parseTmdbResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":550,\"title\":\"Fight Club\",\"release_date\":\"1999-10-15\",\"poster_path\":\"/p550.jpg\"}]}")))
+  check "parseTmdbTvResults decodes poster_path (m26), missing -> Nothing"
+    (Right [ TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing (Just "/got.jpg")
+           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing Nothing ])
+    (parseTmdbTvResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":1399,\"name\":\"Game of Thrones\",\"first_air_date\":\"2011-04-17\",\"poster_path\":\"/got.jpg\"},{\"id\":1402,\"name\":\"The Wire\",\"first_air_date\":\"2002-06-02\"}]}")))
+  let dEntry = discoverEntry "Movie" "https://image.tmdb.org/t/p" "w500"
+        (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.4) (Just "/p550.jpg"))
+      dEntryRaw = LBS.toStrict (Aeson.encode dEntry)
+      dNoPoster = LBS.toStrict (Aeson.encode (discoverEntry "Movie" "https://image.tmdb.org/t/p" "w500" (TmdbResult 1 "X" Nothing Nothing Nothing Nothing)))
+  check "discoverEntry: PascalCase keys + full PosterUrl when poster present"
+    [True, True, True, True, True]
+    (map (`BSC.isInfixOf` dEntryRaw)
+      [ "\"Id\":\"550\"", "\"Name\":\"Fight Club\"", "\"Type\":\"Movie\""
+      , "\"ProductionYear\":1999", "\"PosterUrl\":\"https://image.tmdb.org/t/p/w500/p550.jpg\"" ])
+  check "discoverEntry: no poster -> PosterUrl null"
+    [True] [ "\"PosterUrl\":null" `BSC.isInfixOf` dNoPoster ]
+  check "discoverSection: Left -> [], Right capped at 20"
+    [ length (discoverSection "Movie" "b" "s" (Left "boom"))
+    , length (discoverSection "Movie" "b" "s" (Right (map (\i -> TmdbResult i "t" Nothing Nothing Nothing Nothing) [1 .. 25 :: Int]))) ]
+    [ 0, 20 ]
+  let hit = tmdbResultToSearchHit "Movie" (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing)
       hitRaw = LBS.toStrict (Aeson.encode hit)
   check "tmdbResultToSearchHit emits the Jellyfin RemoteSearchResult keys (PascalCase)"
     [True, True, True, True, True, True]
@@ -1253,7 +1296,7 @@ main = do
       , "\"ProductionYear\":1999", "\"ProviderIds\":{\"Tmdb\":550}", "\"Overview\":\"An insomniac" ])
   check "tmdbResultToSearchHit type=tv -> Series"
     True ("\"Type\":\"Series\"" `BSC.isInfixOf`
-            LBS.toStrict (Aeson.encode (tmdbResultToSearchHit "Series" (TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing))))
+            LBS.toStrict (Aeson.encode (tmdbResultToSearchHit "Series" (TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing Nothing))))
   let mkU i = MediaItem
         { itemId = i, itemTitle = "t" <> i, itemPath = "/" ++ T.unpack i ++ ".mp4"
         , itemSize = 1, itemMime = "video/mp4", itemAddedAt = t4m, itemFolder = "1"

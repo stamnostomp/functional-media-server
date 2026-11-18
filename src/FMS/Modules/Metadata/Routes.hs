@@ -18,8 +18,12 @@ module FMS.Modules.Metadata.Routes
   , unmatchedHandler
   , unmatchedItems
   , tmdbResultToSearchHit
+  , discoverPopularHandler
+  , discoverEntry
+  , discoverSection
   ) where
 
+import Control.Monad (forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
@@ -39,7 +43,7 @@ import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
-import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovie, tmdbSearchTv)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchTv)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), refreshAllMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata, mergeTags, removeTag)
@@ -303,6 +307,61 @@ tmdbResultToSearchHit typeName r = object
   , "ProductionYear" .= tmdbReleaseYear r
   , "ProviderIds"    .= object ["Tmdb" .= tmdbId r]
   , "Overview"       .= tmdbOverview r
+  ]
+
+-- Milestone 26: GET /Discover/Popular — popular movies + shows from TMDB
+-- for the UI Discover tab.
+
+-- | @GET \/Discover\/Popular@ — any authenticated user (read-only, like
+-- 'remoteSearchHandler'). Fetches page 1 of TMDB /movie/popular and
+-- /tv/popular and answers @{\"Movies\":[...],\"Shows\":[...]}@ with at
+-- most 20 entries per section. No API key -> logged + 200 with empty
+-- arrays; a transport/parse error in one section -> empty array for that
+-- section only (graceful, the UI works without TMDB).
+discoverPopularHandler :: [(Text, Text)] -> Request -> AppM Response
+discoverPopularHandler _captures _req = do
+  cfg <- asks envConfig
+  let apiKey   = configTmdbApiKey cfg
+      base     = configTmdbBaseUrl cfg
+      imgBase  = configTmdbImageBaseUrl cfg
+      imgSize  = configTmdbImageSize cfg
+  if T.null apiKey
+    then do
+      logWarn "metadata: MEDIA_TMDB_API_KEY not set; /Discover/Popular returns empty arrays"
+      pure (jsonResponse (object ["Movies" .= ([] :: [Value]), "Shows" .= ([] :: [Value])]))
+    else do
+      em <- liftIO (tmdbPopularMoviesAt base apiKey 1)
+      es <- liftIO (tmdbPopularTvAt base apiKey 1)
+      forM_ (lefts' em) (\e -> logErr ("metadata: tmdb /movie/popular failed: " <> T.pack e))
+      forM_ (lefts' es) (\e -> logErr ("metadata: tmdb /tv/popular failed: " <> T.pack e))
+      pure (jsonResponse (object
+        [ "Movies" .= discoverSection "Movie" imgBase imgSize em
+        , "Shows"  .= discoverSection "Series" imgBase imgSize es
+        ]))
+  where
+    lefts' (Left e) = [e]
+    lefts' (Right _) = []
+
+-- | Pure (m26): one section of /Discover/Popular — 'Left' (transport or
+-- parse error) yields an empty list; 'Right' yields at most 20 entries.
+discoverSection :: Text -> Text -> Text -> Either String [TmdbResult] -> [Value]
+discoverSection typeName imgBase imgSize eres =
+  case eres of
+    Left _      -> []
+    Right rs    -> map (discoverEntry typeName imgBase imgSize) (take 20 rs)
+
+-- | Pure (m26): map one TMDB hit to the Discover entry JSON
+-- (PascalCase): Id/Name/Type/ProductionYear/Overview/VoteAverage/PosterUrl
+-- (full image URL when a poster_path is present, else null).
+discoverEntry :: Text -> Text -> Text -> TmdbResult -> Value
+discoverEntry typeName imgBase imgSize r = object
+  [ "Id"             .= T.pack (show (tmdbId r))
+  , "Name"           .= tmdbTitle r
+  , "Type"           .= typeName
+  , "ProductionYear" .= tmdbReleaseYear r
+  , "Overview"       .= tmdbOverview r
+  , "VoteAverage"    .= tmdbVoteAverage r
+  , "PosterUrl"      .= fmap (\p -> imgBase <> "/" <> imgSize <> p) (tmdbPoster r)
   ]
 
 -- | @GET \/Items\/Unmatched@ — the identify/failures queue (milestone 4m):

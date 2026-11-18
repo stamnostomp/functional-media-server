@@ -25,7 +25,7 @@ import FMS.Modules.Library.Routes
   , specialFeaturesHandler
   )
 import FMS.Modules.Library.State (initialLibraryState)
-import FMS.Modules.Metadata.Routes (refreshAllHandler, remoteSearchHandler, unmatchedHandler)
+import FMS.Modules.Metadata.Routes (discoverPopularHandler, refreshAllHandler, remoteSearchHandler, unmatchedHandler)
 import FMS.Modules.Library.Watch (startWatcher)
 
 -- | The library module (docs/roadmap.org milestone 2, milestone 2c media
@@ -62,6 +62,8 @@ libraryModule = Module
          -- capture route (first match wins); handlers live in Metadata.Routes
          , get [Lit "items", Lit "RemoteSearch"] remoteSearchHandler
          , get [Lit "items", Lit "Unmatched"] unmatchedHandler
+         -- milestone 26: GET /Discover/Popular (TMDB popular movies+shows)
+         , get [Lit "Discover", Lit "Popular"] discoverPopularHandler
          , post [Lit "Library", Lit "Refresh"] refreshAllHandler
          , get [Lit "items", Capture "id"] itemDetailHandler
          , get [Lit "items", Capture "id", Lit "Ancestors"] ancestorsHandler

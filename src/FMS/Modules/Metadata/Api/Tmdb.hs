@@ -9,6 +9,14 @@ module FMS.Modules.Metadata.Api.Tmdb
   , tmdbSearchUrlAt
   , tmdbSearchMovieAt
   , tmdbSearchTvAt
+  , tmdbPopularMoviesUrl
+  , tmdbPopularMoviesUrlAt
+  , tmdbPopularMovies
+  , tmdbPopularMoviesAt
+  , tmdbPopularTvUrl
+  , tmdbPopularTvUrlAt
+  , tmdbPopularTv
+  , tmdbPopularTvAt
   ) where
 
 import Control.Exception (SomeException, try)
@@ -126,13 +134,14 @@ tmdbFetch url = do
 tmdbSearchTvUrl :: Text -> Text -> String
 tmdbSearchTvUrl apiKey query = tmdbSearchTvUrlAt (T.pack tmdbApiBase) apiKey query
 
--- | One raw hit of @\/search\/tv@.
+-- | One raw hit of @\/search\/tv@ (and @\/tv\/popular@, same shape).
 data TmdbTvItem = TmdbTvItem
   { tvId           :: Int
   , tvName         :: Text
   , tvOverview     :: Maybe Text
   , tvFirstAirDate :: Maybe Text
   , tvVoteAverage  :: Maybe Double
+  , tvPoster       :: Maybe Text   -- ^ "poster_path" (m26)
   }
 
 instance FromJSON TmdbTvItem where
@@ -143,6 +152,7 @@ instance FromJSON TmdbTvItem where
       <*> o .:? "overview"
       <*> o .:? "first_air_date"
       <*> o .:? "vote_average"
+      <*> o .:? "poster_path"
 
 -- | The @\/search\/tv@ response envelope.
 newtype TmdbTvSearchResponse = TmdbTvSearchResponse
@@ -165,6 +175,7 @@ parseTmdbTvResults body = do
         , tmdbOverview    = tvOverview i
         , tmdbReleaseYear = tvFirstAirDate i >>= releaseYear
         , tmdbVoteAverage = tvVoteAverage i
+        , tmdbPoster      = tvPoster i
         }
     | i <- tmdbTvResults resp
     ]
@@ -185,3 +196,50 @@ tmdbSearchTvUrlAt :: Text -> Text -> Text -> String
 tmdbSearchTvUrlAt base apiKey query =
   T.unpack (T.dropWhileEnd (== '/') base) ++ "/search/tv?api_key=" ++ T.unpack apiKey
     ++ "&query=" ++ T.unpack (urlEncodeText query)
+
+-- Milestone 26: popular movies/shows for the Discover tab
+-- (GET /Discover/Popular). Same envelope as search: @{"results":[...]}@.
+
+-- | Build the TMDB @\/movie\/popular@ URL for a page against an explicit
+-- API base (pure): @<base>\/movie\/popular?api_key=<key>&page=<n>@.
+tmdbPopularMoviesUrlAt :: Text -> Text -> Int -> String
+tmdbPopularMoviesUrlAt base apiKey page =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/movie/popular?api_key=" ++ T.unpack apiKey
+    ++ "&page=" ++ show page
+
+-- | @\/movie\/popular@ URL against the default API base (pure).
+tmdbPopularMoviesUrl :: Text -> Int -> String
+tmdbPopularMoviesUrl apiKey page = tmdbPopularMoviesUrlAt (T.pack tmdbApiBase) apiKey page
+
+-- | Fetch one page of popular movies from an explicit API base
+-- (FMS_TMDB_BASE_URL), parsed with 'parseTmdbResults'. Same never-throws
+-- behaviour as 'tmdbSearchMovieAt'.
+tmdbPopularMoviesAt :: Text -> Text -> Int -> IO (Either String [TmdbResult])
+tmdbPopularMoviesAt base apiKey page = do
+  eres <- tmdbFetch (tmdbPopularMoviesUrlAt base apiKey page)
+  pure (parseTmdbResults =<< eres)
+
+-- | Popular movies from the default API base.
+tmdbPopularMovies :: Text -> Int -> IO (Either String [TmdbResult])
+tmdbPopularMovies apiKey page = tmdbPopularMoviesAt (T.pack tmdbApiBase) apiKey page
+
+-- | @\/tv\/popular@ URL against an explicit API base (pure).
+tmdbPopularTvUrlAt :: Text -> Text -> Int -> String
+tmdbPopularTvUrlAt base apiKey page =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/tv/popular?api_key=" ++ T.unpack apiKey
+    ++ "&page=" ++ show page
+
+-- | @\/tv\/popular@ URL against the default API base (pure).
+tmdbPopularTvUrl :: Text -> Int -> String
+tmdbPopularTvUrl apiKey page = tmdbPopularTvUrlAt (T.pack tmdbApiBase) apiKey page
+
+-- | Fetch one page of popular TV shows from an explicit API base,
+-- parsed with 'parseTmdbTvResults'.
+tmdbPopularTvAt :: Text -> Text -> Int -> IO (Either String [TmdbResult])
+tmdbPopularTvAt base apiKey page = do
+  eres <- tmdbFetch (tmdbPopularTvUrlAt base apiKey page)
+  pure (parseTmdbTvResults =<< eres)
+
+-- | Popular TV shows from the default API base.
+tmdbPopularTv :: Text -> Int -> IO (Either String [TmdbResult])
+tmdbPopularTv apiKey page = tmdbPopularTvAt (T.pack tmdbApiBase) apiKey page

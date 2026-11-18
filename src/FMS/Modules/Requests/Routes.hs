@@ -15,7 +15,7 @@ import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types (ResponseHeaders, status201, status204)
 import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
 import qualified Network.Wai as Wai
-import System.Directory (listDirectory)
+
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, envConfig, runApp)
@@ -23,7 +23,7 @@ import FMS.Modules.Indexers (resolveReleaseBytes)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
-import FMS.Modules.Library.Scan (isMediaFile)
+import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
 import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, matchesDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
@@ -84,13 +84,16 @@ instance FromJSON CreateRequest where
 
 -- | m20b: mark Downloading requests as Imported when a media file whose
 -- (extension-stripped) name normalizes to the request title appears in
--- the download dir. Persists the status change.
+-- the download dir. Persists the status change. m30: the download dir is
+-- walked RECURSIVELY (Deluge saves into <downloads>/<Torrent.Name>/...);
+-- 'scanDirectory' also filters isMediaFile and returns [] for a missing
+-- dir.
 markImported :: [Request] -> AppM ()
 markImported reqs = do
   s <- getRequestSettings   -- m27: effective (saved) download dir
   let dir = T.unpack (rsDownloadDir s)
-  efiles <- liftIO (try (listDirectory dir) :: IO (Either SomeException [FilePath]))
-  let files = filter isMediaFile (either (const []) id efiles)
+  efiles <- liftIO (try (scanDirectory False dir) :: IO (Either SomeException [FilePath]))
+  let files = either (const []) id efiles
   mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesDownload (reqTitle r) files ]
   where
     markOne r = do

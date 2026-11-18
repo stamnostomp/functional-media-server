@@ -78,6 +78,7 @@ import FMS.Modules.Library.Scan
   , extraTypeFor
   , isCircular
   , isMediaFile
+  , scanDirectory
   , isNfoFile
   , itemIdsForNfo
   , parseEpisodeFilename
@@ -3801,6 +3802,28 @@ main = do
     , matchesDownload "Dune" ["/dl/dune2.mkv"]
     , matchesDownload "Dune" ["/dl/dune.srt"] ]
     [ True, False, True, False, True ]
+  -- milestone 30: markImported walks the download dir RECURSIVELY (Deluge
+  -- saves into <downloads>/<Torrent.Name>/file.mp4)
+  let m30dir = "/tmp/fms-m30-dl"
+  resetDir m30dir
+  createDirectoryIfMissing True (m30dir </> "Shrek.2001.1080p.BluRay.x265-LAMA")
+  createDirectoryIfMissing True (m30dir </> "Other.Torrent")
+  writeFile (m30dir </> "Shrek.2001.1080p.BluRay.x265-LAMA" </> "Shrek.2001.1080p.BluRay.x265-LAMA.mkv") "x"
+  writeFile (m30dir </> "Other.Torrent" </> "unrelated movie.mkv") "x"
+  writeFile (m30dir </> "notes.txt") "x"   -- not a media file: filtered out
+  m30files <- scanDirectory False m30dir
+  check "m30 scanDirectory recursive walk finds media files in subdirs only"
+    [ sort m30files ]
+    [ sort [ m30dir </> "Shrek.2001.1080p.BluRay.x265-LAMA" </> "Shrek.2001.1080p.BluRay.x265-LAMA.mkv"
+           , m30dir </> "Other.Torrent" </> "unrelated movie.mkv" ] ]
+  check "m30 matchesDownload matches a media file found in a torrent subdir"
+    [ matchesDownload "Shrek.2001.1080p.BluRay.x265-LAMA" m30files
+    , matchesDownload "shrek 2001 1080p bluray x265 lama" m30files ] [ True, True ]
+  check "m30 matchesDownload negative: non-matching subdir file does not match"
+    [ matchesDownload "Dune" m30files ] [ False ]
+  m30missing <- scanDirectory False (m30dir </> "no-such-dir")
+  check "m30 scanDirectory on a missing dir yields []"
+    [ null m30missing ] [ True ]
   check "base64Encode RFC4648 vectors"
     [ base64Encode (BSC.pack "f"), base64Encode (BSC.pack "fo"), base64Encode (BSC.pack "foo")
     , base64Encode (BSC.pack "foob"), base64Encode (BSC.pack "fooba"), base64Encode (BSC.pack "foobar")

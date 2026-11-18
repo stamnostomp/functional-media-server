@@ -3534,6 +3534,13 @@ main = do
         , "Search all indexers", "External Jackett servers", "admin only" ]
   check "dashboardPageHtml: m22 tabbed trackers markers present"
     (map (\m -> m `isInfixOf` dash) m22Markers) (replicate (length m22Markers) True)
+  -- milestone 24: m23 fields in the trackers-tab add-indexer form
+  let m24Markers =
+        [ "AuthType", "Cookie", "ResponseFormat", "torrentday-json", "SearchPath"
+        , "toggleAuthFields", "type=\"password\"", "<th>Auth</th>", "<th>Format</th>"
+        , "el('ia')", "el('ick')", "el('if')", "el('isp')", "value=\"cookie\"" ]
+  check "dashboardPageHtml: m24 cookie/torrentday form markers present"
+    (map (\m -> m `isInfixOf` dash) m24Markers) (replicate (length m24Markers) True)
   check "dashboardPageHtml: ASCII only (no bytes > 127)"
     [BS.all (<= 127) (LBS.toStrict dashboardPageHtml)] [True]
   check "dashboardBeforeCapture: webModule has Lit dashboard before Capture file"

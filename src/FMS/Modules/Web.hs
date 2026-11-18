@@ -221,7 +221,10 @@ webPageHtml = LBSC.pack (unlines
 -- (GET /Indexers/Search) with a REQUEST button per release (POST
 -- /Requests, 409 -> ALREADY IN PROGRESS), and the m20c external-Jackett
 -- /Trackers CRUD moved into a subsection. The 10s auto-refresh only
--- renders the visible tab.
+-- renders the visible tab. m24: the add-indexer form also posts AuthType
+-- (apikey|cookie, toggling the api-key vs cookie-password inputs),
+-- ResponseFormat (torznab|torrentday-json) and SearchPath, and the
+-- indexers table shows Auth/Format columns.
 -- Exported so the test suite can assert on its markers.
 dashboardPageHtml :: LBS.ByteString
 dashboardPageHtml = LBSC.pack (unlines
@@ -470,23 +473,42 @@ dashboardPageHtml = LBSC.pack (unlines
   , "function renderIndexers(){"
   , "  api('/Indexers').then(function(is){"
   , "    section('indexers', (is.length"
-  , "      ? '<table><tr><th>Id</th><th>Name</th><th>BaseUrl</th><th>Type</th><th>Cats</th><th>Enabled</th><th>Last test</th><th></th></tr>'"
-  , "        + is.map(function(i){ return '<tr><td>'+esc(i.Id)+'</td><td>'+esc(i.Name)+'</td><td>'+esc(i.BaseUrl)+'</td><td>'+esc(i.Type)+'</td><td>'+esc((i.Categories||[]).join(','))+'</td><td>'+esc(i.Enabled)+'</td><td>'+(i.LastTestOk==null?'':(i.LastTestOk?'ok':'FAIL'))+'</td><td>'"
+  , "      ? '<table><tr><th>Id</th><th>Name</th><th>BaseUrl</th><th>Type</th><th>Auth</th><th>Format</th><th>Cats</th><th>Enabled</th><th>Last test</th><th></th></tr>'"
+  , "        + is.map(function(i){ return '<tr><td>'+esc(i.Id)+'</td><td>'+esc(i.Name)+'</td><td>'+esc(i.BaseUrl)+'</td><td>'+esc(i.Type)+'</td><td>'+esc(i.AuthType||'apikey')+'</td><td>'+esc(i.ResponseFormat||'torznab')+'</td><td>'+esc((i.Categories||[]).join(','))+'</td><td>'+esc(i.Enabled)+'</td><td>'+(i.LastTestOk==null?'':(i.LastTestOk?'ok':'FAIL'))+'</td><td>'"
   , "          + '<button data-id='+encodeURIComponent(i.Id)+' onclick=\"testIndexer(this)\">Test</button> '"
   , "          + (i.Enabled ? '<button data-id='+encodeURIComponent(i.Id)+' data-en=0 onclick=\"toggleIndexer(this)\">Disable</button>' : '<button data-id='+encodeURIComponent(i.Id)+' data-en=1 onclick=\"toggleIndexer(this)\">Enable</button>')"
   , "          + ' <button data-id='+encodeURIComponent(i.Id)+' onclick=\"deleteIndexer(this)\">Delete</button></td></tr>'; }).join('')"
   , "        + '</table>'"
   , "      : '<i>no indexers</i>')"
-  , "      + '<div style=\"margin-top:12px\"><input id=\"in\" placeholder=\"name\"><input id=\"ib\" placeholder=\"base url\"><input id=\"ik\" placeholder=\"api key\"><input id=\"ic\" placeholder=\"cats 2000,5000\"><button class=\"btn btn-primary\" onclick=\"addIndexer()\">Add indexer</button></div>');"
+  , "      + '<div style=\"margin-top:12px\" class=\"flex items-center flex-wrap gap-2\">'"
+  , "        + '<input id=\"in\" placeholder=\"name\">'"
+  , "        + '<input id=\"ib\" placeholder=\"base url\">'"
+  , "        + '<select id=\"ia\" class=\"bg-panel ba b--default fg-primary f6 tracked-wide\" style=\"padding:8px 12px\" onchange=\"toggleAuthFields()\">'"
+  , "          + '<option value=\"apikey\">auth: apikey</option><option value=\"cookie\">auth: cookie</option></select>'"
+  , "        + '<input id=\"ik\" placeholder=\"api key\">'"
+  , "        + '<input id=\"ick\" type=\"password\" placeholder=\"cookie\" style=\"display:none\">'"
+  , "        + '<select id=\"if\" class=\"bg-panel ba b--default fg-primary f6 tracked-wide\" style=\"padding:8px 12px\">'"
+  , "          + '<option value=\"torznab\">format: torznab</option><option value=\"torrentday-json\">format: torrentday-json</option></select>'"
+  , "        + '<input id=\"isp\" placeholder=\"search path /api\">'"
+  , "        + '<input id=\"ic\" placeholder=\"cats 2000,5000\">'"
+  , "        + '<button class=\"btn btn-primary\" onclick=\"addIndexer()\">Add indexer</button></div>');"
   , "  }).catch(function(){ section('indexers','<i>unavailable</i>'); });"
+  , "}"
+  , "function toggleAuthFields(){"
+  , "  var cookie = el('ia').value==='cookie';"
+  , "  el('ick').style.display = cookie ? '' : 'none';"
+  , "  el('ik').style.display = cookie ? 'none' : '';"
+  , "}"
+  , "function addIndexer(){"
+  , "  var cats=el('ic').value.split(',').map(function(s){ return parseInt(s,10); }).filter(function(n){ return !isNaN(n); });"
+  , "  var body={Name:el('in').value,BaseUrl:el('ib').value,AuthType:el('ia').value,ResponseFormat:el('if').value,Categories:cats};"
+  , "  if (el('ia').value==='cookie') { body.Cookie=el('ick').value; } else { body.ApiKey=el('ik').value; }"
+  , "  if (el('isp').value) { body.SearchPath=el('isp').value; }"
+  , "  api('/Indexers',{method:'POST',body:JSON.stringify(body)}).then(refresh).catch(showErr);"
   , "}"
   , "function testIndexer(b){ api('/Indexers/'+b.getAttribute('data-id')+'/Test',{method:'POST'}).then(function(d){ reqNotice(d.Ok?'TEST OK':'TEST FAILED'); refresh(); }).catch(showErr); }"
   , "function toggleIndexer(b){ var id=b.getAttribute('data-id'), en=b.getAttribute('data-en')==='1'; api('/Indexers/'+id+(en?'/Enable':'/Disable'),{method:'POST'}).then(refresh).catch(showErr); }"
   , "function deleteIndexer(b){ api('/Indexers/'+b.getAttribute('data-id'),{method:'DELETE'}).then(refresh).catch(showErr); }"
-  , "function addIndexer(){"
-  , "  var cats=el('ic').value.split(',').map(function(s){ return parseInt(s,10); }).filter(function(n){ return !isNaN(n); });"
-  , "  api('/Indexers',{method:'POST',body:JSON.stringify({Name:el('in').value,BaseUrl:el('ib').value,ApiKey:el('ik').value,Categories:cats})}).then(refresh).catch(showErr);"
-  , "}"
   , "function reqNotice(m){ el('reqnote').textContent = m; }"
   , "function searchAll(){"
   , "  var q=el('sq').value, ty=el('st').value;"

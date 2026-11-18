@@ -7,7 +7,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (asks)
+import Control.Monad.Reader (ask, asks)
 import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -18,14 +18,15 @@ import qualified Network.Wai as Wai
 import System.Directory (listDirectory)
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError (..), AppM, envConfig)
+import FMS.Core.Monad (AppError (..), AppM, envConfig, runApp)
+import FMS.Modules.Indexers (resolveReleaseBytes)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (isMediaFile)
 import FMS.Modules.Requests.Monad (MonadRequests (..), newRequestId)
-import FMS.Modules.Requests.Push (autoApproveSize, matchesDownload, pushRequest)
+import FMS.Modules.Requests.Push (autoApproveSize, matchesDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus)
 
 jsonCT :: ResponseHeaders
@@ -237,8 +238,18 @@ deleteRequestHandler captures req = do
 pushAndAdvance :: Request -> AppM Request
 pushAndAdvance r = do
   cfg <- asks envConfig
+  env <- ask
+  -- m21 fix: same-origin /Indexers/:id/Download?r=... URLs are resolved
+  -- in-process (the HTTP route is auth-gated, so a loopback fetch would
+  -- 401 under FMS_REQUIRE_AUTH=true)
+  let resolveProxied path = case parseProxiedPath path of
+        Nothing -> pure (Left "not a proxied indexer path")
+        Just (iid, rid) -> do
+          ea <- runApp env (resolveReleaseBytes iid rid)
+          pure (either (Left . show) (either Left (Right . snd)) ea)
   eres <- liftIO (pushRequest (configDelugeUrl cfg) (configDelugePassword cfg)
-                (configDownloadDir cfg) (reqMagnet r) (reqDownloadUrl r) (reqTitle r))
+                (configDownloadDir cfg) (reqMagnet r) (reqDownloadUrl r) (reqTitle r)
+                resolveProxied)
   case eres of
     Right () -> do
       m <- setRequestStatus (reqId r) Downloading Nothing

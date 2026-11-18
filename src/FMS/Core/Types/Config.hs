@@ -48,6 +48,9 @@ data Config = Config
   , configDelugePassword :: !Text         -- ^ Deluge web password (env FMS_DELUGE_PASSWORD, default empty = login will fail and the file fallback is used; m20b)
   , configDownloadDir :: !FilePath        -- ^ download dir pushed to Deluge AND auto-imported as a library folder (env FMS_DOWNLOAD_DIR, default <stateDir>/downloads; m20b)
   , configRequestAutoApproveGb :: !Int    -- ^ requests at or under this many GiB are auto-approved and pushed (env FMS_REQUEST_AUTO_APPROVE_GB, default 5, must be >= 0; m20b)
+  , configIndexerUrl :: !(Maybe Text)     -- ^ direct Torznab/Newznab indexer base URL to seed on first boot (env FMS_INDEXER_URL; with FMS_INDEXER_API_KEY; m21)
+  , configIndexerApiKey :: !(Maybe Text)  -- ^ API key for the seeded indexer (env FMS_INDEXER_API_KEY; m21)
+  , configIndexerName :: !(Maybe Text)    -- ^ name for the seeded indexer (env FMS_INDEXER_NAME, default \"seed\"; m21)
   } deriving (Show, Eq)
 
 -- | Normalise a hardware-acceleration name (milestone 6f): case-

@@ -7,6 +7,7 @@ module FMS.Modules.Requests.Push
   , delugeAddMagnetBody
   , delugeAddFileBody
   , pushRequest
+  , parseProxiedPath
   ) where
 
 import Control.Exception (SomeException, try)
@@ -160,11 +161,27 @@ fetchBytes url = do
       | statusCode (responseStatus resp) == 200 -> pure (Right (LBS.toStrict (responseBody resp)))
       | otherwise -> pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))
 
+-- | Parse a same-origin proxied indexer download path
+-- @/Indexers/<id>/Download?r=<releaseId>@ into @(indexerId, releaseId)@.
+-- Pure; used so the push pipeline can resolve proxied URLs in-process
+-- instead of HTTP-fetching its own auth-gated route (m21 fix).
+parseProxiedPath :: Text -> Maybe (Text, Text)
+parseProxiedPath u =
+  case T.stripPrefix "/Indexers/" u of
+    Nothing -> Nothing
+    Just rest ->
+      let (iid, rq) = T.breakOn "/Download" rest
+      in case T.stripPrefix "?r=" (T.drop 9 rq) of
+           Just r | not (T.null iid) && not (T.null r) -> Just (iid, r)
+           _ -> Nothing
+
 -- | Push a release to Deluge (magnet preferred, else download the
 -- .torrent and add_torrent_file). On ANY failure, fall back to writing the
 -- magnet / torrent bytes into the download dir so an external client or
 -- the auto-import can pick it up. Returns Right () when the release is
 -- either pushed or written to the download dir, Left err otherwise.
+-- The @resolveProxied@ callback resolves same-origin @/Indexers/...@
+-- download URLs in-process (see 'parseProxiedPath').
 pushRequest
   :: Text       -- ^ deluge JSON-RPC url
   -> Text       -- ^ deluge password
@@ -172,8 +189,9 @@ pushRequest
   -> Maybe Text -- ^ magnet
   -> Maybe Text -- ^ download (torrent) url
   -> Text       -- ^ title (for the fallback slug)
+  -> (Text -> IO (Either String BS.ByteString)) -- ^ in-process resolver for proxied /Indexers/ URLs
   -> IO (Either String ())
-pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title = do
+pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title resolveProxied = do
   createDirectoryIfMissing True downloadDir
   case (mMagnet, mDownloadUrl) of
     (Nothing, Nothing) -> pure (Left "no magnet or download url on request")
@@ -184,6 +202,11 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title = do
         Left _   -> writeFallback
   where
     slug = slugify title
+    -- proxied /Indexers/... URLs are resolved in-process; anything else is
+    -- fetched over HTTP directly
+    fetchSource u
+      | Just _ <- parseProxiedPath u = resolveProxied u
+      | otherwise = fetchBytes u
     newMgr = newManager (tlsManagerSettings
       { managerResponseTimeout = responseTimeoutMicro 10000000 })
     tryDeluge = do
@@ -199,7 +222,7 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title = do
                 pure (rpcOk er)
               Nothing -> case mDownloadUrl of
                 Just u -> do
-                  ef <- fetchBytes u
+                  ef <- fetchSource u
                   case ef of
                     Left err -> pure (Left err)
                     Right bytes -> do
@@ -220,7 +243,7 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title = do
           pure (Right ())
         Nothing -> case mDownloadUrl of
           Just u -> do
-            ef <- fetchBytes u
+            ef <- fetchSource u
             case ef of
               Left err -> pure (Left err)
               Right bytes -> do

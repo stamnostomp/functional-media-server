@@ -100,6 +100,9 @@ main = do
   mDelugePw   <- lookupEnv "FMS_DELUGE_PASSWORD"
   mDlDir      <- lookupEnv "FMS_DOWNLOAD_DIR"
   mAutoAppr   <- lookupEnv "FMS_REQUEST_AUTO_APPROVE_GB"
+  mIndexerUrl <- lookupEnv "FMS_INDEXER_URL"
+  mIndexerKey <- lookupEnv "FMS_INDEXER_API_KEY"
+  mIndexerNm  <- lookupEnv "FMS_INDEXER_NAME"
   let -- CLI > env for the value-style options
       portV   = cliInt "port" <|> (mPort >>= readMaybe)
       libV    = cliV "library-path" <|> mLib
@@ -174,6 +177,9 @@ main = do
         , configDelugePassword = T.pack (fromMaybe "" mDelugePw)
         , configDownloadDir = fromMaybe (stateDir </> "downloads") mDlDir
         , configRequestAutoApproveGb = fromMaybe 5 (mAutoAppr >>= readMaybe)  -- default 5 GiB; negative rejected by validateConfig
+        , configIndexerUrl = T.pack <$> mIndexerUrl
+        , configIndexerApiKey = T.pack <$> mIndexerKey
+        , configIndexerName = T.pack <$> mIndexerNm
         }
   cfg0v <- case validateConfig cfg0 of
     Left err -> do

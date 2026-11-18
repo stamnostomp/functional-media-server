@@ -1,0 +1,326 @@
+module FMS.Modules.Indexers.Routes
+  ( indexersRoutes
+  , CreateIndexer (..)
+  , fetchUrlBytes
+  , resolveReleaseBytes
+  ) where
+
+import Control.Concurrent.Async (mapConcurrently)
+import Control.Exception (SomeException, try)
+import Control.Monad (unless, when)
+import Control.Monad.Except (throwError)
+import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
+import Data.List (partition)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Network.HTTP.Client (managerResponseTimeout, responseBody, responseStatus, responseTimeoutMicro)
+import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types (ResponseHeaders, status200, status201, status204, statusCode)
+import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
+import qualified Network.Wai as Wai
+
+import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
+import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Query (queryParams)
+import FMS.Core.Types.User (User (..))
+import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
+import FMS.Modules.Indexers.Monad (MonadIndexers (..), newIndexerId)
+import FMS.Modules.Indexers.Types
+  ( Indexer (..)
+  , base64UrlDecode
+  , base64UrlEncode
+  , defaultCategories
+  , hostMatches
+  , indexerPublicJson
+  , indexerSearchUrl
+  )
+import FMS.Modules.Requests.Push (slugify)
+import FMS.Modules.Trackers.Torznab (jackettSearch)
+import FMS.Modules.Trackers.Types (Release (..))
+
+jsonCT :: ResponseHeaders
+jsonCT = [("Content-Type", "application/json")]
+
+-- | The direct-indexer API (m21). Reads (list/search/download) are open to
+-- any authenticated user but REDACT the ApiKey for non-admins and NEVER
+-- expose raw indexer URLs (downloads are proxied); mutations are
+-- admin-only. Literals before captures (first-match-wins).
+indexersRoutes :: [Route]
+indexersRoutes =
+  [ get    [Lit "Indexers"] listIndexersHandler
+  , post   [Lit "Indexers"] createIndexerHandler
+  , get    [Lit "Indexers", Lit "Search"] searchHandler
+  , get    [Lit "Indexers", Capture "id"] getIndexerHandler
+  , delete [Lit "Indexers", Capture "id"] deleteIndexerHandler
+  , post   [Lit "Indexers", Capture "id", Lit "Enable"] (setEnabledHandler True)
+  , post   [Lit "Indexers", Capture "id", Lit "Disable"] (setEnabledHandler False)
+  , post   [Lit "Indexers", Capture "id", Lit "Test"] testIndexerHandler
+  , get    [Lit "Indexers", Capture "id", Lit "Download"] downloadHandler
+  ]
+
+-- | Body of @POST /Indexers@ (admin).
+data CreateIndexer = CreateIndexer
+  { ciName       :: Text
+  , ciBaseUrl    :: Text
+  , ciApiKey     :: Text
+  , ciCategories :: [Int]
+  , ciType       :: Text
+  , ciEnabled    :: Bool
+  }
+
+instance FromJSON CreateIndexer where
+  parseJSON = withObject "CreateIndexer" $ \o ->
+    CreateIndexer
+      <$> o .:  "Name"
+      <*> o .:  "BaseUrl"
+      <*> o .:? "ApiKey" .!= ""
+      <*> o .:? "Categories" .!= defaultCategories
+      <*> o .:? "Type" .!= "torznab"
+      <*> o .:? "Enabled" .!= True
+
+-- Handlers ------------------------------------------------------------------
+
+isAdminReq :: Wai.Request -> AppM Bool
+isAdminReq req = do
+  mUser <- currentUserFromReq req
+  pure (maybe False isAdmin mUser)
+
+-- | @GET /Indexers@ — any authenticated user; ApiKey redacted (null) for
+-- non-admins.
+listIndexersHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+listIndexersHandler _captures req = do
+  admin <- isAdminReq req
+  is <- listIndexers
+  pure (jsonResponse (map (indexerPublicJson admin) is))
+
+-- | @GET /Indexers/:id@ — same redaction rule; 404 unknown.
+getIndexerHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+getIndexerHandler captures req = do
+  admin <- isAdminReq req
+  iid <- captureId captures
+  m <- getIndexer iid
+  case m of
+    Nothing -> throwError (NotFound ("no indexer with id " <> iid))
+    Just i  -> pure (jsonResponse (indexerPublicJson admin i))
+
+-- | @POST /Indexers@ (admin) — 201 with the created indexer (full JSON,
+-- the creator is admin). BaseUrl must be http(s); Type must be
+-- torznab|newznab.
+createIndexerHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+createIndexerHandler _captures req = do
+  _ <- requireAdmin req
+  body <- liftIO (strictRequestBody req)
+  ci <- case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right v  -> pure v
+  let u = T.toLower (ciBaseUrl ci)
+  unless (T.isPrefixOf "http://" u || T.isPrefixOf "https://" u)
+    (throwError (BadRequest "BaseUrl must start with http:// or https://"))
+  let ty = T.toLower (ciType ci)
+  unless (ty == "torznab" || ty == "newznab")
+    (throwError (BadRequest "Type must be torznab or newznab"))
+  iid <- liftIO newIndexerId
+  let i = Indexer { indexerId = iid
+                  , indexerName = ciName ci
+                  , indexerBaseUrl = ciBaseUrl ci
+                  , indexerApiKey = ciApiKey ci
+                  , indexerCategories = ciCategories ci
+                  , indexerType = ty
+                  , indexerEnabled = ciEnabled ci
+                  , indexerLastTestAt = Nothing
+                  , indexerLastTestOk = Nothing }
+  _ <- insertIndexer i
+  pure (responseLBS status201 jsonCT (encode i))
+
+-- | @DELETE /Indexers/:id@ (admin) — 204, 404 unknown.
+deleteIndexerHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+deleteIndexerHandler captures req = do
+  _ <- requireAdmin req
+  iid <- captureId captures
+  ok <- deleteIndexer iid
+  if not ok
+    then throwError (NotFound ("no indexer with id " <> iid))
+    else pure (responseLBS status204 [] "")
+
+-- | @POST /Indexers/:id/Enable|Disable@ (admin) — 200 with the updated
+-- indexer (full JSON; caller is admin), 404 unknown.
+setEnabledHandler :: Bool -> [(Text, Text)] -> Wai.Request -> AppM Response
+setEnabledHandler enabled captures req = do
+  _ <- requireAdmin req
+  iid <- captureId captures
+  ok <- setIndexerEnabled iid enabled
+  if not ok
+    then throwError (NotFound ("no indexer with id " <> iid))
+    else do
+      m <- getIndexer iid
+      case m of
+        Just i  -> pure (jsonResponse i)
+        Nothing -> throwError (NotFound ("no indexer with id " <> iid))
+
+-- | @GET /Indexers/Search?q=&type=movie|tv&indexerId=@ — any authenticated
+-- user. Queries all enabled indexers (or just @indexerId@ when given) in
+-- parallel, tolerating per-indexer failures (recorded in "Errors").
+-- Results carry a PROXIED DownloadUrl (@/Indexers/<id>/Download?r=..@),
+-- never the raw indexer link (which embeds the apikey).
+searchHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+searchHandler _captures req = do
+  let qparams = queryParams (queryString req)
+  q <- case lookup "q" qparams of
+    Just v | not (T.null (T.strip v)) -> pure v
+    _ -> throwError (BadRequest "missing q parameter")
+  let mType = lookup "type" qparams
+      mIndexerId = lookup "indexerid" qparams
+  allIndexers <- listIndexers
+  selected <- case mIndexerId of
+    Just iid ->
+      case [ i | i <- allIndexers, indexerId i == iid ] of
+        [] -> throwError (NotFound ("no indexer with id " <> iid))
+        (i:_) -> do
+          when (not (indexerEnabled i)) (throwError (BadRequest "indexer is disabled"))
+          pure [i]
+    Nothing -> pure (filter indexerEnabled allIndexers)
+  perIndexer <- liftIO (mapConcurrently
+    (\i -> do
+      eres <- jackettSearch (indexerSearchUrl i mType q)
+      pure (i, eres))
+    selected)
+  let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perIndexer
+      results = [ releaseJson i r
+                | (i, Right rels) <- okPairs, r <- rels ]
+      errors = [ (indexerId i, T.pack msg) | (i, Left msg) <- errPairs ]
+  pure (jsonResponse (object
+    [ "Results" .= results
+    , "Errors"  .= object [ (Key.fromText iid, Aeson.String msg) | (iid, msg) <- errors ]
+    ]))
+
+-- | One search result in API JSON. The raw download URL is replaced by a
+-- proxied path; ReleaseId is its base64url token (decodable only
+-- server-side). No apikey-bearing URL is ever emitted.
+releaseJson :: Indexer -> Release -> Aeson.Value
+releaseJson i r =
+  object (base ++ dl)
+  where
+    base =
+      [ "Title"       .= relTitle r
+      , "SizeBytes"   .= relSizeBytes r
+      , "Seeders"     .= relSeeders r
+      , "IndexerId"   .= indexerId i
+      , "IndexerName" .= indexerName i
+      , "Magnet"      .= relMagnet r
+      ]
+    dl = case relDownloadUrl r of
+      Nothing -> []
+      Just raw ->
+        let rid = base64UrlEncode raw
+        in [ "ReleaseId" .= rid
+           , "DownloadUrl" .= ("/Indexers/" <> indexerId i <> "/Download?r=" <> rid)
+           ]
+
+-- | @GET /Indexers/:id/Download?r=<releaseId>@ — any authenticated user.
+-- Decodes the releaseId back to the raw indexer URL, enforces the SSRF
+-- guard (raw host must match the indexer base host, else 400), fetches
+-- with a 15s timeout and streams the .torrent back as an attachment.
+downloadHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+downloadHandler captures req = do
+  iid <- captureId captures
+  mIdx <- getIndexer iid
+  case mIdx of
+    Nothing -> throwError (NotFound ("no indexer with id " <> iid))
+    Just _ -> pure ()
+  let qparams = queryParams (queryString req)
+  r <- case lookup "r" qparams of
+    Just v | not (T.null v) -> pure v
+    _ -> throwError (BadRequest "missing r parameter")
+  eres <- resolveReleaseBytes iid r
+  case eres of
+    Left err -> throwError (BadRequest (T.pack err))
+    Right (raw, bytes) ->
+      let fname = slugFor raw
+      in pure (responseLBS status200
+            [ ("Content-Type", "application/x-bittorrent")
+            , ("Content-Disposition", BSC.pack ("attachment; filename=" ++ fname ++ ".torrent"))
+            ]
+            (LBS.fromStrict bytes))
+
+-- | Resolve a proxied release token to the raw indexer URL + fetched
+-- .torrent bytes. Shared by the HTTP download route and by the requests
+-- push pipeline (m21 fix: the push must not HTTP-fetch its own auth-gated
+-- proxy URL in strict mode). Returns the raw URL alongside the bytes for
+-- the filename. AppM errors are returned as Left strings so IO callers
+-- (pushRequest) can consume this via runApp.
+resolveReleaseBytes :: Text -> Text -> AppM (Either String (Text, BS.ByteString))
+resolveReleaseBytes iid r = do
+  m <- getIndexer iid
+  case m of
+    Nothing -> pure (Left ("no indexer with id " ++ T.unpack iid))
+    Just idx -> do
+      raw <- case base64UrlDecode r of
+        Just u | T.isPrefixOf "http://" (T.toLower u) || T.isPrefixOf "https://" (T.toLower u) -> pure u
+        _ -> pure ""
+      if T.null raw
+        then pure (Left "invalid r parameter")
+        else if not (hostMatches raw (indexerBaseUrl idx))
+          then pure (Left "download url host does not match indexer base url")
+          else do
+            eres <- liftIO (fetchUrlBytes 15000000 (T.unpack raw))
+            pure (fmap (\b -> (raw, b)) eres)
+
+-- | @POST /Indexers/:id/Test@ (admin) — run a q=test search against the
+-- indexer, persist LastTestAt/LastTestOk, respond {"Ok": bool, "Error"?}. -}
+testIndexerHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+testIndexerHandler captures req = do
+  _ <- requireAdmin req
+  iid <- captureId captures
+  m <- getIndexer iid
+  case m of
+    Nothing -> throwError (NotFound ("no indexer with id " <> iid))
+    Just idx -> do
+      eres <- liftIO (jackettSearch (indexerSearchUrl idx (Just "movie") "test"))
+      let (ok, mErr) = case eres of
+            Right _   -> (True, Nothing)
+            Left msg  -> (False, Just (T.pack msg))
+      _ <- setIndexerTestResult iid ok
+      pure (jsonResponse (object $
+        [ "Ok" .= ok ] ++ [ "Error" .= e | Just e <- [mErr] ]))
+
+-- Internals -----------------------------------------------------------------
+
+captureId :: [(Text, Text)] -> AppM Text
+captureId captures =
+  case lookup "id" captures of
+    Just i  -> pure i
+    Nothing -> throwError (BadRequest "missing id capture")
+
+-- | A safe attachment filename derived from the raw URL's last path
+-- segment (ASCII slug), falling back to "release".
+slugFor :: Text -> String
+slugFor raw =
+  let segs = filter (not . T.null . T.strip) (T.splitOn "/" (T.takeWhile (/= '?') raw))
+      seg = case reverse segs of
+        []    -> ""
+        (x:_) -> x
+      s = slugify seg
+  in if null s || s == "request" then "release" else s
+
+-- | GET a URL with a timeout (microseconds), returning the raw body
+-- bytes on HTTP 200. Used for the proxied .torrent download.
+fetchUrlBytes :: Int -> String -> IO (Either String BS.ByteString)
+fetchUrlBytes micros url = do
+  manager <- newManager (tlsManagerSettings
+    { managerResponseTimeout = responseTimeoutMicro micros })
+  eres <- try (httpLbs (parseRequest_ url) manager)
+  case eres of
+    Left (e :: SomeException) ->
+      pure (Left ("fetch failed: " ++ show e))
+    Right resp
+      | statusCode (responseStatus resp) == 200 ->
+          pure (Right (LBS.toStrict (responseBody resp)))
+      | otherwise ->
+          pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))

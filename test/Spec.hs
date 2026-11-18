@@ -98,10 +98,20 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, parseProxiedPath, slugify)
 import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus, normalizeTitle)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..), Tracker (..), trackerPublicJson)
+import FMS.Modules.Indexers.Types
+  ( Indexer (..)
+  , base64UrlDecode
+  , base64UrlEncode
+  , categoriesParam
+  , hostMatches
+  , hostOf
+  , indexerPublicJson
+  , indexerSearchUrl
+  )
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
@@ -707,6 +717,14 @@ main = do
     ["1", "3"] (map (T.unpack . itemId) (notInAnyCollection (== "2") items4n))
   check "notInAnyCollection with all collected -> []"
     ([] :: [MediaItem]) (notInAnyCollection (const True) items4n)
+
+  -- parseProxiedPath (m21 fix: push resolves proxied indexer URLs in-process)
+  check "parseProxiedPath parses /Indexers/:id/Download?r="
+    (Just ("abc", "rid123")) (parseProxiedPath "/Indexers/abc/Download?r=rid123")
+  check "parseProxiedPath rejects non-proxied and malformed paths"
+    [Nothing, Nothing, Nothing, Nothing]
+    (map parseProxiedPath
+      [ "http://x/y", "/Indexers/abc/Download", "/Indexers//Download?r=z", "/Indexers/abc/Download?r=" ])
 
   -- Blurhash encoder (FMS.Core.Blurhash): base83 roundtrip, output
   -- shape, and attach helpers.
@@ -2707,6 +2725,9 @@ main = do
       , configDelugePassword = ""
       , configDownloadDir = "/tmp/fms-test-downloads"
       , configRequestAutoApproveGb = 5
+      , configIndexerUrl = Nothing
+      , configIndexerApiKey = Nothing
+      , configIndexerName = Nothing
       } "7" 2)
 
   -- Milestone 2d (filesystem watching): eventsPending debounce predicate
@@ -2838,6 +2859,9 @@ main = do
       , configDelugePassword = ""
       , configDownloadDir = "/tmp/fms-test-downloads"
       , configRequestAutoApproveGb = 5
+      , configIndexerUrl = Nothing
+      , configIndexerApiKey = Nothing
+      , configIndexerName = Nothing
         }
       badPort p = cfg1d { configPort = p }
       isLeft' :: Either a b -> Bool
@@ -3619,4 +3643,48 @@ main = do
   check "deluge RPC bodies: id"
     [ case dlb of Aeson.Object o -> KeyMap.lookup (Key.fromText "id") o; _ -> Nothing ]
     [ Just (Aeson.Number 1) ]
+  -- milestone 21: built-in Jackett-style indexers module
+  let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"
+                    , indexerApiKey = "SECRET", indexerCategories = [2000, 5000], indexerType = "torznab"
+                    , indexerEnabled = True, indexerLastTestAt = Nothing, indexerLastTestOk = Nothing }
+      idxNz = idx { indexerType = "newznab" }
+  check "indexerSearchUrl: torznab cats joined, movie/tv narrow, q encoded, newznab drops cat"
+    [ indexerSearchUrl idx Nothing "the matrix"
+    , indexerSearchUrl idx (Just "movie") "the matrix"
+    , indexerSearchUrl idx (Just "tv") "a b"
+    , indexerSearchUrl idxNz Nothing "x" ]
+    [ "http://127.0.0.1:9117/api?t=search&q=the%20matrix&apikey=SECRET&cat=2000,5000"
+    , "http://127.0.0.1:9117/api?t=search&q=the%20matrix&apikey=SECRET&cat=2000"
+    , "http://127.0.0.1:9117/api?t=search&q=a%20b&apikey=SECRET&cat=5000"
+    , "http://127.0.0.1:9117/api?t=search&q=x&apikey=SECRET" ]
+  check "categoriesParam: default, movie/tv narrowing, unknown type keeps all, missing cat falls back"
+    [ categoriesParam [2000,5000] Nothing, categoriesParam [2000,5000] (Just "movie")
+    , categoriesParam [2000,5000] (Just "tv"), categoriesParam [2000,5000] (Just "other")
+    , categoriesParam [5000] (Just "movie") ]
+    [ [2000,5000], [2000], [5000], [2000,5000], [2000] ]
+  check "base64Url roundtrip (incl. empty)"
+    [ base64UrlDecode (base64UrlEncode "http://127.0.0.1:9117/get/1.torrent")
+    , base64UrlDecode (base64UrlEncode "") ]
+    [ Just "http://127.0.0.1:9117/get/1.torrent", Just "" ]
+  check "base64Url alphabet is url-safe (no + / =)"
+    [ T.all (\c -> c /= '+' && c /= '/' && c /= '=') (base64UrlEncode "http://x/y?a=b&c=d+/") ]
+    [ True ]
+  check "base64UrlDecode rejects garbage and bad length"
+    [ base64UrlDecode "!!!", base64UrlDecode "abcde", base64UrlDecode "a" ]
+    [ Nothing, Nothing, Nothing ]
+  check "hostOf: scheme/userinfo/port stripped, lowercased"
+    [ hostOf "http://127.0.0.1:9117/api", hostOf "https://user:pw@Example.COM:8443/x", hostOf "http://evil.com/" ]
+    [ "127.0.0.1", "example.com", "evil.com" ]
+  check "hostMatches: SSRF guard (same host ok incl. port/path diff, other host rejected, empty rejected)"
+    [ hostMatches "http://127.0.0.1:9117/get/1" "http://127.0.0.1:9117"
+    , hostMatches "http://127.0.0.1:9117/get/1" "http://127.0.0.1:9117/api"
+    , hostMatches "http://evil.com/x" "http://127.0.0.1:9117"
+    , hostMatches "" "http://127.0.0.1:9117" ]
+    [ True, True, False, False ]
+  check "Indexer JSON roundtrip"
+    [ Aeson.decode (Aeson.encode idx) == Just idx ] [ True ]
+  check "indexerPublicJson: admin sees ApiKey, non-admin gets Null"
+    [ case indexerPublicJson True idx of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing
+    , case indexerPublicJson False idx of Aeson.Object o -> KeyMap.lookup (Key.fromText "ApiKey") o; _ -> Nothing ]
+    [ Just (Aeson.String "SECRET"), Just Aeson.Null ]
   putStrLn "All tests passed."

@@ -101,6 +101,7 @@ cliUsage = unlines
   , "  (env FMS_DELUGE_URL / FMS_DELUGE_PASSWORD    Deluge web JSON-RPC push target; m20b)"
   , "  (env FMS_DOWNLOAD_DIR                        download dir, also a library folder; default <stateDir>/downloads)"
   , "  (env FMS_REQUEST_AUTO_APPROVE_GB             auto-approve+push requests up to this many GiB; default 5)"
+  , "  (env FMS_INDEXER_URL / FMS_INDEXER_API_KEY / FMS_INDEXER_NAME   direct Torznab/Newznab indexer to seed on first boot; m21)"
   , "  --help                  show this help and exit"
   , "  --version               show name and version and exit"
   , ""

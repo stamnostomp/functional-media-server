@@ -123,6 +123,11 @@ library
                       FMS.Modules.Trackers.Monad
                       FMS.Modules.Trackers.Routes
                       FMS.Modules.Trackers.Torznab
+                      FMS.Modules.Indexers
+                      FMS.Modules.Indexers.Types
+                      FMS.Modules.Indexers.Persistence
+                      FMS.Modules.Indexers.Monad
+                      FMS.Modules.Indexers.Routes
                       FMS.Modules.Webhooks
                       FMS.Modules.Webhooks.Types
                       FMS.Modules.Webhooks.Persistence

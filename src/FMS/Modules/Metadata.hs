@@ -4,18 +4,21 @@ module FMS.Modules.Metadata
   ) where
 
 import FMS.Core.Module (Module (..), Segment (..), delete, get, post)
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState, loadMetadataSettingsIntoState)
 import FMS.Modules.Metadata.Routes
   ( addItemTagsHandler
   , editMetadataHandler
   , genresHandler
+  , getMetadataSettingsHandler
   , listItemTagsHandler
   , metadataHandler
   , personsHandler
+  , postMetadataSettingsHandler
   , refreshMetadataHandler
   , removeItemTagHandler
   , studiosHandler
   , tagsHandler
+  , testMetadataSettingsHandler
   )
 
 -- | The metadata module (docs/roadmap.org milestone 4, docs/todo.org
@@ -29,9 +32,15 @@ metadataModule :: Module
 metadataModule =
   Module
     { moduleName = "metadata"
-    , moduleInit = loadMetadataIntoState
+    , moduleInit = do
+        loadMetadataIntoState
+        loadMetadataSettingsIntoState   -- m35: seed metadata-settings.json from env on first boot
     , moduleRoutes =
-        [ get  [Lit "Genres"] genresHandler
+        [ -- m35: settings routes are literals, before any capture (first-match-wins)
+          get  [Lit "Metadata", Lit "Settings"] getMetadataSettingsHandler
+        , post [Lit "Metadata", Lit "Settings"] postMetadataSettingsHandler
+        , post [Lit "Metadata", Lit "Settings", Lit "Test"] testMetadataSettingsHandler
+        , get  [Lit "Genres"] genresHandler
         , get  [Lit "Studios"] studiosHandler      -- milestone 4h
         , get  [Lit "Persons"] personsHandler      -- milestone 4h
         , get  [Lit "Tags"] tagsHandler            -- milestone 4h

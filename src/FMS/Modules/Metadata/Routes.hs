@@ -21,6 +21,9 @@ module FMS.Modules.Metadata.Routes
   , discoverPopularHandler
   , discoverEntry
   , discoverSection
+  , getMetadataSettingsHandler
+  , postMetadataSettingsHandler
+  , testMetadataSettingsHandler
   ) where
 
 import Control.Monad (forM_)
@@ -41,12 +44,13 @@ import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
+import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
-import FMS.Modules.Metadata.Api.Tmdb (tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchTv)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), refreshAllMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, emptyMetadata, mergeTags, removeTag)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, updateMetadataSettings)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), MetadataSettingsPatch (..), applyManualPatch, emptyMetadata, mergeMetadataSettings, mergeTags, metadataSettingsPublicJson, removeTag)
 
 -- | @GET \/items\/:id\/metadata@ — the library item merged with its
 -- cached metadata:
@@ -281,9 +285,10 @@ remoteSearchHandler _captures req = do
   case lookup "searchterm" qp of
     Just t | not (T.null (T.strip t)) -> do
       cfg <- asks envConfig
-      let apiKey = configTmdbApiKey cfg
+      ms <- getMetadataSettings     -- m35: effective (saved) key
+      let apiKey = msTmdbApiKey ms
       if T.null apiKey
-        then throwError (BadRequest "MEDIA_TMDB_API_KEY not set")
+        then throwError (BadRequest "no TMDB API key set (see /Metadata/Settings)")
         else do
           let isTv  = maybe False (\v -> T.toLower (T.strip v) == "tv") (lookup "type" qp)
               typeName = if isTv then ("Series" :: Text) else "Movie"
@@ -321,13 +326,14 @@ tmdbResultToSearchHit typeName r = object
 discoverPopularHandler :: [(Text, Text)] -> Request -> AppM Response
 discoverPopularHandler _captures _req = do
   cfg <- asks envConfig
-  let apiKey   = configTmdbApiKey cfg
+  ms <- getMetadataSettings       -- m35: effective (saved) key
+  let apiKey   = msTmdbApiKey ms
       base     = configTmdbBaseUrl cfg
       imgBase  = configTmdbImageBaseUrl cfg
       imgSize  = configTmdbImageSize cfg
   if T.null apiKey
     then do
-      logWarn "metadata: MEDIA_TMDB_API_KEY not set; /Discover/Popular returns empty arrays"
+      logWarn "metadata: no TMDB API key set (see /Metadata/Settings); /Discover/Popular returns empty arrays"
       pure (jsonResponse (object ["Movies" .= ([] :: [Value]), "Shows" .= ([] :: [Value])]))
     else do
       em <- liftIO (tmdbPopularMoviesAt base apiKey 1)
@@ -382,3 +388,47 @@ unmatchedHandler _captures req = do
 -- has-metadata predicate (the unmatched queue).
 unmatchedItems :: (Text -> Bool) -> [MediaItem] -> [MediaItem]
 unmatchedItems hasMeta = filter (not . hasMeta . itemId)
+
+-- m35: TMDB metadata settings (GET/POST /Metadata/Settings, Test) ----------
+
+-- | @GET /Metadata/Settings@ — any authenticated user; the TMDB API key is
+-- redacted (null) for non-admins (same pattern as indexer ApiKey).
+getMetadataSettingsHandler :: [(Text, Text)] -> Request -> AppM Response
+getMetadataSettingsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  ms <- getMetadataSettings
+  pure (jsonResponse (metadataSettingsPublicJson (maybe False isAdmin mUser) ms))
+
+-- | @POST /Metadata/Settings@ — admin only (403 otherwise). Accepts any
+-- subset of {TmdbApiKey, FetchImages} (PascalCase or camelCase), merges
+-- into the saved settings, persists, returns the full object (caller is
+-- admin, so unredacted).
+postMetadataSettingsHandler :: [(Text, Text)] -> Request -> AppM Response
+postMetadataSettingsHandler _captures req = do
+  _ <- requireAdmin req
+  body <- liftIO (strictRequestBody req)
+  patch <- case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right v  -> pure v
+  ms <- updateMetadataSettings (\old -> mergeMetadataSettings old patch)
+  pure (jsonResponse (metadataSettingsPublicJson True ms))
+
+-- | @POST /Metadata/Settings/Test@ — admin only. Optionally accepts a
+-- settings body to test (not persisted); otherwise tests the effective
+-- saved key: a TMDB @/search/movie?query=test@ against
+-- 'configTmdbBaseUrl'. Always 200 with @{Ok:true, Results:n}@ or
+-- @{Ok:false, Error}@ — never 500.
+testMetadataSettingsHandler :: [(Text, Text)] -> Request -> AppM Response
+testMetadataSettingsHandler _captures req = do
+  _ <- requireAdmin req
+  body <- liftIO (strictRequestBody req)
+  mPatch <- case eitherDecode body of
+    Left _   -> pure Nothing   -- empty/invalid body: test the saved settings
+    Right (p :: MetadataSettingsPatch) -> pure (Just p)
+  cfg <- asks envConfig
+  base <- getMetadataSettings
+  let ms = maybe base (\p -> mergeMetadataSettings base p) mPatch
+  eres <- liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) "test")
+  pure $ jsonResponse $ case eres of
+    Right results -> object [ "Ok" .= True, "Results" .= length results ]
+    Left err      -> object [ "Ok" .= False, "Error" .= T.pack err ]

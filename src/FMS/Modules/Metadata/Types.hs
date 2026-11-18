@@ -7,16 +7,27 @@ module FMS.Modules.Metadata.Types
   , applyProviderMerge
   , mergeTags
   , removeTag
+  , MetadataSettings (..)
+  , MetadataSettingsPatch (..)
+  , emptyMetadataSettingsPatch
+  , metadataSettingsFromConfig
+  , mergeMetadataSettings
+  , metadataSettingsPublicJson
   ) where
 
-import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), fromJSON, object, withObject, (.!=), (.:?), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), fromJSON, object, withObject, (.!=), (.:), (.:?), (.=))
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.KeyMap (KeyMap)
+import Data.Aeson.Types (Parser)
+import Data.Char (toLower)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
+
+import FMS.Core.Types.Config (Config (..))
 
 -- | Metadata for one library item (docs/roadmap.org milestone 4,
 -- docs/todo.org section 3). All fields are optional because a source (NFO,
@@ -195,3 +206,78 @@ applyProviderMerge old new =
     keepLocked acc f = case getFieldValue old f of
       Just v  -> setFieldFromValue acc f v
       Nothing -> acc
+
+-- m35: runtime TMDB metadata settings -----------------------------------------
+
+-- | Persisted TMDB metadata settings (m35): @stateDir/metadata-settings.json@.
+-- On first boot (file absent) seeded from the env config
+-- ('metadataSettingsFromConfig'); afterwards the saved values win.
+data MetadataSettings = MetadataSettings
+  { msTmdbApiKey  :: !Text   -- ^ TMDB API key (secret; redacted for non-admins)
+  , msFetchImages :: !Bool   -- ^ download artwork during metadata refresh
+  } deriving (Eq, Show)
+
+-- | Persistence JSON: lowercase keys (like metadata.json).
+instance ToJSON MetadataSettings where
+  toJSON s = object
+    [ "tmdbApiKey" .= msTmdbApiKey s
+    , "fetchImages" .= msFetchImages s
+    ]
+
+instance FromJSON MetadataSettings where
+  parseJSON = withObject "MetadataSettings" $ \o ->
+    MetadataSettings
+      <$> o .:? "tmdbApiKey"  .!= ""
+      <*> o .:? "fetchImages" .!= False
+
+-- | A partial update posted to @POST /Metadata/Settings@ (m35).
+data MetadataSettingsPatch = MetadataSettingsPatch
+  { mspTmdbApiKey  :: Maybe Text
+  , mspFetchImages :: Maybe Bool
+  }
+
+emptyMetadataSettingsPatch :: MetadataSettingsPatch
+emptyMetadataSettingsPatch = MetadataSettingsPatch Nothing Nothing
+
+-- | Decode a possibly-present field under its PascalCase OR camelCase key.
+fieldAnyMeta :: FromJSON a => Text -> KeyMap Value -> Parser (Maybe a)
+fieldAnyMeta name o =
+  case KM.lookup (Key.fromText name) o of
+    Just v  -> Just <$> parseJSON v
+    Nothing -> case KM.lookup (Key.fromText (lowerFirst name)) o of
+      Just v  -> Just <$> parseJSON v
+      Nothing -> pure Nothing
+  where
+    lowerFirst t = case T.uncons t of
+      Just (c, rest) -> T.cons (toLower c) rest
+      Nothing        -> t
+
+-- | The settings POST body: any subset of {TmdbApiKey, FetchImages},
+-- PascalCase or camelCase keys.
+instance FromJSON MetadataSettingsPatch where
+  parseJSON = withObject "MetadataSettingsPatch" $ \o ->
+    MetadataSettingsPatch
+      <$> fieldAnyMeta "TmdbApiKey" o
+      <*> fieldAnyMeta "FetchImages" o
+
+-- | Pure: seed the settings from the env-derived config (first boot only).
+metadataSettingsFromConfig :: Config -> MetadataSettings
+metadataSettingsFromConfig cfg = MetadataSettings
+  { msTmdbApiKey = configTmdbApiKey cfg
+  , msFetchImages = configFetchImages cfg
+  }
+
+-- | Pure: apply a partial update (merge).
+mergeMetadataSettings :: MetadataSettings -> MetadataSettingsPatch -> MetadataSettings
+mergeMetadataSettings s p = s
+  { msTmdbApiKey = maybe (msTmdbApiKey s) id (mspTmdbApiKey p)
+  , msFetchImages = maybe (msFetchImages s) id (mspFetchImages p)
+  }
+
+-- | API JSON (PascalCase). SECURITY: 'TmdbApiKey' is redacted to null for
+-- non-admins (same pattern as DelugePassword / indexer ApiKey).
+metadataSettingsPublicJson :: Bool -> MetadataSettings -> Value
+metadataSettingsPublicJson isAdmin s = object
+  [ "TmdbApiKey" .= (if isAdmin then Aeson.String (msTmdbApiKey s) else Aeson.Null)
+  , "FetchImages" .= msFetchImages s
+  ]

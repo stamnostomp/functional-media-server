@@ -14,7 +14,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
 import qualified Data.HashMap.Strict as HM
-import Data.List (isInfixOf, isPrefixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import qualified Data.Set as Set
 import Data.SafeCopy (safeGet, safePut)
@@ -48,7 +48,7 @@ import FMS.Core.Memory (parseProcStatusRss, trimRing)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
-import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
+import FMS.Core.Monad (AppError (..), errorMessage, newAppEnv, runApp, statusForError)
 import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, isOpenRoutePattern, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, openRoutePatterns, parseCorsOrigins, parseTokenHeader, securityHeaders, tokenFromQuery, tokenFromRequestParts)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
@@ -156,8 +156,11 @@ import FMS.Modules.Metadata.Api.Tmdb
   )
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
+import FMS.Modules.Metadata (metadataModule)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
@@ -214,6 +217,12 @@ resetDir :: FilePath -> IO ()
 resetDir dir = do
   exists <- doesDirectoryExist dir
   if exists then removeDirectoryRecursive dir else pure ()
+
+-- | Poll for a file to appear (mock-server readiness), 250 ms steps.
+waitForFile :: FilePath -> Int -> IO Bool
+waitForFile f n = do
+  e <- doesFileExist f
+  if e then pure True else if n <= (0 :: Int) then pure False else threadDelay 250000 >> waitForFile f (n - 1)
 
 -- | m29: stateful mock deluge-web (python3) that answers "Unknown method" to
 -- core.* until web.connect was called with the right host id. Skipped when
@@ -4012,6 +4021,159 @@ main = do
         , "r.DownloadDir" ]
   check "dashboardPageHtml: m27 download-client section markers present"
     (map (\m -> m `isInfixOf` dash) m27Markers) (replicate (length m27Markers) True)
+  -- milestone 35: TMDB metadata settings (persisted, dashboard-editable)
+  let ms0 = MetadataSettings { msTmdbApiKey = "ENVKEY", msFetchImages = False }
+      msPatch1 = MetadataSettingsPatch { mspTmdbApiKey = Just "SAVEDKEY", mspFetchImages = Nothing }
+      msMerged = mergeMetadataSettings ms0 msPatch1
+      msPatchClear = emptyMetadataSettingsPatch { mspFetchImages = Just True }
+      msFieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value
+      msFieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing
+  check "MetadataSettings JSON roundtrip (lowercase persisted keys)"
+    [ Aeson.decode (Aeson.encode ms0) == Just ms0 ] [True]
+  check "metadataSettingsFromConfig: seeds api key from env-derived config"
+    (msTmdbApiKey (metadataSettingsFromConfig cfg27)) ""
+  check "metadataSettingsFromConfig: seeds fetchImages from env-derived config"
+    (msFetchImages (metadataSettingsFromConfig cfg27)) False
+  check "mergeMetadataSettings: partial update keeps untouched key, sets new (key)"
+    (msTmdbApiKey msMerged) "SAVEDKEY"
+  check "mergeMetadataSettings: partial update keeps untouched key, sets new (images)"
+    (msFetchImages msMerged) False
+  check "mergeMetadataSettings: empty patch is identity"
+    (mergeMetadataSettings ms0 emptyMetadataSettingsPatch == ms0) True
+  check "mergeMetadataSettings: patch sets fetchImages"
+    (msFetchImages (mergeMetadataSettings ms0 msPatchClear)) True
+  check "metadataSettingsPublicJson: admin sees key, non-admin gets Null"
+    [ msFieldOf "TmdbApiKey" (metadataSettingsPublicJson True ms0)
+    , msFieldOf "TmdbApiKey" (metadataSettingsPublicJson False ms0)
+    , msFieldOf "FetchImages" (metadataSettingsPublicJson False ms0) ]
+    [ Just (Aeson.String "ENVKEY"), Just Aeson.Null, Just (Aeson.Bool False) ]
+  case Aeson.decode (LBSC.pack "{\"TmdbApiKey\":\"K\",\"fetchImages\":true}") of
+    Just p -> do
+      check "MetadataSettingsPatch FromJSON: PascalCase key accepted" (mspTmdbApiKey p) (Just "K")
+      check "MetadataSettingsPatch FromJSON: camelCase flag accepted" (mspFetchImages p) (Just True)
+    Nothing -> check "MetadataSettingsPatch FromJSON: PascalCase + camelCase, subset" False True
+  check "metadataModule routes: literal Settings routes beat captures (first-match-wins)"
+    [ fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["Metadata", "Settings"])
+    , fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "POST" ["Metadata", "Settings"])
+    , fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "POST" ["Metadata", "Settings", "Test"])
+    , fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["metadata", "settings"])
+    , fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["items", "1", "metadata"]) ]
+    [ Just [Lit "Metadata", Lit "Settings"], Just [Lit "Metadata", Lit "Settings"]
+    , Just [Lit "Metadata", Lit "Settings", Lit "Test"], Just [Lit "Metadata", Lit "Settings"]
+    , Just [Lit "items", Capture "id", Lit "metadata"] ]
+  let m35dir = "/tmp/fms-m35-state"
+  resetDir m35dir
+  let cfg35 = cfg27 { configStateDir = m35dir, configTmdbApiKey = "ENVKEY", configFetchImages = False }
+  env35 <- newAppEnv cfg35
+  rSeed <- runApp env35 (loadMetadataSettingsIntoState >> getMetadataSettings)
+  seedFile <- doesFileExist (m35dir </> "metadata-settings.json")
+  check "m35 settings: first boot seeds key from env config"
+    (either (const "<err>") msTmdbApiKey rSeed) "ENVKEY"
+  check "m35 settings: first boot seeds fetchImages from env config"
+    (either (const False) msFetchImages rSeed) False
+  check "m35 settings: first boot writes the settings file" seedFile True
+  rUpd <- runApp env35 (updateMetadataSettings (\s -> s { msTmdbApiKey = "SAVEDKEY", msFetchImages = True }) >> getMetadataSettings)
+  check "m35 settings: update persists and returns the saved key"
+    (either (const "<err>") msTmdbApiKey rUpd) "SAVEDKEY"
+  check "m35 settings: update persists and returns the saved fetchImages"
+    (either (const False) msFetchImages rUpd) True
+  env35b <- newAppEnv (cfg35 { configTmdbApiKey = "OTHERENV" })
+  rReload <- runApp env35b (loadMetadataSettingsIntoState >> getMetadataSettings)
+  check "m35 settings: saved file wins over env on restart"
+    [ either (const "<err>") msTmdbApiKey rReload ] [ "SAVEDKEY" ]
+  let m35Markers =
+        [ "Metadata (TMDB)", "id='metasec'", "id='metacfg'", "id='metastatus'"
+        , "id=\"tmdb-api-key\"", "id=\"fetch-images\"", "api('/Metadata/Settings')"
+        , "/Metadata/Settings/Test", "saveMeta", "testMeta", "renderMeta", "META_LOADED"
+        , "refreshMetaLib", "TEST OK", "Refresh library metadata" ]
+  check "dashboardPageHtml: m35 metadata settings section markers present"
+    (map (\m -> m `isInfixOf` dash) m35Markers) (replicate (length m35Markers) True)
+  -- m35 live-ish: mock TMDB proving the SAVED key drives refreshFromTmdb +
+  -- fetchAndStoreTmdbImages (guarded: nix build sandbox has no python3)
+  mPy35 <- findExecutable "python3"
+  case mPy35 of
+    Nothing -> putStrLn "PASS: m35 mock-tmdb IO tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m35mock = "/tmp/fms-m35-mock"
+          m35log = m35mock ++ "/calls.log"
+          m35mockSrc = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "from urllib.parse import urlparse, parse_qs"
+            , "port = int(sys.argv[1]); log = sys.argv[2]"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def _send(self, code, body, ctype='application/json'):"
+            , "        b = body.encode() if isinstance(body, str) else body"
+            , "        self.send_response(code)"
+            , "        self.send_header('Content-Type', ctype)"
+            , "        self.send_header('Content-Length', str(len(b)))"
+            , "        self.end_headers()"
+            , "        self.wfile.write(b)"
+            , "    def do_GET(self):"
+            , "        u = urlparse(self.path); q = parse_qs(u.query)"
+            , "        key = q.get('api_key', [''])[0]"
+            , "        with open(log, 'a') as f:"
+            , "            f.write(u.path + '?api_key=' + key + chr(10))"
+            , "        if key != 'SAVEDKEY' and u.path.startswith('/3/'):"
+            , "            return self._send(401, '{\"status_message\":\"bad key\"}')"
+            , "        if u.path == '/3/search/movie':"
+            , "            return self._send(200, json.dumps({'results': [{'id': 42, 'title': 'Test Movie', 'release_date': '2020-01-01', 'overview': 'o', 'vote_average': 7.5, 'poster_path': '/p.jpg'}]}))"
+            , "        if u.path == '/3/movie/42/images':"
+            , "            return self._send(200, json.dumps({'posters': [{'file_path': '/p.jpg'}], 'backdrops': [{'file_path': '/b.jpg'}], 'logos': []}))"
+            , "        if u.path == '/img/w500/p.jpg':"
+            , "            return self._send(200, 'POSTERBYTES', 'image/jpeg')"
+            , "        if u.path == '/img/w500/b.jpg':"
+            , "            return self._send(200, 'BACKDROPBYTES', 'image/jpeg')"
+            , "        return self._send(404, '{}')"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+      resetDir m35mock
+      createDirectoryIfMissing True m35mock
+      writeFile (m35mock ++ "/mock.py") m35mockSrc
+      let m35item = MediaItem
+            { itemId = "1", itemTitle = "Test Movie", itemPath = "/x.mp4"
+            , itemSize = 1, itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1"
+            , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+            , itemExtraType = Nothing, itemVersions = [] }
+          cfg35m = cfg35 { configTmdbBaseUrl = "http://127.0.0.1:8930/3"
+                         , configTmdbImageBaseUrl = "http://127.0.0.1:8930/img"
+                         , configTmdbImageSize = "w500" }
+      bracket
+        (createProcess (proc "python3" [m35mock ++ "/mock.py", "8930", m35log]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          rok <- waitForFile (m35log ++ ".ready") 40
+          if not rok
+            then putStrLn "PASS: m35 mock-tmdb IO tests skipped (mock did not start)"
+            else do
+              envM <- newAppEnv cfg35m
+              rMeta <- runApp envM $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                _ <- updateMetadataSettings (\s -> s { msTmdbApiKey = "SAVEDKEY", msFetchImages = True })
+                refreshFromTmdb "1" m35item
+              rGet <- runApp envM (getMetadata "1")
+              let mMeta = either (const Nothing) id rGet
+              check "m35 refreshFromTmdb uses the SAVED key against the mock (source tmdb)"
+                (fmap metaSource mMeta) (Just "tmdb")
+              check "m35 refreshFromTmdb uses the SAVED key against the mock (title)"
+                (fmap metaTitle mMeta) (Just (Just "Test Movie"))
+              imgP <- doesFileExist (m35dir </> "images" </> "1" </> "Primary.jpg")
+              imgB <- doesFileExist (m35dir </> "images" </> "1" </> "Backdrop.jpg")
+              check "m35 fetchAndStoreTmdbImages stored poster+backdrop (saved fetchImages=true)"
+                [ imgP, imgB ] [ True, True ]
+              mockCalls <- readFile m35log
+              let callLines = lines mockCalls
+                  apiLines = filter ("/3/" `isPrefixOf`) callLines
+              check "m35 mock: every TMDB API call used the SAVED key"
+                (all (\l -> "api_key=SAVEDKEY" `isSuffixOf` l) apiLines) True
+              check "m35 mock: env key never leaked to the mock"
+                (any ("ENVKEY" `isInfixOf`) callLines) False
+              check "m35 mock: image CDN was hit for poster+backdrop"
+                (length (filter ("/img/" `isPrefixOf`) callLines)) 2)
+
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"
                     , indexerApiKey = "SECRET", indexerCategories = [2000, 5000], indexerType = "torznab"

@@ -4,6 +4,12 @@ module FMS.Modules.Metadata.Monad
   , metadataFilePath
   , loadMetadataIntoState
   , refreshAllMetadata
+  , metadataSettingsStateKey
+  , metadataSettingsFilePath
+  , loadMetadataSettingsIntoState
+  , getMetadataSettings
+  , updateMetadataSettings
+  , refreshFromTmdb
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
@@ -29,8 +35,8 @@ import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
 import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
-import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyProviderMerge, emptyMetadata)
+import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), applyProviderMerge, emptyMetadata, metadataSettingsFromConfig)
 
 -- | Namespaced key under which the metadata module stashes its
 -- @TVar (HashMap Text MediaMetadata)@ in the typed registry
@@ -41,6 +47,61 @@ metadataStateKey = "metadata.cache"
 -- | Where the metadata map is persisted: @stateDir/metadata.json@.
 metadataFilePath :: Config -> FilePath
 metadataFilePath cfg = configStateDir cfg </> "metadata.json"
+
+-- | m35: namespaced key for the TMDB settings TVar.
+metadataSettingsStateKey :: Text
+metadataSettingsStateKey = "metadata.settings"
+
+-- | Where the TMDB settings are persisted: @stateDir/metadata-settings.json@.
+metadataSettingsFilePath :: Config -> FilePath
+metadataSettingsFilePath cfg = configStateDir cfg </> "metadata-settings.json"
+
+-- | m35: load the persisted @metadata-settings.json@; when absent (first
+-- boot) seed from the env-derived config and save. When present, the saved
+-- values win (effective settings).
+loadMetadataSettingsIntoState :: AppM ()
+loadMetadataSettingsIntoState = do
+  cfg <- asks envConfig
+  liftIO (createDirectoryIfMissing True (configStateDir cfg))
+  let path = metadataSettingsFilePath cfg
+  mSaved <- liftIO (loadMetadataSettings path)
+  s <- case mSaved of
+    Just saved -> pure saved
+    Nothing    -> do
+      let seeded = metadataSettingsFromConfig cfg
+      liftIO (saveMetadataSettings path seeded)
+      pure seeded
+  tv <- liftIO (newTVarIO s)
+  putState metadataSettingsStateKey tv
+
+-- | m35: the effective (saved, else env-seeded) TMDB settings.
+getMetadataSettings :: AppM MetadataSettings
+getMetadataSettings = do
+  m <- getState metadataSettingsStateKey
+  case m of
+    Just tv -> liftIO (readTVarIO tv)
+    Nothing -> do
+      cfg <- asks envConfig
+      let s = metadataSettingsFromConfig cfg
+      tv <- liftIO (newTVarIO s)
+      putState metadataSettingsStateKey tv
+      pure s
+
+-- | m35: apply an update to the settings TVar AND persist to
+-- @stateDir/metadata-settings.json@.
+updateMetadataSettings :: (MetadataSettings -> MetadataSettings) -> AppM MetadataSettings
+updateMetadataSettings f = do
+  cfg <- asks envConfig
+  s0 <- getMetadataSettings
+  m <- getState metadataSettingsStateKey
+  case m of
+    Nothing -> pure s0
+    Just tv -> do
+      updated <- liftIO $ atomically $ do
+        modifyTVar' tv f
+        readTVar tv
+      liftIO (saveMetadataSettings (metadataSettingsFilePath cfg) updated)
+      pure updated
 
 -- | Capability for reading and refreshing item metadata
 -- (docs/roadmap.org milestone 4, docs/todo.org section 3). Handlers in
@@ -182,7 +243,8 @@ readTvShowNfo nfoPath = do
 refreshFromTmdb :: Text -> MediaItem -> AppM (Maybe MediaMetadata)
 refreshFromTmdb itemIdent item = do
   cfg <- asks envConfig
-  let apiKey = configTmdbApiKey cfg
+  ms <- getMetadataSettings          -- m35: effective (saved) settings
+  let apiKey = msTmdbApiKey ms
   if T.null apiKey
     then pure Nothing
     else do
@@ -203,7 +265,7 @@ refreshFromTmdb itemIdent item = do
           -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /
           -- backdrops / logo into the item image store, but never overwrite
           -- an already stored (user-uploaded) image of that type.
-          when (configFetchImages cfg) $
+          when (msFetchImages ms) $   -- m35: effective fetch-images flag
             fetchAndStoreTmdbImages cfg itemIdent (itemType item) (tmdbId top)
           pure (Just merged)
 
@@ -216,7 +278,8 @@ refreshFromTmdb itemIdent item = do
 -- timeout.
 fetchAndStoreTmdbImages :: Config -> Text -> Text -> Int -> AppM ()
 fetchAndStoreTmdbImages cfg itemIdent itemTy tmdbIdNum = do
-  let apiKey = configTmdbApiKey cfg
+  ms <- getMetadataSettings          -- m35: effective (saved) settings
+  let apiKey = msTmdbApiKey ms
   if T.null apiKey
     then pure ()
     else do

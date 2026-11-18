@@ -223,6 +223,41 @@ check_eq "sessions-is-list" True "$(jget "isinstance(d, list)")"
 code="$(req GET /System/Info "" "$TOKEN")"
 check_code "system-info-auth-200" 200 "$code"
 
+# --- m35 metadata settings: auth matrix --------------------------------------
+code="$(req GET /Metadata/Settings)"
+check_code "meta-settings-unauth-401" 401 "$code"
+
+code="$(req GET /Metadata/Settings "" "$TOKEN")"
+check_code "meta-settings-admin-200" 200 "$code"
+check_eq "meta-settings-admin-has-key-field" True "$(jget "'TmdbApiKey' in d")"
+
+code="$(req POST /Metadata/Settings '{"tmdbApiKey":"it-key","fetchImages":true}' "$TOKEN")"
+check_code "meta-settings-post-admin-200" 200 "$code"
+check_eq "meta-settings-post-echoes-key" "it-key" "$(jget "d.get('TmdbApiKey','')")"
+
+code="$(req POST /Metadata/Settings/Test "" "$TOKEN")"
+check_code "meta-settings-test-admin-200" 200 "$code"
+check_eq "meta-settings-test-has-Ok" True "$(jget "'Ok' in d")"
+
+code="$(req POST /Users '{"Name":"it-user","Password":"it-user-pass"}' "$TOKEN")"
+check_code "create-nonadmin-user-201" 201 "$code"
+code="$(req POST /Users/AuthenticateByName '{"Username":"it-user","Pw":"it-user-pass"}')"
+check_code "nonadmin-auth-200" 200 "$code"
+UTOKEN="$(jget "d.get('AccessToken','')")"
+
+code="$(req GET /Metadata/Settings "" "$UTOKEN")"
+check_code "meta-settings-user-200" 200 "$code"
+check_eq "meta-settings-nonadmin-key-redacted" True "$(jget "d.get('TmdbApiKey') is None")"
+
+code="$(req POST /Metadata/Settings '{"tmdbApiKey":"x"}' "$UTOKEN")"
+check_code "meta-settings-post-nonadmin-403" 403 "$code"
+
+code="$(req POST /Metadata/Settings/Test "" "$UTOKEN")"
+check_code "meta-settings-test-nonadmin-403" 403 "$code"
+
+code="$(req POST /Metadata/Settings '{"tmdbApiKey":""}' )"
+check_code "meta-settings-post-unauth-401" 401 "$code"
+
 # --- summary -----------------------------------------------------------------
 echo "INTEGRATION: $PASS passed, $FAIL failed"
 if [[ "$FAIL" -gt 0 ]]; then exit 1; fi

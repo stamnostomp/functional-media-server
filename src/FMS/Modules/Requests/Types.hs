@@ -1,17 +1,30 @@
 module FMS.Modules.Requests.Types
   ( Request (..)
   , RequestStatus (..)
+  , RequestSettings (..)
+  , SettingsPatch (..)
+  , emptySettingsPatch
+  , settingsPublicJson
+  , mergeSettings
+  , settingsFromConfig
+  , effectiveAutoApproveGb
   , normalizeTitle
   , isActiveStatus
   , duplicateOf
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (Parser)
 import Data.Char (isAlphaNum, toLower)
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
+
+import FMS.Core.Types.Config (Config (..))
 
 -- | Lifecycle of a media request (m20a; Radarr/Sonarr-style queue).
 -- JSON string values are the constructor names: "Pending", "Approved",
@@ -70,6 +83,7 @@ data Request = Request
   , reqUpdatedAt    :: !UTCTime
   , reqApprovedBy   :: !(Maybe Text)
   , reqError        :: !(Maybe Text)
+  , reqDownloadDir  :: !(Maybe Text)   -- ^ m27: download location stamped at creation from the effective settings
   } deriving (Eq, Show)
 
 -- | API JSON (PascalCase keys, the API convention).
@@ -93,6 +107,7 @@ instance ToJSON Request where
     , "UpdatedAt"    .= reqUpdatedAt r
     , "ApprovedBy"   .= reqApprovedBy r
     , "Error"        .= reqError r
+    , "DownloadDir"  .= reqDownloadDir r
     ]
 
 instance FromJSON Request where
@@ -116,6 +131,7 @@ instance FromJSON Request where
       <*> o .:  "UpdatedAt"
       <*> o .:? "ApprovedBy"
       <*> o .:? "Error"
+      <*> o .:? "DownloadDir"
 
 -- | Pure: normalize a title for duplicate detection -- lowercase, keep
 -- alphanumerics only (everything else becomes a space), collapse and
@@ -141,3 +157,106 @@ duplicateOf :: Text -> [Request] -> Maybe Request
 duplicateOf title reqs =
   find (\r -> isActiveStatus (reqStatus r)
               && normalizeTitle (reqTitle r) == normalizeTitle title) reqs
+
+-- m27: runtime-configurable request/download-client settings -----------------
+
+-- | Persisted download-client settings (m27): @stateDir/requests-settings.json@.
+-- On first boot (file absent) the values are seeded from the env config
+-- ('settingsFromConfig'); afterwards the saved values win.
+data RequestSettings = RequestSettings
+  { rsDelugeUrl       :: !Text          -- ^ Deluge web JSON-RPC endpoint
+  , rsDelugePassword  :: !Text          -- ^ secret; redacted for non-admins
+  , rsDownloadDir     :: !Text          -- ^ download dir pushed to Deluge + auto-import folder
+  , rsAutoApproveGb   :: !(Maybe Double) -- ^ auto-approve threshold in GiB (Nothing = use env/default)
+  } deriving (Eq, Show)
+
+-- | Persistence JSON: lowercase keys (like requests.json).
+instance ToJSON RequestSettings where
+  toJSON s = object
+    [ "delugeUrl" .= rsDelugeUrl s
+    , "delugePassword" .= rsDelugePassword s
+    , "downloadDir" .= rsDownloadDir s
+    , "autoApproveGb" .= rsAutoApproveGb s
+    ]
+
+instance FromJSON RequestSettings where
+  parseJSON = withObject "RequestSettings" $ \o ->
+    RequestSettings
+      <$> o .:? "delugeUrl"      .!= ""
+      <*> o .:? "delugePassword" .!= ""
+      <*> o .:? "downloadDir"    .!= ""
+      <*> o .:? "autoApproveGb"
+
+-- | A partial update posted to @POST /Requests/Settings@. Outer 'Nothing'
+-- = leave unchanged; for 'spAutoApproveGb' the inner 'Nothing' clears the
+-- override (back to the env/default threshold).
+data SettingsPatch = SettingsPatch
+  { spDelugeUrl      :: Maybe Text
+  , spDelugePassword :: Maybe Text
+  , spDownloadDir    :: Maybe Text
+  , spAutoApproveGb  :: Maybe (Maybe Double)
+  }
+
+emptySettingsPatch :: SettingsPatch
+emptySettingsPatch = SettingsPatch Nothing Nothing Nothing Nothing
+
+-- | Decode a possibly-present field under its PascalCase OR camelCase key
+-- (m27 settings POST accepts both shapes).
+fieldAny :: FromJSON a => Text -> KeyMap.KeyMap Value -> Parser (Maybe a)
+fieldAny name o =
+  case KeyMap.lookup (Key.fromText name) o of
+    Just v  -> Just <$> parseJSON v
+    Nothing -> case KeyMap.lookup (Key.fromText (lowerFirst name)) o of
+      Just v  -> Just <$> parseJSON v
+      Nothing -> pure Nothing
+  where
+    lowerFirst t = case T.uncons t of
+      Just (c, rest) -> T.cons (toLower c) rest
+      Nothing        -> t
+
+-- | The settings POST body: any subset of the fields, PascalCase or
+-- camelCase keys. @AutoApproveGb@ may be a number or null (clears the
+-- override, back to env/default).
+instance FromJSON SettingsPatch where
+  parseJSON = withObject "SettingsPatch" $ \o ->
+    SettingsPatch
+      <$> fieldAny "DelugeUrl" o
+      <*> fieldAny "DelugePassword" o
+      <*> fieldAny "DownloadDir" o
+      <*> fieldAny "AutoApproveGb" o
+
+-- | Pure: seed the settings from the env-derived config (first boot only).
+settingsFromConfig :: Config -> RequestSettings
+settingsFromConfig cfg = RequestSettings
+  { rsDelugeUrl = configDelugeUrl cfg
+  , rsDelugePassword = configDelugePassword cfg
+  , rsDownloadDir = T.pack (configDownloadDir cfg)
+  , rsAutoApproveGb = Just (fromIntegral (configRequestAutoApproveGb cfg))
+  }
+
+-- | Pure: apply a partial update (merge).
+mergeSettings :: RequestSettings -> SettingsPatch -> RequestSettings
+mergeSettings s p = s
+  { rsDelugeUrl = maybe (rsDelugeUrl s) id (spDelugeUrl p)
+  , rsDelugePassword = maybe (rsDelugePassword s) id (spDelugePassword p)
+  , rsDownloadDir = maybe (rsDownloadDir s) id (spDownloadDir p)
+  , rsAutoApproveGb = case spAutoApproveGb p of
+      Nothing -> rsAutoApproveGb s
+      Just m  -> m
+  }
+
+-- | Pure: effective auto-approve threshold in GiB -- the saved override
+-- wins, else the env/default from the config.
+effectiveAutoApproveGb :: Config -> RequestSettings -> Double
+effectiveAutoApproveGb cfg s =
+  maybe (fromIntegral (configRequestAutoApproveGb cfg)) id (rsAutoApproveGb s)
+
+-- | API JSON (PascalCase). SECURITY: 'DelugePassword' is redacted to null
+-- for non-admins (same pattern as indexer ApiKey/Cookie).
+settingsPublicJson :: Bool -> RequestSettings -> Value
+settingsPublicJson isAdmin s = object
+  [ "DelugeUrl" .= rsDelugeUrl s
+  , "DelugePassword" .= (if isAdmin then Aeson.String (rsDelugePassword s) else Aeson.Null)
+  , "DownloadDir" .= rsDownloadDir s
+  , "AutoApproveGb" .= rsAutoApproveGb s
+  ]

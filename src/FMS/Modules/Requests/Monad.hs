@@ -4,6 +4,11 @@ module FMS.Modules.Requests.Monad
   , requestsFilePath
   , loadRequestsIntoState
   , newRequestId
+  , requestSettingsStateKey
+  , requestSettingsFilePath
+  , loadRequestSettingsIntoState
+  , getRequestSettings
+  , updateRequestSettings
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
@@ -22,8 +27,8 @@ import System.Random (newStdGen, randomRs)
 
 import FMS.Core.Monad (AppM, envConfig, getState, putState)
 import FMS.Core.Types.Config (Config (..))
-import FMS.Modules.Requests.Persistence (loadRequests, saveRequests)
-import FMS.Modules.Requests.Types (Request (..), RequestStatus (..))
+import FMS.Modules.Requests.Persistence (loadRequestSettings, loadRequests, saveRequestSettings, saveRequests)
+import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), settingsFromConfig)
 
 -- | Namespaced key under which the requests module stashes its
 -- @TVar (HashMap Text Request)@ in the typed registry.
@@ -33,6 +38,14 @@ requestsStateKey = "requests.map"
 -- | Where the request map is persisted: @stateDir/requests.json@.
 requestsFilePath :: Config -> FilePath
 requestsFilePath cfg = configStateDir cfg </> "requests.json"
+
+-- | Namespaced key for the download-client settings TVar (m27).
+requestSettingsStateKey :: Text
+requestSettingsStateKey = "requests.settings"
+
+-- | Where the settings are persisted: @stateDir/requests-settings.json@.
+requestSettingsFilePath :: Config -> FilePath
+requestSettingsFilePath cfg = configStateDir cfg </> "requests-settings.json"
 
 -- | Capability for the media-request queue (m20a CRUD core).
 class Monad m => MonadRequests m where
@@ -100,6 +113,55 @@ loadRequestsIntoState = do
   loaded <- liftIO (loadRequests (requestsFilePath cfg))
   tv <- liftIO (newTVarIO loaded)
   putState requestsStateKey tv
+
+-- | m27: module init for the download-client settings. When
+-- @requests-settings.json@ is absent (first boot) the settings are seeded
+-- from the env-derived config and saved; when present, the saved values
+-- win (effective settings).
+loadRequestSettingsIntoState :: AppM ()
+loadRequestSettingsIntoState = do
+  cfg <- asks envConfig
+  liftIO (createDirectoryIfMissing True (configStateDir cfg))
+  let path = requestSettingsFilePath cfg
+  mSaved <- liftIO (loadRequestSettings path)
+  s <- case mSaved of
+    Just saved -> pure saved
+    Nothing    -> do
+      let seeded = settingsFromConfig cfg
+      liftIO (saveRequestSettings path seeded)
+      pure seeded
+  tv <- liftIO (newTVarIO s)
+  putState requestSettingsStateKey tv
+
+-- | m27: the effective (saved, else env-seeded) download-client settings.
+getRequestSettings :: AppM RequestSettings
+getRequestSettings = do
+  m <- getState requestSettingsStateKey
+  case m of
+    Just tv -> liftIO (readTVarIO tv)
+    Nothing -> do
+      -- lazy init (moduleInit normally ran): seed from env config
+      cfg <- asks envConfig
+      let s = settingsFromConfig cfg
+      tv <- liftIO (newTVarIO s)
+      putState requestSettingsStateKey tv
+      pure s
+
+-- | m27: apply an update to the settings TVar AND persist to
+-- @stateDir/requests-settings.json@.
+updateRequestSettings :: (RequestSettings -> RequestSettings) -> AppM RequestSettings
+updateRequestSettings f = do
+  cfg <- asks envConfig
+  s0 <- getRequestSettings
+  m <- getState requestSettingsStateKey
+  case m of
+    Nothing -> pure s0
+    Just tv -> do
+      updated <- liftIO $ atomically $ do
+        modifyTVar' tv f
+        readTVar tv
+      liftIO (saveRequestSettings (requestSettingsFilePath cfg) updated)
+      pure updated
 
 -- Internals ---------------------------------------------------------------
 

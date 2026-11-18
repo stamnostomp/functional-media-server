@@ -21,13 +21,12 @@ import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, envConfig, runApp)
 import FMS.Modules.Indexers (resolveReleaseBytes)
 import FMS.Core.Query (queryParams)
-import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (isMediaFile)
-import FMS.Modules.Requests.Monad (MonadRequests (..), newRequestId)
-import FMS.Modules.Requests.Push (autoApproveSize, matchesDownload, parseProxiedPath, pushRequest)
-import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus)
+import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
+import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, matchesDownload, parseProxiedPath, pushRequest)
+import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
 jsonCT :: ResponseHeaders
 jsonCT = [("Content-Type", "application/json")]
@@ -40,6 +39,11 @@ requestsRoutes :: [Route]
 requestsRoutes =
   [ get    [Lit "Requests"] listRequestsHandler
   , post   [Lit "Requests"] createRequestHandler
+    -- m27: settings routes are literals, registered BEFORE the id capture
+    -- (first-match-wins, so /Requests/Settings is not swallowed by :id)
+  , get    [Lit "Requests", Lit "Settings"] getSettingsHandler
+  , post   [Lit "Requests", Lit "Settings"] postSettingsHandler
+  , post   [Lit "Requests", Lit "Settings", Lit "Test"] testSettingsHandler
   , get    [Lit "Requests", Capture "id"] getRequestHandler
   , post   [Lit "Requests", Capture "id", Lit "Approve"] (transitionHandler Approved)
   , post   [Lit "Requests", Capture "id", Lit "Reject"] (transitionHandler Rejected)
@@ -83,8 +87,8 @@ instance FromJSON CreateRequest where
 -- the download dir. Persists the status change.
 markImported :: [Request] -> AppM ()
 markImported reqs = do
-  cfg <- asks envConfig
-  let dir = configDownloadDir cfg
+  s <- getRequestSettings   -- m27: effective (saved) download dir
+  let dir = T.unpack (rsDownloadDir s)
   efiles <- liftIO (try (listDirectory dir) :: IO (Either SomeException [FilePath]))
   let files = filter isMediaFile (either (const []) id efiles)
   mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesDownload (reqTitle r) files ]
@@ -157,10 +161,11 @@ createRequestHandler _captures req = do
       now <- liftIO getCurrentTime
       rid <- liftIO newRequestId
       cfg <- asks envConfig
+      s <- getRequestSettings   -- m27: effective settings (saved win over env)
       let (uid, uname) = case mUser of
             Just u  -> (userId u, userName u)
             Nothing -> ("", "")
-          threshold = fromIntegral (configRequestAutoApproveGb cfg) * 1024 * 1024 * 1024 :: Integer
+          threshold = round (effectiveAutoApproveGb cfg s * 1024 * 1024 * 1024) :: Integer
           autoAppr = autoApproveSize (crSizeBytes cr) threshold
           r0 = Request
             { reqId = rid
@@ -181,6 +186,7 @@ createRequestHandler _captures req = do
             , reqUpdatedAt = now
             , reqApprovedBy = Nothing
             , reqError = Nothing
+            , reqDownloadDir = Just (rsDownloadDir s)   -- m27: stamp the location
             }
       _ <- insertRequest r0
       -- m20b: auto-approved requests are pushed immediately
@@ -237,8 +243,8 @@ deleteRequestHandler captures req = do
 -- and advance the status to Downloading, or Failed with the error text.
 pushAndAdvance :: Request -> AppM Request
 pushAndAdvance r = do
-  cfg <- asks envConfig
   env <- ask
+  s <- getRequestSettings   -- m27: effective (saved) deluge url/password/dir
   -- m21 fix: same-origin /Indexers/:id/Download?r=... URLs are resolved
   -- in-process (the HTTP route is auth-gated, so a loopback fetch would
   -- 401 under FMS_REQUIRE_AUTH=true)
@@ -247,8 +253,8 @@ pushAndAdvance r = do
         Just (iid, rid) -> do
           ea <- runApp env (resolveReleaseBytes iid rid)
           pure (either (Left . show) (either Left (Right . snd)) ea)
-  eres <- liftIO (pushRequest (configDelugeUrl cfg) (configDelugePassword cfg)
-                (configDownloadDir cfg) (reqMagnet r) (reqDownloadUrl r) (reqTitle r)
+  eres <- liftIO (pushRequest (rsDelugeUrl s) (rsDelugePassword s)
+                (T.unpack (rsDownloadDir s)) (reqMagnet r) (reqDownloadUrl r) (reqTitle r)
                 resolveProxied)
   case eres of
     Right () -> do
@@ -257,6 +263,56 @@ pushAndAdvance r = do
     Left err -> do
       m <- setRequestFailed (reqId r) (T.pack err)
       pure (maybe r id m)
+
+-- m27: download-client settings ---------------------------------------------
+
+-- | @GET /Requests/Settings@ — any authenticated user; the Deluge password
+-- is redacted (null) for non-admins (same pattern as indexer ApiKey).
+getSettingsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+getSettingsHandler _captures req = do
+  mUser <- currentUserFromReq req
+  s <- getRequestSettings
+  pure (jsonResponse (settingsPublicJson (maybe False isAdmin mUser) s))
+
+-- | @POST /Requests/Settings@ — admin only (403 otherwise). Accepts any
+-- subset of {DelugeUrl, DelugePassword, DownloadDir, AutoApproveGb}
+-- (PascalCase or camelCase), merges into the saved settings, persists, and
+-- returns the full settings object (the caller is admin, so unredacted).
+postSettingsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+postSettingsHandler _captures req = do
+  _ <- requireAdmin req
+  body <- liftIO (strictRequestBody req)
+  patch <- case eitherDecode body of
+    Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+    Right v  -> pure v
+  -- validation: urls must be http(s), auto-approve must be >= 0
+  case spDelugeUrl patch of
+    Just u | not ("http://" `T.isPrefixOf` u || "https://" `T.isPrefixOf` u) ->
+      throwError (BadRequest "DelugeUrl must be an http(s) URL")
+    _ -> pure ()
+  case spAutoApproveGb patch of
+    Just (Just gb) | gb < 0 -> throwError (BadRequest "AutoApproveGb must be >= 0")
+    _ -> pure ()
+  s <- updateRequestSettings (\old -> mergeSettings old patch)
+  pure (jsonResponse (settingsPublicJson True s))
+
+-- | @POST /Requests/Settings/Test@ — admin only. Optionally accepts a
+-- settings body to test (not persisted); otherwise tests the effective
+-- saved settings with a bare Deluge auth.login. Always 200 with
+-- {ok:true} or {ok:false, error} — never 500.
+testSettingsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
+testSettingsHandler _captures req = do
+  _ <- requireAdmin req
+  body <- liftIO (strictRequestBody req)
+  mPatch <- case eitherDecode body of
+    Left _   -> pure Nothing   -- empty/invalid body: test the saved settings
+    Right (p :: SettingsPatch) -> pure (Just p)
+  base <- getRequestSettings
+  let s = maybe base (\p -> mergeSettings base p) mPatch
+  eres <- liftIO (delugeLoginTest (rsDelugeUrl s) (rsDelugePassword s))
+  pure $ jsonResponse $ case eres of
+    Right () -> object [ "Ok" .= True ]
+    Left err -> object [ "Ok" .= False, "Error" .= T.pack err ]
 
 captureId :: [(Text, Text)] -> AppM Text
 captureId captures =

@@ -99,7 +99,8 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, parseProxiedPath, slugify)
-import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus, normalizeTitle)
+import FMS.Modules.Requests.Routes (requestsRoutes)
+import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders, Tracker (..), trackerPublicJson)
 import FMS.Modules.Indexers.Types
@@ -3621,7 +3622,7 @@ main = do
         , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
         , reqSourceUrl = Nothing, reqMagnet = Nothing, reqDownloadUrl = Nothing
         , reqCreatedAt = reqT0, reqUpdatedAt = reqT0
-        , reqApprovedBy = Nothing, reqError = Nothing }
+        , reqApprovedBy = Nothing, reqError = Nothing, reqDownloadDir = Nothing }
       reqT0 = UTCTime (fromGregorian 2026 1 1) 0
   check "duplicateOf: active match, rejected ignored, other title no"
     [ fmap reqId (duplicateOf "The Matrix" [mkReq "the matrix" Pending])
@@ -3635,9 +3636,9 @@ main = do
         _ -> []
   check "Request ToJSON: PascalCase API keys"
     reqKeys
-    [ "ApprovedBy", "CreatedAt", "DownloadUrl", "Error", "Id", "Magnet", "MediaType"
-    , "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl", "Status"
-    , "Title", "UpdatedAt", "UserId", "UserName", "Year" ]
+    [ "ApprovedBy", "CreatedAt", "DownloadDir", "DownloadUrl", "Error", "Id", "Magnet"
+    , "MediaType", "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
+    , "Status", "Title", "UpdatedAt", "UserId", "UserName", "Year" ]
   check "Request JSON roundtrip (PascalCase)"
     [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
     [True]
@@ -3721,6 +3722,104 @@ main = do
   check "deluge RPC bodies: id"
     [ case dlb of Aeson.Object o -> KeyMap.lookup (Key.fromText "id") o; _ -> Nothing ]
     [ Just (Aeson.Number 1) ]
+  -- milestone 27: runtime download-client settings + DownloadDir stamp
+  let rs0 = RequestSettings { rsDelugeUrl = "http://127.0.0.1:8112/json"
+                            , rsDelugePassword = "deluge", rsDownloadDir = "/dl"
+                            , rsAutoApproveGb = Just 5 }
+      cfg27 = Config
+        { configLibraryPath = "/lib", configPort = 8080, configStateDir = "/st"
+        , configRequireAuth = False, configServerName = "fms"
+        , configFollowSymlinks = False, configTmdbApiKey = ""
+        , configRateLimit = Nothing, configRateLimitAuth = Just 10, configLogLevel = "info"
+        , configCorsOrigins = ["*"], configSecurityHeaders = True
+        , configPasswordMinLength = 0, configMaxBitrate = 0, configHwAccel = "none"
+        , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
+        , configTlsCert = Nothing, configTlsKey = Nothing
+        , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+        , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
+        , configUiDir = Nothing
+        , configJackettUrl = Nothing
+        , configJackettApiKey = Nothing
+        , configDelugeUrl = "http://env:8112/json"
+        , configDelugePassword = "envpw"
+        , configDownloadDir = "/env-dl"
+        , configRequestAutoApproveGb = 7
+        , configIndexerUrl = Nothing
+        , configIndexerApiKey = Nothing
+        , configIndexerName = Nothing
+        }
+      seeded = settingsFromConfig cfg27
+      patch1 = SettingsPatch { spDelugeUrl = Just "http://saved:8112/json"
+                             , spDelugePassword = Nothing, spDownloadDir = Just "/saved-dl"
+                             , spAutoApproveGb = Just (Just 2.5) }
+      mergedS = mergeSettings rs0 patch1
+      patchClear = emptySettingsPatch { spAutoApproveGb = Just Nothing }
+      fieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value
+      fieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing
+  check "RequestSettings JSON roundtrip (lowercase persisted keys)"
+    [ Aeson.decode (Aeson.encode rs0) == Just rs0 ]
+    [True]
+  check "settingsFromConfig: seeds from env-derived config"
+    [ rsDelugeUrl seeded, rsDelugePassword seeded, rsDownloadDir seeded ]
+    [ "http://env:8112/json", "envpw", "/env-dl" ]
+  check "settingsFromConfig: seeds auto-approve GB from env config"
+    [ rsAutoApproveGb seeded ] [ Just 7 ]
+  check "mergeSettings: partial update keeps untouched password, sets others"
+    [ rsDelugeUrl mergedS, rsDelugePassword mergedS, rsDownloadDir mergedS ]
+    [ "http://saved:8112/json", "deluge", "/saved-dl" ]
+  check "mergeSettings: AutoApproveGb override applied"
+    [ rsAutoApproveGb mergedS ] [ Just 2.5 ]
+  check "mergeSettings: empty patch is identity"
+    [ mergeSettings rs0 emptySettingsPatch == rs0 ] [ True ]
+  check "mergeSettings: AutoApproveGb null clears the override"
+    [ rsAutoApproveGb (mergeSettings rs0 patchClear) ] [ Nothing ]
+  check "effectiveAutoApproveGb: saved override wins, else env config"
+    [ effectiveAutoApproveGb cfg27 rs0, effectiveAutoApproveGb cfg27 rs0 { rsAutoApproveGb = Nothing } ]
+    [ 5, 7 ]
+  check "settingsPublicJson: admin sees password, non-admin gets Null (redaction)"
+    [ fieldOf "DelugePassword" (settingsPublicJson True rs0)
+    , fieldOf "DelugePassword" (settingsPublicJson False rs0)
+    , fieldOf "DelugeUrl" (settingsPublicJson False rs0)
+    , fieldOf "AutoApproveGb" (settingsPublicJson False rs0) ]
+    [ Just (Aeson.String "deluge"), Just Aeson.Null
+    , Just (Aeson.String "http://127.0.0.1:8112/json"), Just (Aeson.Number 5) ]
+  check "SettingsPatch FromJSON: PascalCase + camelCase keys, subset only"
+    (case Aeson.decode (LBSC.pack "{\"DelugeUrl\":\"http://a/\",\"downloadDir\":\"/x\"}") of
+        Just p  -> [spDelugeUrl p, spDownloadDir p, spDelugePassword p]
+        Nothing -> [Nothing, Nothing, Nothing])
+    [Just "http://a/", Just "/x", Nothing]
+  check "SettingsPatch FromJSON: autoApproveGb null clears, number sets (PascalCase)"
+    [ case Aeson.decode (LBSC.pack "{\"autoApproveGb\":null}") of
+        Just p  -> spAutoApproveGb p
+        Nothing -> Nothing
+    , case Aeson.decode (LBSC.pack "{\"AutoApproveGb\":3.5}") of
+        Just p  -> spAutoApproveGb p
+        Nothing -> Nothing ]
+    [Just Nothing, Just (Just 3.5)]
+  let stamped = (mkReq "Dune" Pending) { reqDownloadDir = Just "/dl" }
+  check "Request DownloadDir in API JSON: absent -> null, stamped -> value (m27)"
+    [ fieldOf "DownloadDir" (Aeson.toJSON (mkReq "Dune" Pending))
+    , fieldOf "DownloadDir" (Aeson.toJSON stamped) ]
+    [ Just Aeson.Null, Just (Aeson.String "/dl") ]
+  check "Request JSON roundtrip keeps DownloadDir stamp (m27)"
+    [ Aeson.decode (Aeson.encode stamped) == Just stamped ] [ True ]
+  check "requestsRoutes: literal Settings routes beat the :id capture (first-match-wins)"
+    [ fmap (routePattern . fst) (firstMatch requestsRoutes "GET" ["Requests", "Settings"])
+    , fmap (routePattern . fst) (firstMatch requestsRoutes "POST" ["Requests", "Settings"])
+    , fmap (routePattern . fst) (firstMatch requestsRoutes "POST" ["Requests", "Settings", "Test"])
+    , fmap (routePattern . fst) (firstMatch requestsRoutes "GET" ["Requests", "abc123"]) ]
+    [ Just [Lit "Requests", Lit "Settings"], Just [Lit "Requests", Lit "Settings"]
+    , Just [Lit "Requests", Lit "Settings", Lit "Test"], Just [Lit "Requests", Capture "id"] ]
+  -- m27 dashboard markers
+  let m27Markers =
+        [ "Download client", "id='dlsec'", "id='dlcfg'", "id='dlstatus'"
+        , "id=\"deluge-url\"", "id=\"deluge-password\"", "id=\"download-dir\"", "id=\"auto-approve-gb\""
+        , "api('/Requests/Settings')", "/Requests/Settings/Test", "saveDl", "testDl"
+        , "renderDlcfg", "DL_LOADED", "TEST OK", "SAVED", "admin only"
+        , "r.DownloadDir" ]
+  check "dashboardPageHtml: m27 download-client section markers present"
+    (map (\m -> m `isInfixOf` dash) m27Markers) (replicate (length m27Markers) True)
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"
                     , indexerApiKey = "SECRET", indexerCategories = [2000, 5000], indexerType = "torznab"

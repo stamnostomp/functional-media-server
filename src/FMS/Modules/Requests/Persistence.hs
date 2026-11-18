@@ -3,6 +3,8 @@ module FMS.Modules.Requests.Persistence
   , saveRequests
   , requestToPersist
   , requestFromPersist
+  , loadRequestSettings
+  , saveRequestSettings
   ) where
 
 import Control.Exception (SomeException, try)
@@ -16,7 +18,7 @@ import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import System.Directory (doesFileExist)
 
-import FMS.Modules.Requests.Types (Request (..))
+import FMS.Modules.Requests.Types (Request (..), RequestSettings (..))
 
 -- | Load the persisted request store (@stateDir/requests.json@): a bare
 -- JSON object mapping request id -> request (LOWERCASE persisted keys).
@@ -66,6 +68,7 @@ requestToPersist r = object
   , "updatedAt"     .= reqUpdatedAt r
   , "approvedBy"    .= reqApprovedBy r
   , "error"         .= reqError r
+  , "downloadDir"   .= reqDownloadDir r   -- m27
   ]
 
 requestFromPersist :: Aeson.Value -> Parser Request
@@ -89,3 +92,22 @@ requestFromPersist = withObject "request" $ \o ->
     <*> o .:  "updatedAt"
     <*> o .:? "approvedBy"
     <*> o .:? "error"
+    <*> o .:? "downloadDir"   -- m27; old files without it load fine
+
+-- | Load the persisted download-client settings
+-- (@stateDir/requests-settings.json@). A missing or unreadable file yields
+-- 'Nothing' so the caller can seed from the env config (m27).
+loadRequestSettings :: FilePath -> IO (Maybe RequestSettings)
+loadRequestSettings path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure Nothing
+    else do
+      result <- try (BS.readFile path) :: IO (Either SomeException BS.ByteString)
+      pure $ case result of
+        Left _      -> Nothing
+        Right bytes -> Aeson.decode (LBS.fromStrict bytes)
+
+-- | Persist the download-client settings (lowercase keys, strict write).
+saveRequestSettings :: FilePath -> RequestSettings -> IO ()
+saveRequestSettings path s = LBS.writeFile path (Aeson.encode s)

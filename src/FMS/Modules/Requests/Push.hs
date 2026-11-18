@@ -7,6 +7,7 @@ module FMS.Modules.Requests.Push
   , delugeAddMagnetBody
   , delugeAddFileBody
   , pushRequest
+  , delugeLoginTest
   , parseProxiedPath
   ) where
 
@@ -160,6 +161,24 @@ fetchBytes url = do
     Right resp
       | statusCode (responseStatus resp) == 200 -> pure (Right (LBS.toStrict (responseBody resp)))
       | otherwise -> pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))
+
+-- | m27: test a Deluge connection with a bare @auth.login@ (used by
+-- @POST /Requests/Settings/Test@). Never throws; Left carries the error.
+delugeLoginTest :: Text -> Text -> IO (Either String ())
+delugeLoginTest delugeUrl delugePassword = do
+  eres <- try $ do
+    manager <- newManager (tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro 10000000 })
+    eLogin <- postJson manager delugeUrl Nothing (delugeLoginBody delugePassword 1)
+    case eLogin of
+      Left err -> pure (Left err)
+      Right (body, _) ->
+        case rpcResult body of
+          Just res | rpcResultOk (Just res) -> pure (Right ())
+          _ -> pure (Left "deluge auth.login failed")
+  case eres of
+    Left (e :: SomeException) -> pure (Left ("http failed: " ++ show e))
+    Right r                   -> pure r
 
 -- | Parse a same-origin proxied indexer download path
 -- @/Indexers/<id>/Download?r=<releaseId>@ into @(indexerId, releaseId)@.

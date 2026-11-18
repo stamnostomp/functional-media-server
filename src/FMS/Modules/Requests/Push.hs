@@ -4,6 +4,10 @@ module FMS.Modules.Requests.Push
   , matchesDownload
   , base64Encode
   , delugeLoginBody
+  , delugeGetHostsBody
+  , delugeConnectBody
+  , delugeConnectedBody
+  , getFirstHostId
   , delugeAddMagnetBody
   , delugeAddFileBody
   , pushRequest
@@ -21,6 +25,7 @@ import Data.Aeson (Value, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Vector as V
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -97,6 +102,41 @@ delugeLoginBody :: Text -> Int -> Value
 delugeLoginBody password rid =
   object [ "method" .= ("auth.login" :: Text), "params" .= [Aeson.String password], "id" .= rid ]
 
+-- | Pure: Deluge web.get_hosts body (m29: needed to find the daemon host id
+-- for web.connect -- after auth.login a deluge-web session is NOT yet
+-- connected to the daemon).
+delugeGetHostsBody :: Int -> Value
+delugeGetHostsBody rid =
+  object [ "method" .= ("web.get_hosts" :: Text), "params" .= ([] :: [Text]), "id" .= rid ]
+
+-- | Pure: Deluge web.connect body -- connect the web session to the daemon
+-- host with the given id (m29).
+delugeConnectBody :: Text -> Int -> Value
+delugeConnectBody hostId rid =
+  object [ "method" .= ("web.connect" :: Text), "params" .= [Aeson.String hostId], "id" .= rid ]
+
+-- | Pure: Deluge web.connected body -- is the web session connected to a
+-- daemon? (m29, used by the settings Test endpoint).
+delugeConnectedBody :: Int -> Value
+delugeConnectedBody rid =
+  object [ "method" .= ("web.connected" :: Text), "params" .= ([] :: [Text]), "id" .= rid ]
+
+-- | Pure: extract the FIRST host id from a web.get_hosts JSON-RPC response
+-- (result is an array of [id, host, port, user, password] arrays). The id
+-- is a string in deluge-web.
+getFirstHostId :: LBS.ByteString -> Maybe String
+getFirstHostId b = do
+  v <- Aeson.decode b
+  case v of
+    Aeson.Object o -> case KeyMap.lookup (Key.fromText "result") o of
+      Just (Aeson.Array arr) -> case V.toList arr of
+        (Aeson.Array host : _) -> case V.toList host of
+          (Aeson.String hid : _) -> Just (T.unpack hid)
+          _ -> Nothing
+        _ -> Nothing
+      _ -> Nothing
+    _ -> Nothing
+
 -- | Pure: Deluge core.add_torrent_magnet body.
 delugeAddMagnetBody :: Text -> FilePath -> Int -> Value
 delugeAddMagnetBody magnet downloadDir rid =
@@ -162,8 +202,11 @@ fetchBytes url = do
       | statusCode (responseStatus resp) == 200 -> pure (Right (LBS.toStrict (responseBody resp)))
       | otherwise -> pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))
 
--- | m27: test a Deluge connection with a bare @auth.login@ (used by
--- @POST /Requests/Settings/Test@). Never throws; Left carries the error.
+-- | m29: test a Deluge connection the way the push path uses it:
+-- @auth.login@, then @web.get_hosts@ + @web.connect@ with the first host id
+-- (deluge-web sessions are NOT connected to the daemon after login alone),
+-- then @web.connected@ must report @true@. Used by
+-- @POST /Requests/Settings/Test@. Never throws; Left carries the error.
 delugeLoginTest :: Text -> Text -> IO (Either String ())
 delugeLoginTest delugeUrl delugePassword = do
   eres <- try $ do
@@ -172,9 +215,24 @@ delugeLoginTest delugeUrl delugePassword = do
     eLogin <- postJson manager delugeUrl Nothing (delugeLoginBody delugePassword 1)
     case eLogin of
       Left err -> pure (Left err)
-      Right (body, _) ->
+      Right (body, cookie) ->
         case rpcResult body of
-          Just res | rpcResultOk (Just res) -> pure (Right ())
+          Just res | rpcResultOk (Just res) -> do
+            eHosts <- postJson manager delugeUrl cookie (delugeGetHostsBody 2)
+            case eHosts of
+              Left err -> pure (Left err)
+              Right (hbody, _) ->
+                case getFirstHostId hbody of
+                  Nothing -> pure (Left "deluge web.get_hosts returned no hosts")
+                  Just hid -> do
+                    _ <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+                    eConn <- postJson manager delugeUrl cookie (delugeConnectedBody 4)
+                    case eConn of
+                      Left err -> pure (Left err)
+                      Right (cbody, _) ->
+                        case rpcResult cbody of
+                          Just (Aeson.Bool True) -> pure (Right ())
+                          _ -> pure (Left "deluge web.connected is false after web.connect")
           _ -> pure (Left "deluge auth.login failed")
   case eres of
     Left (e :: SomeException) -> pure (Left ("http failed: " ++ show e))
@@ -235,21 +293,42 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title reso
         Left err -> pure (Left err)
         Right (body, cookie) ->
           case rpcResult body of
-            Just res | rpcResultOk (Just res) -> case mMagnet of
-              Just mag -> do
-                er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir 2)
-                pure (rpcOk er)
-              Nothing -> case mDownloadUrl of
-                Just u -> do
-                  ef <- fetchSource u
-                  case ef of
-                    Left err -> pure (Left err)
-                    Right bytes -> do
-                      er <- postJson manager delugeUrl cookie
-                        (delugeAddFileBody (T.pack (slug <.> "torrent")) (base64Encode bytes) downloadDir 2)
-                      pure (rpcOk er)
-                Nothing -> pure (Left "no magnet")
+            Just res | rpcResultOk (Just res) -> do
+              -- m29: after auth.login a deluge-web session is NOT connected
+              -- to the daemon (web.connected = false), so core.* would
+              -- answer "Unknown method". Connect to the first web.get_hosts
+              -- host first; if that fails, still attempt the add as before.
+              _ <- tryConnect manager cookie  -- best-effort: ignore the result
+              case mMagnet of
+                Just mag -> do
+                  er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir 4)
+                  pure (rpcOk er)
+                Nothing -> case mDownloadUrl of
+                  Just u -> do
+                    ef <- fetchSource u
+                    case ef of
+                      Left err -> pure (Left err)
+                      Right bytes -> do
+                        er <- postJson manager delugeUrl cookie
+                          (delugeAddFileBody (T.pack (slug <.> "torrent")) (base64Encode bytes) downloadDir 4)
+                        pure (rpcOk er)
+                  Nothing -> pure (Left "no magnet")
             _ -> pure (Left "deluge auth.login failed")
+    -- web.get_hosts (id 2) -> web.connect (id 3) with the first host id;
+    -- returns True when a connect call succeeded, False otherwise. Never
+    -- throws.
+    tryConnect manager cookie = do
+      eHosts <- postJson manager delugeUrl cookie (delugeGetHostsBody 2)
+      case eHosts of
+        Left _ -> pure False
+        Right (hbody, _) ->
+          case getFirstHostId hbody of
+            Nothing -> pure False
+            Just hid -> do
+              eConn <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+              case eConn of
+                Left _ -> pure False
+                Right (cbody, _) -> pure (rpcResultOk (rpcResult cbody))
     rpcOk (Left err) = Left err
     rpcOk (Right (body, _)) =
       if rpcResultOk (rpcResult body)

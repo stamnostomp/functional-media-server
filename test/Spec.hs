@@ -1,6 +1,8 @@
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.QSemN (newQSemN, signalQSemN)
+import Control.Exception (bracket)
 import Control.Monad (when)
 import Data.Acid (closeAcidState, openLocalStateFrom, query, update)
 import Data.Acid.Local (createCheckpointAndClose)
@@ -32,6 +34,7 @@ import System.Directory
   , setModificationTime
   )
 import System.Posix.Files (createSymbolicLink)
+import System.Process (createProcess, proc, terminateProcess, waitForProcess)
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
 
@@ -98,7 +101,7 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, parseProxiedPath, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, getFirstHostId, matchesDownload, parseProxiedPath, pushRequest, slugify)
 import FMS.Modules.Requests.Routes (requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
@@ -210,6 +213,109 @@ resetDir :: FilePath -> IO ()
 resetDir dir = do
   exists <- doesDirectoryExist dir
   if exists then removeDirectoryRecursive dir else pure ()
+
+-- | m29: stateful mock deluge-web (python3) that answers "Unknown method" to
+-- core.* until web.connect was called with the right host id. Skipped when
+-- python3 is not in PATH (e.g. the nix build sandbox).
+m29MockTests :: IO ()
+m29MockTests = do
+  -- m29 stateful mock: core.* answers "Unknown method" until web.connect
+  let m29dir = "/tmp/fms-m29-mock"
+      mockPy = m29dir </> "mock.py"
+      logA = m29dir </> "calls-a.log"
+      logB = m29dir </> "calls-b.log"
+      mockDelugeSrc = unlines
+        [ "import json, sys"
+        , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+        , "port = int(sys.argv[1]); log = sys.argv[2]; mode = sys.argv[3] if len(sys.argv) > 3 else ''"
+        , "state = {'connected': False}"
+        , "class H(BaseHTTPRequestHandler):"
+        , "    def log_message(self, *a): pass"
+        , "    def do_POST(self):"
+        , "        n = int(self.headers.get('Content-Length', 0))"
+        , "        req = json.loads(self.rfile.read(n))"
+        , "        m = req.get('method', '')"
+        , "        with open(log, 'a') as f:"
+        , "            f.write(json.dumps({'method': m, 'params': req.get('params')}) + chr(10))"
+        , "        res = None; err = None; cookie = False"
+        , "        if m == 'auth.login':"
+        , "            if req.get('params', [''])[0] == 'deluge':"
+        , "                res = 'sess123'; cookie = True"
+        , "            else:"
+        , "                res = False; err = 'bad password'"
+        , "        elif m == 'web.get_hosts':"
+        , "            res = [] if mode == 'nohosts' else [['host-1', '127.0.0.1', 58846, 'localclient', '']]"
+        , "        elif m == 'web.connect':"
+        , "            if mode != 'noconnect' and req.get('params', [''])[0] == 'host-1':"
+        , "                state['connected'] = True; res = True"
+        , "            else:"
+        , "                res = False"
+        , "        elif m == 'web.connected':"
+        , "            res = state['connected']"
+        , "        elif m.startswith('core.'):"
+        , "            if state['connected']:"
+        , "                res = 'torrent-id-1'"
+        , "            else:"
+        , "                res = None; err = 'Unknown method'"
+        , "        payload = json.dumps({'result': res, 'error': err, 'id': req.get('id')}).encode()"
+        , "        self.send_response(200)"
+        , "        self.send_header('Content-Type', 'application/json')"
+        , "        if cookie:"
+        , "            self.send_header('Set-Cookie', 'deluge_web_session=sess123; Path=/')"
+        , "        self.send_header('Content-Length', str(len(payload)))"
+        , "        self.end_headers()"
+        , "        self.wfile.write(payload)"
+        , "srv = HTTPServer(('127.0.0.1', port), H)"
+        , "open(log + '.ready', 'w').write('ok')"
+        , "srv.serve_forever()" ]
+      waitReady f n = do
+        e <- doesFileExist f
+        if e then pure True else if n <= (0 :: Int) then pure False else threadDelay 250000 >> waitReady f (n - 1)
+      withMock port logPath mode act = bracket
+        (createProcess (proc "python3" [mockPy, show port, logPath, mode]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          re <- doesFileExist (logPath ++ ".ready"); when re (removeFile (logPath ++ ".ready"))
+          logExists <- doesFileExist logPath; when logExists (removeFile logPath)
+          waitReady (logPath ++ ".ready") 40 >>= \ok -> if ok then act else pure Nothing)
+      m29ok = either (const False) (const True) :: Either String () -> Bool
+      logMethod l = case Aeson.decode (LBS.fromStrict (BSC.pack l)) :: Maybe Aeson.Value of
+        Just (Aeson.Object o) -> case KeyMap.lookup (Key.fromText "method") o of
+          Just (Aeson.String m) -> T.unpack m
+          _ -> "?"
+        _ -> "?"
+  resetDir m29dir
+  createDirectoryIfMissing True m29dir
+  writeFile mockPy mockDelugeSrc
+  mPush <- withMock (8912 :: Int) logA "" $ do
+    res <- pushRequest "http://127.0.0.1:8912/json" "deluge" (m29dir </> "dl") (Just "magnet:?xt=urn:btih:m29") Nothing "Test Movie" (\_ -> pure (Left "no proxy"))
+    pure (Just (m29ok res))
+  logATxt <- do e <- doesFileExist logA; if e then readFile logA else pure ""
+  let logAMethods = map logMethod (lines logATxt)
+  check "m29 push: mock saw auth.login -> web.get_hosts -> web.connect -> core.add_torrent_magnet in order"
+    logAMethods ["auth.login", "web.get_hosts", "web.connect", "core.add_torrent_magnet"]
+  check "m29 pushRequest succeeds against the connect-requiring mock" [mPush] [Just True]
+  check "m29 add_torrent_magnet carried download_location" [ (m29dir </> "dl") `isInfixOf` logATxt ] [True]
+  fbA <- doesFileExist (m29dir </> "dl" </> "test-movie.magnet")
+  check "m29 no fallback .magnet written when the push succeeded" [fbA] [False]
+  mTestOk <- withMock (8912 :: Int) logA "" $ do
+    res <- delugeLoginTest "http://127.0.0.1:8912/json" "deluge"
+    pure (Just (m29ok res))
+  check "m29 delugeLoginTest ok when login+connect succeed" [mTestOk] [Just True]
+  mTestBadPw <- withMock (8912 :: Int) logA "" $ do
+    res <- delugeLoginTest "http://127.0.0.1:8912/json" "wrong"
+    pure (Just (m29ok res))
+  check "m29 delugeLoginTest not-ok on bad password" [mTestBadPw] [Just False]
+  mTestNoConn <- withMock (8913 :: Int) logB "noconnect" $ do
+    res <- delugeLoginTest "http://127.0.0.1:8913/json" "deluge"
+    pure (Just (m29ok res))
+  check "m29 delugeLoginTest not-ok when web.connect fails (web.connected false)" [mTestNoConn] [Just False]
+  mPushFb <- withMock (8913 :: Int) logB "noconnect" $ do
+    res <- pushRequest "http://127.0.0.1:8913/json" "deluge" (m29dir </> "dl-b") (Just "magnet:?xt=urn:btih:m29b") Nothing "Other Movie" (\_ -> pure (Left "no proxy"))
+    pure (Just (m29ok res))
+  fbB <- doesFileExist (m29dir </> "dl-b" </> "other-movie.magnet")
+  check "m29 push falls back to the .magnet file when the daemon never connects" [mPushFb, Just fbB] [Just True, Just True]
+
 
 main :: IO ()
 main = do
@@ -3722,6 +3828,23 @@ main = do
   check "deluge RPC bodies: id"
     [ case dlb of Aeson.Object o -> KeyMap.lookup (Key.fromText "id") o; _ -> Nothing ]
     [ Just (Aeson.Number 1) ]
+  -- milestone 29: deluge-web requires web.connect after auth.login
+  check "deluge m29 bodies: web.get_hosts / web.connect / web.connected methods"
+    [ methodOf (delugeGetHostsBody 2), methodOf (delugeConnectBody "host-1" 3), methodOf (delugeConnectedBody 4) ]
+    [ Just (Aeson.String "web.get_hosts"), Just (Aeson.String "web.connect"), Just (Aeson.String "web.connected") ]
+  check "deluge m29 connect body params carry the host id"
+    [ LBSC.unpack (Aeson.encode (paramsOf (delugeConnectBody "host-1" 3))) ]
+    [ "[\"host-1\"]" ]
+  check "getFirstHostId: first host id wins, empty/null/garbage -> Nothing"
+    [ getFirstHostId (LBSC.pack "{\"result\":[[\"host-1\",\"127.0.0.1\",58846,\"u\",\"p\"],[\"host-2\",\"x\",1,\"u\",\"p\"]]}")
+    , getFirstHostId (LBSC.pack "{\"result\":[]}")
+    , getFirstHostId (LBSC.pack "{\"result\":null}")
+    , getFirstHostId (LBSC.pack "not json") ]
+    [ Just "host-1", Nothing, Nothing, Nothing ]
+  mPy <- findExecutable "python3"
+  case mPy of
+    Just _  -> m29MockTests
+    Nothing -> putStrLn "PASS: m29 mock-deluge IO tests skipped (python3 not in PATH)"
   -- milestone 27: runtime download-client settings + DownloadDir stamp
   let rs0 = RequestSettings { rsDelugeUrl = "http://127.0.0.1:8112/json"
                             , rsDelugePassword = "deluge", rsDownloadDir = "/dl"

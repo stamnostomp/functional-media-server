@@ -159,6 +159,7 @@ library
                     , stm
                     , template-haskell
                     , aeson
+                    , vector
                     , acid-state
                     , safecopy
                     , wai

@@ -46,7 +46,7 @@ import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
 import FMS.Core.Monad (AppError (..), errorMessage, statusForError)
-import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, parseCorsOrigins, parseTokenHeader, securityHeaders)
+import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, isOpenRoutePattern, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, openRoutePatterns, parseCorsOrigins, parseTokenHeader, securityHeaders)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
 import FMS.Core.Types.MediaItem (MediaItem (..), MediaItemV0 (..), MediaItemV1 (..), MediaItemV2 (..), MediaItemV3 (..), itemTypeFromMime, migrateMediaItem, migrateMediaItemV1, migrateMediaItemV2, migrateMediaItemV3, simpleItemJson)
@@ -883,6 +883,30 @@ main = do
     [Just [Lit "Dashboard"]] [fmap (routePattern . fst) (firstMatch [rApi, rPage] "GET" ["DASHBOARD"])]
   check "firstMatch: case-variant literal not shadowed by capture (/Items)"
     [Just [Lit "items"]] [fmap (routePattern . fst) (firstMatch [get [Lit "items"] undefined, get [Capture "file"] undefined] "GET" ["Items"])]
+  -- milestone 19d: route-aware open check
+  check "openRoutePatterns is root/web/dashboard/capture"
+    [[], [Lit "web"], [Lit "dashboard"], [Capture "file"]] openRoutePatterns
+  check "isOpenRoutePattern matrix (Lit exact, Capture only matches Capture)"
+    [ isOpenRoutePattern [] []
+    , isOpenRoutePattern [] [Lit "web"]
+    , isOpenRoutePattern [Lit "web"] [Lit "web"]
+    , isOpenRoutePattern [Lit "web"] [Lit "WEB"]
+    , isOpenRoutePattern [Lit "dashboard"] [Lit "dashboard"]
+    , isOpenRoutePattern [Lit "dashboard"] [Lit "Dashboard"]
+    , isOpenRoutePattern [Capture "file"] [Capture "file"]
+    , isOpenRoutePattern [Capture "file"] [Lit "library"]
+    , isOpenRoutePattern [Lit "library"] [Capture "file"]
+    , isOpenRoutePattern [Lit "items"] [Lit "items"]
+    , isOpenRoutePattern [Lit "web", Capture "x"] [Lit "web"]
+    , isOpenRoutePattern [Lit "web"] [Lit "web", Lit "x"]
+    ]
+    [ True, False, True, False, True, False, True, False, False, True, False, False ]
+  check "firstMatch: Lit library beats Capture file for /library (stays protected)"
+    [Just [Lit "library"]]
+    [fmap (routePattern . fst) (firstMatch [get [Lit "library"] undefined, get [Capture "file"] undefined] "GET" ["library"])]
+  check "firstMatch: /elm.js falls through to Capture file (open only with uiDir)"
+    [Just [Capture "file"]]
+    [fmap (routePattern . fst) (firstMatch [get [Lit "library"] undefined, get [Capture "file"] undefined] "GET" ["elm.js"])]
   check "matchSegmentsExact: lit is case-sensitive, capture binds original"
     [ matchSegmentsExact [Lit "dashboard"] ["Dashboard"]
     , matchSegmentsExact [Lit "dashboard"] ["dashboard"]

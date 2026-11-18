@@ -4,8 +4,10 @@ module FMS.Core.Router
   , matchSegments
   , matchSegmentsExact
   , isOpenPath
+  , isOpenRoutePattern
   , openPaths
   , openPathsExact
+  , openRoutePatterns
   , parseTokenHeader
   , tokenFromRequest
   , parseCorsOrigins
@@ -128,9 +130,10 @@ buildApplication env modules req0 respond0 = do
                 -- 'firstMatch' tries an exact-case pass first, so the one
                 -- case-only collision (/dashboard page vs /Dashboard API)
                 -- resolves deterministically.
-                segs   = pathInfo req
+                segs    = pathInfo req
+                matched = firstMatch routes (requestMethod req) segs
                 dispatch =
-                  case firstMatch routes (requestMethod req) segs of
+                  case matched of
                     Nothing -> respond (errorResponse reqId (NotFound "404 Not Found"))
                     Just (route, captures) -> do
                       eres <- runApp env (routeHandler route captures req)
@@ -139,9 +142,27 @@ buildApplication env modules req0 respond0 = do
                           putStrLn ("[ERROR] request " ++ T.unpack reqId ++ ": " ++ show err)
                         Right _ -> pure ()
                       respond (either (errorResponse reqId) id eres)
+                -- milestone 19d: route-aware open check. The matched route's
+                -- pattern is compared against 'openRoutePatterns' so the UI
+                -- itself (/, /web, /dashboard, static files when uiDir is set)
+                -- loads in auth mode. Because 'firstMatch' prefers exact-case
+                -- literal matches, single-segment API paths (/library,
+                -- /healthz, ...) match their Lit routes, NOT the capture, and
+                -- stay protected. The capture pattern is only open when
+                -- configUiDir is set (otherwise it 404s anyway).
+                routeOpen =
+                  case matched of
+                    Nothing -> False
+                    Just (route, _) ->
+                      let pat = routePattern route
+                          uiDirSet = case configUiDir (envConfig env) of
+                            Just _  -> True
+                            Nothing -> False
+                      in any (\op -> isOpenRoutePattern op pat) openRoutePatterns
+                         && (pat /= [Capture "file"] || uiDirSet)
             ereq <- runApp env requireAuthNow
             let requireAuth = either (const (configRequireAuth (envConfig env))) id ereq
-            if requireAuth && not (isOpenPath segs)
+            if requireAuth && not (isOpenPath segs || routeOpen)
               then do
                 eok <- runApp env (tokenIsValid req)
                 if eok == Right True
@@ -264,6 +285,34 @@ isOpenPath :: [Text] -> Bool
 isOpenPath segs =
   segs `elem` openPathsExact
   || normalizeSegments segs `elem` map normalizeSegments openPaths
+
+-- | Milestone 19d: route patterns that are open even when auth is required,
+-- so the UI itself can load in auth mode: the root page, /web, /dashboard
+-- and the single-segment static-file capture (only when 'configUiDir' is
+-- set -- the handler checks that itself; here the pipeline gates on it).
+openRoutePatterns :: [[Segment]]
+openRoutePatterns =
+  [ []
+  , [Lit "web"]
+  , [Lit "dashboard"]
+  , [Capture "file"]
+  ]
+
+-- | Does the open-route pattern (first arg) match the concrete matched
+-- route's pattern (second arg)? Lit segments compare EXACTLY (case
+-- sensitive) and a Capture only matches a Capture: the matched route must
+-- BE one of the open routes ([], [Lit "web"], [Lit "dashboard"],
+-- [Capture "file"]), never merely shape-compatible with them -- otherwise
+-- /Items (matched by its Lit route) would wrongly match the capture
+-- pattern and become open. Lengths must match; [] matches only the root.
+-- Pure, exported for tests.
+isOpenRoutePattern :: [Segment] -> [Segment] -> Bool
+isOpenRoutePattern [] [] = True
+isOpenRoutePattern (Lit l : rest) (Lit s : segs) =
+  l == s && isOpenRoutePattern rest segs
+isOpenRoutePattern (Capture _ : rest) (Capture _ : segs) =
+  isOpenRoutePattern rest segs
+isOpenRoutePattern _ _ = False
 
 -- | Milestone 17a: case-fold path segments (jellyfin-web uses PascalCase
 -- paths like /Items while the routes are registered lowercase).

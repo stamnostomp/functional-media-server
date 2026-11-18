@@ -287,10 +287,13 @@ directPlayContainers =
 directStreamContainers :: [Text]
 directStreamContainers = ["mkv", "avi", "ts", "m2ts", "wmv"]
 
--- | Video codecs the default profile can decode natively.
+-- | Video codecs the default profile can decode natively. m33: browser-
+-- safe only -- h264/vp8/vp9/av1. hevc/mpeg4/mpeg2video are dropped: without
+-- HW HEVC the browser software-decodes and stutters (~10fps on 1080p
+-- x265), and mpeg2/mpeg4 are not browser-decodable at all.
 directPlayVideoCodecs :: [Text]
 directPlayVideoCodecs =
-  ["h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video"]
+  ["h264", "vp8", "vp9", "av1"]
 
 -- | Audio codecs the default profile can decode natively.
 directPlayAudioCodecs :: [Text]

@@ -124,7 +124,7 @@ defaultDeviceProfile = object
       [ object
           [ "Type" .= ("Video" :: Text)
           , "Container" .= ("mp4,m4v,mov,webm,mkv,avi,ts,m2ts,wmv,mp3,m4a,flac,wav,ogg" :: Text)
-          , "VideoCodec" .= ("h264,hevc,vp8,vp9,av1,mpeg4,mpeg2video" :: Text)
+          , "VideoCodec" .= ("h264,vp8,vp9,av1" :: Text)  -- m33: browser-safe only, matches directPlayVideoCodecs
           , "AudioCodec" .= ("aac,mp3,opus,flac,vorbis,pcm_s16le" :: Text)
           ]
       , object

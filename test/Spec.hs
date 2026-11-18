@@ -1564,7 +1564,7 @@ main = do
       sub    c = MediaStream 2 "Subtitle" c Nothing Nothing Nothing Nothing Nothing Nothing False
   check "directPlayable mp4 h264+aac is True"
     True (directPlayable "mp4" [vcodec "h264", acodec "aac"])
-  check "directPlayable mp4 hevc+ac3 is False (ac3 not in the audio list)"
+  check "directPlayable mp4 hevc+ac3 is False (hevc no longer direct-playable, m33)"
     False (directPlayable "mp4" [vcodec "hevc", acodec "ac3"])
   check "directPlayable mkv h264+aac is False (container not direct-play)"
     False (directPlayable "mkv" [vcodec "h264", acodec "aac"])
@@ -1586,6 +1586,21 @@ main = do
     True (directPlayable "webm" [vcodec "vp9", acodec "opus"])
   check "directPlayable mp4 with unknown video codec is False"
     False (directPlayable "mp4" [vcodec "wmv3", acodec "aac"])
+  -- m33: browser-safe default profile (hevc/mpeg4/mpeg2video dropped)
+  check "m33 directPlayable: mp4 hevc -> False, mp4 h264 -> True, webm vp9/opus -> True"
+    [ directPlayable "mp4" [vcodec "hevc", acodec "aac"]
+    , directPlayable "mp4" [vcodec "h264", acodec "aac"]
+    , directPlayable "webm" [vcodec "vp9", acodec "opus"] ]
+    [ False, True, True ]
+  check "m33 directPlayable: mkv h264 False (container), mp4 mpeg4/mpeg2video False (codec)"
+    [ directPlayable "mkv" [vcodec "h264", acodec "aac"]
+    , directPlayable "mp4" [vcodec "mpeg4", acodec "aac"]
+    , directPlayable "mp4" [vcodec "mpeg2video", acodec "aac"] ]
+    [ False, False, False ]
+  check "m33 decidePlayMethod: hevc mp4 -> Transcode, h264 mp4 -> DirectPlay (no bitrate cap)"
+    [ decidePlayMethod (directPlayable "mp4" [vcodec "hevc", acodec "aac"]) Nothing Nothing
+    , decidePlayMethod (directPlayable "mp4" [vcodec "h264", acodec "aac"]) Nothing Nothing ]
+    [ "Transcode", "DirectPlay" ]
 
   -- Milestone 6i: device profile + audio/subtitle stream selection
   -- (docs/todo.org section 6).
@@ -3627,8 +3642,8 @@ main = do
         [ "DirectPlayProfiles" Aeson..= [ Aeson.object
             [ "Type" Aeson..= ("Video" :: T.Text), "Container" Aeson..= ("mp4,mkv" :: T.Text)
             , "VideoCodec" Aeson..= ("h265" :: T.Text) ] ] ]
-  check "deviceProfileAllows: default profile allows mp4/h264 + mkv/hevc, rejects avi/xvid"
-    [True, True, False]
+  check "deviceProfileAllows: default profile allows mp4/h264, rejects mkv/hevc (m33) + avi/xvid"
+    [True, False, False]
     [ deviceProfileAllows defaultDeviceProfile "mp4" "h264"
     , deviceProfileAllows defaultDeviceProfile "mkv" "hevc"
     , deviceProfileAllows defaultDeviceProfile "avi" "xvid" ]

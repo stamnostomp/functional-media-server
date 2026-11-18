@@ -244,10 +244,8 @@ pushAndAdvance r = do
       m <- setRequestStatus (reqId r) Downloading Nothing
       pure (maybe r id m)
     Left err -> do
-      m <- setRequestStatus (reqId r) Failed Nothing
-      case m of
-        Just r' -> pure r' { reqError = Just (T.pack err) }
-        Nothing -> pure r
+      m <- setRequestFailed (reqId r) (T.pack err)
+      pure (maybe r id m)
 
 captureId :: [(Text, Text)] -> AppM Text
 captureId captures =

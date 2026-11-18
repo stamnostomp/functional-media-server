@@ -3487,6 +3487,14 @@ main = do
         , "bg-panel", "#1a1a1a", "b--default", "tracked-wide", "sticky-top" ]
   check "dashboardPageHtml: stamno design tokens present (m19b restyle)"
     (map (\m -> m `isInfixOf` dash) stamnoTokens) (replicate (length stamnoTokens) True)
+  -- milestone 20c: requests queue + trackers manager sections
+  let m20cMarkers =
+        [ "api('/Requests')", "api('/Trackers')", "approveReq", "rejectReq"
+        , "toggleTracker", "deleteTracker", "addTracker", "Approve", "Reject"
+        , "Add tracker", "IS_ADMIN", "id='requests-sec'", "id='trackers-sec'"
+        , "/Requests/'+", "/Trackers/'+", "renderRequests", "renderTrackers" ]
+  check "dashboardPageHtml: m20c requests/trackers markers present"
+    (map (\m -> m `isInfixOf` dash) m20cMarkers) (replicate (length m20cMarkers) True)
   check "dashboardPageHtml: ASCII only (no bytes > 127)"
     [BS.all (<= 127) (LBS.toStrict dashboardPageHtml)] [True]
   check "dashboardBeforeCapture: webModule has Lit dashboard before Capture file"

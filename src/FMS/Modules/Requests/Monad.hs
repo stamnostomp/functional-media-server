@@ -41,6 +41,8 @@ class Monad m => MonadRequests m where
   insertRequest      :: Request -> m Request                  -- ^ persisted insert
   setRequestStatus   :: Text -> RequestStatus -> Maybe Text -> m (Maybe Request)
     -- ^ id -> new status -> approving admin (bump 'reqUpdatedAt'); Nothing when unknown
+  setRequestFailed   :: Text -> Text -> m (Maybe Request)
+    -- ^ id -> error text: set status Failed + 'reqError', bump 'reqUpdatedAt', persisted
   deleteRequest      :: Text -> m Bool                       -- ^ id -> existed?
 
 instance MonadRequests AppM where
@@ -68,6 +70,16 @@ instance MonadRequests AppM where
                        Approved -> mApprover
                        _        -> reqApprovedBy r
                    }
+        _ <- modifyRequests (HM.insert rid r')
+        pure (Just r')
+
+  setRequestFailed rid err = do
+    now <- liftIO getCurrentTime
+    m <- getRequest rid
+    case m of
+      Nothing -> pure Nothing
+      Just r  -> do
+        let r' = r { reqStatus = Failed, reqError = Just err, reqUpdatedAt = now }
         _ <- modifyRequests (HM.insert rid r')
         pure (Just r')
 

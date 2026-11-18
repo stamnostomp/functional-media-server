@@ -3539,6 +3539,11 @@ main = do
         [ "AuthType", "Cookie", "ResponseFormat", "torrentday-json", "SearchPath"
         , "toggleAuthFields", "type=\"password\"", "<th>Auth</th>", "<th>Format</th>"
         , "el('ia')", "el('ick')", "el('if')", "el('isp')", "value=\"cookie\"" ]
+  let m25Markers =
+        [ "querySelectorAll('input,select,textarea')", "vals[fields[i].id] = fields[i].value"
+        , "f.value = vals[ks[j]]", "toggleAuthFields();" ]
+  check "dashboardPageHtml: section() preserves form field values across re-renders (m25 fix)"
+    (map (\m -> m `isInfixOf` dash) m25Markers) (replicate (length m25Markers) True)
   check "dashboardPageHtml: m24 cookie/torrentday form markers present"
     (map (\m -> m `isInfixOf` dash) m24Markers) (replicate (length m24Markers) True)
   check "dashboardPageHtml: ASCII only (no bytes > 127)"

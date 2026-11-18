@@ -3519,6 +3519,16 @@ main = do
         , "/Requests/'+", "/Trackers/'+", "renderRequests", "renderTrackers" ]
   check "dashboardPageHtml: m20c requests/trackers markers present"
     (map (\m -> m `isInfixOf` dash) m20cMarkers) (replicate (length m20cMarkers) True)
+  -- milestone 22: tabbed dashboard with a Jackett-style trackers tab
+  let m22Markers =
+        [ "id='tabbtn-overview'", "id='tabbtn-trackers'", "id='tab-overview'", "id='tab-trackers'"
+        , "setTab('trackers')", "currentTab", "renderTrackersTab"
+        , "api('/Indexers')", "/Indexers/Search?q=", "testIndexer", "toggleIndexer", "deleteIndexer", "addIndexer"
+        , "searchAll", "requestRelease", "reqNotice"
+        , "Request</button>", "REQUESTED", "ALREADY IN PROGRESS", "Add indexer"
+        , "Search all indexers", "External Jackett servers", "admin only" ]
+  check "dashboardPageHtml: m22 tabbed trackers markers present"
+    (map (\m -> m `isInfixOf` dash) m22Markers) (replicate (length m22Markers) True)
   check "dashboardPageHtml: ASCII only (no bytes > 127)"
     [BS.all (<= 127) (LBS.toStrict dashboardPageHtml)] [True]
   check "dashboardBeforeCapture: webModule has Lit dashboard before Capture file"

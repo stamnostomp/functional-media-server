@@ -51,7 +51,7 @@ import FMS.Modules.Indexers.Types
   )
 import FMS.Modules.Requests.Push (slugify)
 import FMS.Modules.Trackers.Torznab (fetchUrl, parseTorznabResults)
-import FMS.Modules.Trackers.Types (Release (..))
+import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders)
 
 jsonCT :: ResponseHeaders
 jsonCT = [("Content-Type", "application/json")]
@@ -222,7 +222,8 @@ searchHandler _captures req = do
     selected)
   let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perIndexer
       results = [ releaseJson i r
-                | (i, Right rels) <- okPairs, r <- rels ]
+                | (i, r) <- sortReleasesBySeeders
+                    [ (i, r) | (i, Right rels) <- okPairs, r <- rels ] ]
       errors = [ (indexerId i, T.pack msg) | (i, Left msg) <- errPairs ]
   pure (jsonResponse (object
     [ "Results" .= results

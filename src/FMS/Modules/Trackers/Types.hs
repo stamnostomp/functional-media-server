@@ -2,10 +2,13 @@ module FMS.Modules.Trackers.Types
   ( Tracker (..)
   , trackerPublicJson
   , Release (..)
+  , sortReleasesBySeeders
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
+import Data.List (sortBy)
+import Data.Ord (Down (..), comparing)
 import Data.Text (Text)
 
 -- | One Jackett-style indexer (m20b). The API key is SECRET: it is only
@@ -67,3 +70,10 @@ instance ToJSON Release where
     , "DownloadUrl" .= relDownloadUrl r
     , "Magnet"      .= relMagnet r
     ]
+
+-- | Default search-result order (m25): seeders descending, missing
+-- seeders last; ties broken by size descending. Generic in the payload so
+-- it can sort @[(Indexer, Release)]@ pairs too.
+sortReleasesBySeeders :: [(a, Release)] -> [(a, Release)]
+sortReleasesBySeeders =
+  sortBy (comparing (\( _, r) -> (Down (relSeeders r), Down (relSizeBytes r))))

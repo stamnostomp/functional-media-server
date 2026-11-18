@@ -101,7 +101,7 @@ import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeLoginBody, matchesDownload, parseProxiedPath, slugify)
 import FMS.Modules.Requests.Types (Request (..), RequestStatus (..), duplicateOf, isActiveStatus, normalizeTitle)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
-import FMS.Modules.Trackers.Types (Release (..), Tracker (..), trackerPublicJson)
+import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders, Tracker (..), trackerPublicJson)
 import FMS.Modules.Indexers.Types
   ( Indexer (..)
   , base64UrlDecode
@@ -722,6 +722,14 @@ main = do
     ["1", "3"] (map (T.unpack . itemId) (notInAnyCollection (== "2") items4n))
   check "notInAnyCollection with all collected -> []"
     ([] :: [MediaItem]) (notInAnyCollection (const True) items4n)
+
+  -- sortReleasesBySeeders (m25): default indexer search order
+  let rel s sz = Release "t" sz s Nothing Nothing
+  check "sortReleasesBySeeders: seeders desc, missing last, size tiebreak"
+    ["b", "c", "a", "d"]
+    (map (fst :: (String, Release) -> String) (sortReleasesBySeeders
+      [ ("a", rel (Just 5) (Just 10)), ("b", rel (Just 99) (Just 1))
+      , ("c", rel (Just 5) (Just 50)), ("d", rel Nothing (Just 999)) ]))
 
   -- parseProxiedPath (m21 fix: push resolves proxied indexer URLs in-process)
   check "parseProxiedPath parses /Indexers/:id/Download?r="

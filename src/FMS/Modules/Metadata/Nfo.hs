@@ -56,6 +56,7 @@ movieFromCursor m =
     , metaRuntimeMinutes = readIntField "runtime" m
     , metaProviderIds    = HM.fromList (providerIds m)
     , metaSource         = "nfo"
+    , metaKeywords       = []                          -- m53a (NFO carries no keywords)
     , metaLockedFields   = []                          -- milestone 4k
     }
 
@@ -145,6 +146,7 @@ tvShowFromCursor c =
     , metaRuntimeMinutes = Nothing
     , metaProviderIds    = HM.fromList (providerIds c)
     , metaSource         = "nfo"
+    , metaKeywords       = []                          -- m53a (NFO carries no keywords)
     , metaLockedFields   = []                          -- milestone 4k
     }
 

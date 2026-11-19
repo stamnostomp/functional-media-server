@@ -14,7 +14,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import System.Directory (doesFileExist)
 
-import FMS.Modules.Metadata.Types (MediaMetadata, MetadataSettings (..))
+import FMS.Modules.Metadata.Types (MediaMetadata, MetadataSettings (..), metadataStoredJSON)
 
 -- | Load the persisted metadata store (@stateDir/metadata.json@): a bare
 -- JSON object mapping item id -> 'MediaMetadata'. A missing or unreadable
@@ -30,9 +30,11 @@ loadMetadata path = do
         Left _      -> HM.empty
         Right bytes -> fromMaybe HM.empty (Aeson.decode bytes)
 
--- | Persist the whole metadata map as a bare JSON object.
+-- | Persist the whole metadata map as a bare JSON object. m53a: values are
+-- encoded with 'metadataStoredJSON' so @keywords@ round-trip on disk while
+-- staying out of the public API JSON.
 saveMetadata :: FilePath -> HashMap Text MediaMetadata -> IO ()
-saveMetadata path meta = LBS.writeFile path (Aeson.encode meta)
+saveMetadata path meta = LBS.writeFile path (Aeson.encode (HM.map metadataStoredJSON meta))
 
 -- | m35: load the persisted TMDB metadata settings
 -- (@stateDir/metadata-settings.json@). A missing or unreadable file yields

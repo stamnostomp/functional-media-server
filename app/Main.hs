@@ -34,7 +34,8 @@ import FMS.Server (runServer)
 -- FMS_PASSWORD_MIN_LENGTH, FMS_MAX_BITRATE, FMS_HWACCEL, FMS_WATCH,
 -- FMS_FOLLOW_SYMLINKS, FMS_TLS_CERT, FMS_TLS_KEY (milestone 13d),
 -- FMS_FETCH_IMAGES, FMS_TMDB_BASE_URL, FMS_TMDB_IMAGE_BASE_URL,
--- FMS_TMDB_IMAGE_SIZE (TMDB artwork download, opt-in via FMS_FETCH_IMAGES).
+-- FMS_TMDB_IMAGE_SIZE, FMS_TMDB_BACKDROP_SIZE (TMDB artwork download,
+-- opt-in via FMS_FETCH_IMAGES).
 -- FMS_ADMIN_PASSWORD is read by the auth module itself when it
 -- bootstraps the admin user.
 main :: IO ()
@@ -94,6 +95,7 @@ main = do
   mTmdbBase  <- lookupEnv "FMS_TMDB_BASE_URL"
   mTmdbImgBase <- lookupEnv "FMS_TMDB_IMAGE_BASE_URL"
   mTmdbImgSize <- lookupEnv "FMS_TMDB_IMAGE_SIZE"
+  mTmdbBdSize  <- lookupEnv "FMS_TMDB_BACKDROP_SIZE"
   mJackettUrl <- lookupEnv "FMS_JACKETT_URL"
   mJackettKey <- lookupEnv "FMS_JACKETT_API_KEY"
   mDelugeUrl  <- lookupEnv "FMS_DELUGE_URL"
@@ -166,6 +168,7 @@ main = do
         , configTmdbBaseUrl = T.pack (fromMaybe "https://api.themoviedb.org/3" mTmdbBase)
         , configTmdbImageBaseUrl = T.pack (fromMaybe "https://image.tmdb.org/t/p" mTmdbImgBase)
         , configTmdbImageSize = T.pack (fromMaybe "w500" mTmdbImgSize)
+        , configTmdbBackdropSize = T.pack (fromMaybe "w1280" mTmdbBdSize)  -- m49
         , configScanWorkers = fromMaybe 4 (mScanW >>= readMaybe)  -- raw value; validateConfig rejects negatives (exit 2), 0 clamped to 1 below
         , configMaxBodyBytes = fromMaybe 10485760 (mMaxBody >>= readMaybe)  -- default 10 MiB; 0 = unlimited; negative rejected by validateConfig (exit 2)
         , configMemoryWarnMb = fromMaybe 1024 (mMemWarn >>= readMaybe)      -- default 1024 MB; negative rejected by validateConfig

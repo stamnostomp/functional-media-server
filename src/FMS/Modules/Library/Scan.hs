@@ -15,6 +15,7 @@ module FMS.Modules.Library.Scan
   , isMediaFile
   , mimeFor
   , mediaExtensions
+  , imageExtensions
   , normalizeVersionTitle
   , versionRank
   , groupVersions
@@ -66,6 +67,15 @@ mediaExtensions =
   , ".epub", ".mobi", ".pdf", ".cbz", ".cbr"
   ]
 
+-- | Image extensions (lowercase, with dot). m51: torrent screenshots /
+-- cover art (screen0001.jpg, poster.jpg, ...) must NOT become library
+-- items, so 'isMediaFile' excludes them even though 'mediaExtensions'
+-- still lists them (NFO sidecar sibling lookup keeps matching poster.jpg
+-- next to media, so artwork/nfo association is unaffected).
+imageExtensions :: [String]
+imageExtensions =
+  [ ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".tiff" ]
+
 -- | Is this path an NFO sidecar (@.nfo@, case-insensitive)? NFO files are
 -- not media, but the watcher must react to them so a changed sidecar
 -- refreshes the sibling item's metadata (invalidation audit).
@@ -100,9 +110,13 @@ itemIdsForNfo items nfoPath =
       | otherwise = takeFileName (nfoPathFor (itemPath i)) == nfoName
                     && dirOk (takeDirectory (itemPath i))
 
--- | Is this path a media file, judging by extension?
+-- | Is this path a media file, judging by extension? m51: image files
+-- are NOT media items (no Photo items from torrent previews); audio and
+-- video stay.
 isMediaFile :: FilePath -> Bool
-isMediaFile p = map toLower (takeExtension p) `elem` mediaExtensions
+isMediaFile p =
+  let ext = map toLower (takeExtension p)
+  in ext `elem` mediaExtensions && ext `notElem` imageExtensions
 
 -- | Mime type for a path, from its extension (docs/modules.org scanner).
 mimeFor :: FilePath -> Text

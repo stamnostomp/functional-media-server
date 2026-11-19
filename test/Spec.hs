@@ -40,7 +40,7 @@ import System.Directory
 import System.Posix.Files (createSymbolicLink)
 import System.Process (createProcess, proc, terminateProcess, waitForProcess)
 import System.Exit (ExitCode(..), exitFailure)
-import System.FilePath ((</>))
+import System.FilePath ((</>), replaceExtension)
 
 import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Module (..), Route (..), Segment (..), get, post)
@@ -81,6 +81,7 @@ import FMS.Modules.Library.Scan
   , diffScan
   , extraTypeFor
   , isCircular
+  , imageExtensions
   , isMediaFile
   , scanDirectory
   , isNfoFile
@@ -139,7 +140,7 @@ import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embe
 import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Dash (dashArgs, dashArgsWith, dashDirFor, isValidDashSegName)
-import FMS.Modules.Transcode (burnInFilter, effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, spliceBeforeF, transcodeArgs, transcodeArgsWith)
+import FMS.Modules.Transcode (burnInFilter, effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, spliceBeforeF, streamTranscodeTimeoutSec, transcodeArgs, transcodeArgsWith)
 import FMS.Modules.Library.State
   ( GetAllItems(..)
   , GetIdByPath(..)
@@ -151,7 +152,7 @@ import FMS.Modules.Library.State
   , UpdateItemMeta(..)
   , initialLibraryState
   )
-import FMS.Modules.Metadata.Api.Images (TmdbImageEntry (..), pickByLanguage, tmdbImageListToDownloads, tmdbImagesUrl)
+import FMS.Modules.Metadata.Api.Images (TmdbImageEntry (..), fetchTmdbImages, pickByLanguage, tmdbImageListToDownloads, tmdbImagesUrl)
 import FMS.Modules.Metadata.Api.Tmdb
   ( TmdbEpisode (..)
   , TmdbSeason (..)
@@ -168,6 +169,9 @@ import FMS.Modules.Metadata.Api.Tmdb
   , tmdbSearchUrl
   , tmdbSeasonUrlAt
   , tmdbTvDetailsUrlAt
+  , tmdbMovieDetailsUrlAt
+  , tmdbTvDetailsKwUrlAt
+  , parseTmdbGenresKeywords
   )
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
@@ -176,7 +180,7 @@ import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, load
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
 import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, removeTag)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, metadataStoredJSON, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
 import FMS.Modules.Playlists.Persistence (loadPlaylists, savePlaylists)
 import FMS.Modules.Playlists.Types (Playlist (..))
@@ -479,8 +483,8 @@ main = do
     (map (T.unpack . mimeFor) ["a.epub", "a.mobi", "a.pdf", "a.cbz", "a.cbr"])
   check "mimeFor extension match is case-insensitive (.JPG/.PDF)"
     ["image/jpeg", "application/pdf"] (map (T.unpack . mimeFor) ["/x/P.JPG", "/x/B.PDF"])
-  check "isMediaFile accepts .jpg/.epub/.pdf, still rejects .txt"
-    [True, True, True, False]
+  check "isMediaFile accepts .epub/.pdf, rejects images (.jpg, m51) and .txt"
+    [False, True, True, False]
     (map isMediaFile ["/x/p.jpg", "/x/b.epub", "/x/b.pdf", "/x/n.txt"])
   missing <- scanDirectory False "/tmp/fms-test-scan-does-not-exist"
   check "scan of missing dir is []" [] missing
@@ -1386,6 +1390,7 @@ main = do
         { metaTitle          = Just "Test Movie"
         , metaOverview       = Just "A test overview."
         , metaGenres         = ["Action", "Sci-Fi"]
+        , metaKeywords       = []
         , metaStudios        = []
         , metaPersons        = []
         , metaTags           = []
@@ -1407,7 +1412,7 @@ main = do
   check "parseMovieNfo on non-movie XML is Left"
     True (isLeftE' (parseMovieNfo (BSC.pack "<tvshow><title>x</title></tvshow>")))
   let sparseMeta = MediaMetadata
-        (Just "Only Title") Nothing [] [] [] [] Nothing Nothing Nothing Nothing HM.empty "nfo" []
+        (Just "Only Title") Nothing [] [] [] [] [] Nothing Nothing Nothing Nothing HM.empty "nfo" []
   check "parseMovieNfo with missing fields -> Nothing/empty fields"
     (Right sparseMeta)
     (parseMovieNfo (BSC.pack "<movie><title>Only Title</title></movie>"))
@@ -2968,7 +2973,7 @@ main = do
   check "transcodeArgsWith: hw encoder drops the x264-only -preset"
     False ("-preset" `elem` transcodeArgsWith "nvenc" Nothing "/m/a.mkv")
   check "transcodeArgsWith: bitrate cap adds -b:v/-maxrate/-bufsize(2x) before -c:a"
-    ["-b:v", "1000000", "-maxrate", "1000000", "-bufsize", "2000000", "-c:a", "aac", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]
+    ["-b:v", "1000000", "-maxrate", "1000000", "-bufsize", "2000000", "-c:a", "aac", "-force_key_frames", "expr:gte(t,n_forced*2)", "-g", "48", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]  -- m52 adds the keyframe flags
     (dropWhile (/= "-b:v") (transcodeArgsWith "none" (Just 1000000) "/m/a.mkv"))
   check "transcodeArgsWith: no cap -> no -b:v"
     False ("-b:v" `elem` transcodeArgsWith "none" Nothing "/m/a.mkv")
@@ -3050,7 +3055,7 @@ main = do
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -3076,8 +3081,8 @@ main = do
     False (eventsPending [] wNow 2.0)
   check "eventsPending: any event inside counts"
     True (eventsPending [(wOld, "/x"), (wNow, "/m/b.mkv")] wNow 2.0)
-  check "watchMediaFile: media extensions pass, others do not (2e: photos/books are media too)"
-    [True, True, False, False, True, True]
+  check "watchMediaFile: video/audio/books pass, images do not (m51: no Photo items)"
+    [True, True, False, False, False, True]
     (map watchMediaFile ["/m/a.MP4", "b.mkv", "notes.txt", "data.bin", "cover.jpg", "book.epub"])
 
   -- Milestone 11c: ScanProgress event payload shapes (docs/todo.org
@@ -3184,7 +3189,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -4065,7 +4070,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
         , configJackettUrl = Nothing
@@ -4253,6 +4258,8 @@ main = do
             , "            return self._send(200, 'POSTERBYTES', 'image/jpeg')"
             , "        if u.path == '/img/w500/b.jpg':"
             , "            return self._send(200, 'BACKDROPBYTES', 'image/jpeg')"
+            , "        if u.path == '/img/w1280/b.jpg':"
+            , "            return self._send(200, 'BACKDROPBYTES-W1280', 'image/jpeg')"
             , "        return self._send(404, '{}')"
             , "srv = HTTPServer(('127.0.0.1', port), H)"
             , "open(log + '.ready', 'w').write('ok')"
@@ -4267,7 +4274,7 @@ main = do
             , itemExtraType = Nothing, itemVersions = [] }
           cfg35m = cfg35 { configTmdbBaseUrl = "http://127.0.0.1:8930/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8930/img"
-                         , configTmdbImageSize = "w500" }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
       bracket
         (createProcess (proc "python3" [m35mock ++ "/mock.py", "8930", m35log]))
         (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
@@ -4300,7 +4307,11 @@ main = do
               check "m35 mock: env key never leaked to the mock"
                 (any ("ENVKEY" `isInfixOf`) callLines) False
               check "m35 mock: image CDN was hit for poster+backdrop"
-                (length (filter ("/img/" `isPrefixOf`) callLines)) 2)
+                (length (filter ("/img/" `isPrefixOf`) callLines)) 2
+              check "m49: backdrop downloaded at w1280, poster at w500 (per-kind sizes)"
+                [ any ("/img/w1280/b.jpg" `isPrefixOf`) callLines
+                , any ("/img/w500/p.jpg" `isPrefixOf`) callLines ]
+                [ True, True ])
 
   -- milestone 36: clean release names before TMDB matching
   check "m36 cleanTitleForProvider: scene examples from the spec"
@@ -4552,7 +4563,7 @@ main = do
           cfg45 = cfg27 { configStateDir = m45dir, configTmdbApiKey = "K"
                          , configTmdbBaseUrl = "http://127.0.0.1:8931/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8931/img"
-                         , configTmdbImageSize = "w500" }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
           m45mockSrc = unlines
             [ "import json, sys"
             , "from http.server import BaseHTTPRequestHandler, HTTPServer"
@@ -4828,7 +4839,7 @@ main = do
           cfg47 = cfg27 { configStateDir = m47mock, configTmdbApiKey = "ENVKEY47"
                         , configTmdbBaseUrl = "http://127.0.0.1:8947/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8947/img"
-                        , configTmdbImageSize = "w500" }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
       resetDir m47mock
       createDirectoryIfMissing True m47mock
       writeFile (m47mock ++ "/mock.py") mockSrc
@@ -4906,5 +4917,217 @@ main = do
               check "m47 handler: TMDB down -> 200 with empty Seasons (graceful)"
                 True ("\"Seasons\":[]" `BSC.isInfixOf` either (const "") respBody47 respD)
               closeAcidState acid47)
+
+
+  -- m48: streamed transcode is NOT capped by the batch ffmpeg job timeout
+  check "m48: streamTranscodeTimeoutSec is 0 (no cap for the streamed transcode)"
+    0 streamTranscodeTimeoutSec
+  check "m48: batch ffmpeg uses keep the configurable cap (network input gets -rw_timeout)"
+    True (not (null (ffmpegTimeoutArgs (configFfmpegTimeoutSec cfg27) "http://x/y.mp4")))
+  check "m48: batch ffmpeg timeout args stay empty for a local file"
+    [] (ffmpegTimeoutArgs (configFfmpegTimeoutSec cfg27) "/local/file.mp4")
+
+  -- m52: force a keyframe every ~2s in BOTH hw and sw transcode args
+  let kfOk args = case break (== "-force_key_frames") args of
+        (_, _ : expr : _) -> expr == "expr:gte(t,n_forced*2)"
+        _ -> False
+      gOk args = case break (== "-g") args of
+        (_, _ : n : _) -> n == "48"
+        _ -> False
+  check "m52: transcodeArgsWith (sw+hw) forces keyframes every 2s and -g 48"
+    [ True, True, True, True, True ]
+    [ kfOk (transcodeArgsWith "none" Nothing "/m/a.mkv")
+    , gOk  (transcodeArgsWith "none" Nothing "/m/a.mkv")
+    , kfOk (transcodeArgsWith "nvenc" (Just 2000000) "/m/a.mkv")
+    , gOk  (transcodeArgsWith "nvenc" (Just 2000000) "/m/a.mkv")
+    , "frag_keyframe+empty_moov" `elem` transcodeArgsWith "none" Nothing "/m/a.mkv" ]
+
+  -- m49: backdrop size config + per-kind image download sizes
+  check "m49: configTmdbBackdropSize defaults to w1280 in the test config"
+    "w1280" (configTmdbBackdropSize cfg27)
+  check "m49: poster size stays w500"
+    "w500" (configTmdbImageSize cfg27)
+
+  -- m51: image files are not scanned as library items (torrent previews)
+  let m51dir = "/tmp/fms-test-scan-m51"
+  resetDir m51dir
+  createDirectoryIfMissing True m51dir
+  writeFile (m51dir </> "movie.mkv") "v"
+  writeFile (m51dir </> "screen0001.jpg") "img"
+  writeFile (m51dir </> "poster.PNG") "img"
+  writeFile (m51dir </> "song.flac") "a"
+  m51scanned <- scanDirectory False m51dir
+  check "m51: scanDirectory returns only the video+audio, no images"
+    (sort [m51dir </> "movie.mkv", m51dir </> "song.flac"]) (sort m51scanned)
+  check "m51: isMediaFile rejects image extensions (case-insensitive), keeps audio"
+    [ isMediaFile "/x/a.JPG", isMediaFile "/x/a.png", isMediaFile "/x/a.webp", isMediaFile "/x/s.flac", isMediaFile "/x/m.mp4" ]
+    [ False, False, False, True, True ]
+  check "m51: NFO sibling lookup still matches poster.jpg (artwork association intact)"
+    True (map (replaceExtension "/x/movie") imageExtensions
+            == ["/x/movie.jpg", "/x/movie.jpeg", "/x/movie.png", "/x/movie.gif", "/x/movie.webp", "/x/movie.bmp", "/x/movie.heic", "/x/movie.tiff"]
+            && "/x/movie.jpg" `elem` siblingMediaPathsForNfo "/x/movie.nfo")
+  removeDirectoryRecursive m51dir
+
+  -- m53a: detail URL builders + genres/keywords parser
+  check "m53a: tmdbMovieDetailsUrlAt / tmdbTvDetailsKwUrlAt (append_to_response=keywords)"
+    [ tmdbMovieDetailsUrlAt "http://127.0.0.1:8949/3" "K" 42
+    , tmdbMovieDetailsUrlAt "http://127.0.0.1:8949/3/" "K" 7
+    , tmdbTvDetailsKwUrlAt "http://127.0.0.1:8949/3" "K" 1942 ]
+    [ "http://127.0.0.1:8949/3/movie/42?api_key=K&append_to_response=keywords"
+    , "http://127.0.0.1:8949/3/movie/7?api_key=K&append_to_response=keywords"
+    , "http://127.0.0.1:8949/3/tv/1942?api_key=K&append_to_response=keywords" ]
+  let movieDetails = LBS.fromStrict (BSC.pack (unwords
+        [ "{\"id\":42,\"genres\":[{\"id\":28,\"name\":\"Action\"},{\"id\":878,\"name\":\"Science Fiction\"}],"
+        , "\"keywords\":{\"keywords\":[{\"id\":9,\"name\":\"hero\"},{\"id\":10,\"name\":\"save the world\"}]}}" ]))
+      tvDetails53 = LBS.fromStrict (BSC.pack (unwords
+        [ "{\"id\":1942,\"genres\":[{\"id\":16,\"name\":\"Animation\"}],"
+        , "\"keywords\":{\"results\":[{\"id\":5,\"name\":\"cartoon\"}]}}" ]))
+  check "m53a: parseTmdbGenresKeywords movie shape (keywords.keywords)"
+    (parseTmdbGenresKeywords movieDetails)
+    (Right (["Action", "Science Fiction"], ["hero", "save the world"]))
+  check "m53a: parseTmdbGenresKeywords tv shape (keywords.results)"
+    (parseTmdbGenresKeywords tvDetails53)
+    (Right (["Animation"], ["cartoon"]))
+  check "m53a: parseTmdbGenresKeywords missing keys -> ([],[])"
+    (parseTmdbGenresKeywords (Aeson.encode (object []))) (Right ([], []))
+  check "m53a: parseTmdbGenresKeywords garbage -> Left"
+    True (isLeftStr (parseTmdbGenresKeywords (LBS.fromStrict (BSC.pack "nope"))))
+
+  -- m53a: keywords server-side only (persisted, never in public JSON)
+  let kwMeta = emptyMetadata { metaGenres = ["Action"], metaKeywords = ["hero"] }
+      pubJson = LBS.toStrict (Aeson.encode kwMeta)
+      storedJson = LBS.toStrict (Aeson.encode (metadataStoredJSON kwMeta))
+  check "m53a: public metadata JSON has genres but NOT keywords"
+    [ "\"genres\":[\"Action\"]" `BSC.isInfixOf` pubJson
+    , "keywords" `BSC.isInfixOf` pubJson ]
+    [ True, False ]
+  check "m53a: stored (persistence) JSON includes keywords"
+    True ("\"keywords\":[\"hero\"]" `BSC.isInfixOf` storedJson)
+  check "m53a: old metadata.json without keywords decodes with []"
+    (case Aeson.decode (LBS.fromStrict (BSC.pack "{\"title\":\"T\"}")) of
+       Just m -> metaKeywords m; Nothing -> ["<decode fail>"])
+    []
+  -- persistence round-trip keeps keywords
+  let m53pdir = "/tmp/fms-test-meta-kw"
+  resetDir m53pdir
+  createDirectoryIfMissing True m53pdir
+  saveMetadata (m53pdir </> "metadata.json") (HM.fromList [("1", kwMeta)])
+  m53loaded <- loadMetadata (m53pdir </> "metadata.json")
+  check "m53a: saveMetadata/loadMetadata round-trips keywords"
+    (Just ["hero"]) (fmap metaKeywords (HM.lookup "1" m53loaded))
+  -- provider merge keeps keywords (new non-empty wins, empty keeps old)
+  check "m53a: applyProviderMerge keeps old keywords when new are empty"
+    ["hero"] (metaKeywords (applyProviderMerge kwMeta (emptyMetadata { metaTitle = Just "New" })))
+  check "m53a: applyProviderMerge takes new keywords when present"
+    ["x"] (metaKeywords (applyProviderMerge kwMeta (emptyMetadata { metaKeywords = ["x"] })))
+
+  -- m53a: similarItems also ranks by shared keywords
+  let siK base = mi5 base base
+      kwLookup = HM.fromList
+        [ ("1", sparseMeta { metaGenres = ["Action"], metaKeywords = ["hero"] })
+        , ("2", sparseMeta { metaGenres = ["Action"] })                          -- genre only
+        , ("3", sparseMeta { metaGenres = ["Action"], metaKeywords = ["hero", "duo"] })  -- genre + keyword
+        ]
+      kwItems = [siK "1", siK "2", siK "3"]
+  check "m53a: similarItems ranks the keyword-sharing item first"
+    ["3", "2"] (map itemId (similarItems (flip HM.lookup kwLookup) 12 (siK "1") kwItems))
+
+  -- m53a: legacy /library rows carry genres
+  let m53rowItem = (mi5 "9" "Some Movie") { itemType = "Movie" }
+      m53row = withLegacyItem (HM.fromList [("9", kwMeta)]) m53rowItem (simpleItemJson m53rowItem)
+      m53fieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing
+  check "m53a: withLegacyItem adds genres to the legacy row"
+    (Just (Aeson.toJSON (["Action"] :: [T.Text]))) (m53fieldOf "genres" m53row)
+
+  -- m49+m53a live-ish against a mock TMDB (python3-guarded)
+  mPy53 <- findExecutable "python3"
+  case mPy53 of
+    Nothing -> putStrLn "PASS: m49/m53a mock-tmdb IO tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m53mock = "/tmp/fms-m53-mock"
+          m53log = m53mock ++ "/calls.log"
+          mockSrc = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "from urllib.parse import urlparse, parse_qs"
+            , "port = int(sys.argv[1]); log = sys.argv[2]"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def _send(self, code, body, ctype='application/json'):"
+            , "        b = body.encode() if isinstance(body, str) else body"
+            , "        self.send_response(code)"
+            , "        self.send_header('Content-Type', ctype)"
+            , "        self.send_header('Content-Length', str(len(b)))"
+            , "        self.end_headers()"
+            , "        self.wfile.write(b)"
+            , "    def do_GET(self):"
+            , "        u = urlparse(self.path); q = parse_qs(u.query)"
+            , "        key = q.get('api_key', [''])[0]"
+            , "        with open(log, 'a') as f:"
+            , "            f.write(u.path + '?' + u.query + chr(10))"
+            , "        if key != 'K53' and u.path.startswith('/3/'):"
+            , "            return self._send(401, '{\"status_message\":\"bad key\"}')"
+            , "        if u.path == '/3/search/movie':"
+            , "            return self._send(200, json.dumps({'results': [{'id': 42, 'title': 'Test Movie', 'release_date': '2020-01-01', 'overview': 'o', 'vote_average': 7.5, 'poster_path': '/p.jpg'}]}))"
+            , "        if u.path == '/3/movie/42':"
+            , "            return self._send(200, json.dumps({'id': 42, 'genres': [{'id': 28, 'name': 'Action'}], 'keywords': {'keywords': [{'id': 9, 'name': 'hero'}]}}))"
+            , "        if u.path == '/3/movie/42/images':"
+            , "            return self._send(200, json.dumps({'posters': [{'file_path': '/p.jpg'}], 'backdrops': [{'file_path': '/b.jpg'}], 'logos': []}))"
+            , "        if u.path.startswith('/img/'):"
+            , "            return self._send(200, 'IMGBYTES', 'image/jpeg')"
+            , "        return self._send(404, '{}')"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+      resetDir m53mock
+      createDirectoryIfMissing True m53mock
+      writeFile (m53mock ++ "/mock.py") mockSrc
+      let cfg53 = cfg27 { configStateDir = m53mock, configTmdbApiKey = "K53", configFetchImages = False
+                        , configTmdbBaseUrl = "http://127.0.0.1:8949/3"
+                        , configTmdbImageBaseUrl = "http://127.0.0.1:8949/img"
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
+          m53item = MediaItem
+            { itemId = "1", itemTitle = "Test Movie", itemPath = "/x.mp4"
+            , itemSize = 1, itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1"
+            , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+            , itemExtraType = Nothing, itemVersions = [] }
+      bracket
+        (createProcess (proc "python3" [m53mock ++ "/mock.py", "8949", m53log]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          rok <- waitForFile (m53log ++ ".ready") 40
+          if not rok
+            then putStrLn "PASS: m49/m53a mock-tmdb IO tests skipped (mock did not start)"
+            else do
+              env53 <- newAppEnv cfg53
+              _ <- runApp env53 $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                refreshFromTmdb "1" m53item
+              rGet <- runApp env53 (getMetadata "1")
+              let mMeta = either (const Nothing) id rGet
+              check "m53a refreshFromTmdb: genres from the detail endpoint"
+                (Just ["Action"]) (fmap metaGenres mMeta)
+              check "m53a refreshFromTmdb: keywords stored server-side"
+                (Just ["hero"]) (fmap metaKeywords mMeta)
+              check "m53a refreshFromTmdb: public metadata JSON omits keywords"
+                (Just False)
+                (fmap (\m -> "keywords" `BSC.isInfixOf` LBS.toStrict (Aeson.encode m)) mMeta)
+              mockCalls <- readFile m53log
+              let apiLines = filter ("/3/" `isPrefixOf`) (lines mockCalls)
+              check "m53a mock: detail endpoint hit with append_to_response=keywords and the key"
+                (any (\l -> "/3/movie/42?" `isPrefixOf` l && "append_to_response=keywords" `isInfixOf` l && "api_key=K53" `isInfixOf` l) apiLines) True
+              -- m49: fetchTmdbImages uses w500 for posters, w1280 for backdrops
+              rImgs <- fetchTmdbImages "K53" "http://127.0.0.1:8949/3" "movie" "42"
+                          "http://127.0.0.1:8949/img" "w500" "w1280"
+              let imgTypes = either (const []) (map (\(t, _, _) -> t)) rImgs
+              check "m49: fetchTmdbImages downloaded poster + backdrop"
+                ["Backdrop", "Primary"] (sort imgTypes)
+              mockCalls2 <- readFile m53log
+              let imgLines = filter ("/img/" `isPrefixOf`) (lines mockCalls2)
+              check "m49: poster downloaded at w500, backdrop at w1280"
+                [ any ("/img/w500/p.jpg" `isPrefixOf`) imgLines
+                , any ("/img/w1280/b.jpg" `isPrefixOf`) imgLines ]
+                [ True, True ])
 
   putStrLn "All tests passed."

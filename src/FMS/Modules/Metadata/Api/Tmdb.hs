@@ -26,11 +26,16 @@ module FMS.Modules.Metadata.Api.Tmdb
   , tmdbSeasonUrlAt
   , tmdbTvDetailsAt
   , tmdbSeasonAt
+  , tmdbMovieDetailsUrlAt
+  , tmdbTvDetailsKwUrlAt
+  , parseTmdbGenresKeywords
+  , tmdbMovieDetailsAt
+  , tmdbTvDetailsKwAt
   ) where
 
 import Control.Exception (SomeException, try)
 import qualified Data.Aeson as Aeson
-import Data.Aeson (FromJSON (..), Result (..), withObject, (.!=), (.:), (.:?))
+import Data.Aeson (FromJSON (..), Result (..), Value (..), withObject, (.!=), (.:), (.:?))
 import Data.Aeson.Types (parse)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
@@ -349,3 +354,61 @@ tmdbSeasonAt :: Text -> Text -> Int -> Int -> IO (Either String [TmdbEpisode])
 tmdbSeasonAt base apiKey tid n = do
   eres <- tmdbFetch (tmdbSeasonUrlAt base apiKey tid n)
   pure (parseTmdbSeasonEpisodes =<< eres)
+
+-- Milestone 53a: detail endpoints with genres + keywords
+-- (@append_to_response=keywords@).
+
+-- | @\/movie\/<id>?api_key=<key>&append_to_response=keywords@ URL (pure).
+tmdbMovieDetailsUrlAt :: Text -> Text -> Int -> String
+tmdbMovieDetailsUrlAt base apiKey mid =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/movie/" ++ show mid
+    ++ "?api_key=" ++ T.unpack apiKey ++ "&append_to_response=keywords"
+
+-- | @\/tv\/<id>?api_key=<key>&append_to_response=keywords@ URL (pure).
+-- (Unlike 'tmdbTvDetailsUrlAt', which stays plain for the m47 series view.)
+tmdbTvDetailsKwUrlAt :: Text -> Text -> Int -> String
+tmdbTvDetailsKwUrlAt base apiKey tid =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/tv/" ++ show tid
+    ++ "?api_key=" ++ T.unpack apiKey ++ "&append_to_response=keywords"
+
+-- | Helper: a @{id, name}@ entry of a genres/keywords array; the name only.
+newtype TmdbNamed = TmdbNamed (Maybe Text)
+
+instance FromJSON TmdbNamed where
+  parseJSON = withObject "TmdbNamed" (\o -> TmdbNamed <$> o .:? "name")
+
+-- | Pure: parse a detail document (@genres: [{id,name}]@ plus the
+-- @append_to_response=keywords@ block) into @(genre names, keyword names)@.
+-- Movie keywords come as @{"keywords":{"keywords":[...]}}@, TV keywords as
+-- @{"keywords":{"results":[...]}}@ — both shapes are accepted. Missing keys
+-- yield empty lists; a non-object body is 'Left'.
+parseTmdbGenresKeywords :: LBS.ByteString -> Either String ([Text], [Text])
+parseTmdbGenresKeywords body = do
+  v <- Aeson.eitherDecode body
+  case parse parser v of
+    Success r -> Right r
+    Error e   -> Left e
+  where
+    parser = withObject "DetailsDoc" $ \o -> do
+      gs <- o .:? "genres" .!= ([] :: [Value])
+      kwBlock <- o .:? "keywords"
+      kws <- case kwBlock of
+        Just (Object ko) -> do
+          a <- ko .:? "keywords" .!= ([] :: [Value])
+          b <- ko .:? "results"  .!= ([] :: [Value])
+          pure (a ++ b)
+        _ -> pure []
+      let names vs = [ n | Success (TmdbNamed (Just n)) <- map Aeson.fromJSON vs ]
+      pure (names gs, names kws)
+
+-- | Fetch @\/movie\/<id>?append_to_response=keywords@ (never throws).
+tmdbMovieDetailsAt :: Text -> Text -> Int -> IO (Either String ([Text], [Text]))
+tmdbMovieDetailsAt base apiKey mid = do
+  eres <- tmdbFetch (tmdbMovieDetailsUrlAt base apiKey mid)
+  pure (parseTmdbGenresKeywords =<< eres)
+
+-- | Fetch @\/tv\/<id>?append_to_response=keywords@ (never throws).
+tmdbTvDetailsKwAt :: Text -> Text -> Int -> IO (Either String ([Text], [Text]))
+tmdbTvDetailsKwAt base apiKey tid = do
+  eres <- tmdbFetch (tmdbTvDetailsKwUrlAt base apiKey tid)
+  pure (parseTmdbGenresKeywords =<< eres)

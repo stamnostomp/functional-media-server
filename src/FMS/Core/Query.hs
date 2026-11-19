@@ -444,13 +444,16 @@ similarItems lookupMeta limit base allItems =
     Nothing -> []
     Just bm ->
       let baseGenres = map T.toCaseFold (metaGenres bm)
+          baseKeys   = map T.toCaseFold (metaKeywords bm)   -- m53a: keywords count too
           shared i = case lookupMeta (itemId i) of
-            Nothing -> []
-            Just m  -> filter (`elem` baseGenres) (map T.toCaseFold (metaGenres m))
-          scored = [ (length (shared i), itemTitle i, i)
+            Nothing -> (0, 0)
+            Just m  -> ( length (filter (`elem` baseGenres) (map T.toCaseFold (metaGenres m)))
+                       , length (filter (`elem` baseKeys) (map T.toCaseFold (metaKeywords m))) )
+          scored = [ (g + k, itemTitle i, i)
                    | i <- allItems
                    , itemId i /= itemId base
-                   , not (null (shared i))
+                   , let (g, k) = shared i
+                   , g + k > 0
                    ]
           sorted = sortBy (\(a, ta, _) (b, tb, _) -> compare b a <> compare ta tb) scored
           lim = if limit <= 0 then 12 else limit
@@ -640,9 +643,16 @@ displayTitleForItem metaMap i =
 -- | m43: full legacy-row enrichment for the stamno-media UI: type /
 -- seriesName keys plus the episode-aware displayTitle.
 withLegacyItem :: HM.HashMap Text MediaMetadata -> MediaItem -> Value -> Value
-withLegacyItem metaMap i = withDisplayTitleLower lk . withLegacyType i
+withLegacyItem metaMap i = withLegacyGenres metaMap i . withDisplayTitleLower lk . withLegacyType i
   where
     lk ident =
       if ident == itemId i
         then displayTitleForItem metaMap i
         else HM.lookup ident metaMap >>= metaTitle
+    -- m53a: expose the genre list on legacy rows so the UI can filter
+    withLegacyGenres mm it v = case v of
+      Object o -> case HM.lookup (itemId it) mm of
+        Just m | not (null (metaGenres m)) ->
+          Object (KeyMap.insert (Key.fromText "genres") (toJSON (metaGenres m)) o)
+        _ -> v
+      _ -> v

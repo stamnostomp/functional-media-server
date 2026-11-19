@@ -7,6 +7,7 @@ module FMS.Modules.Transcode
   , normalizeHwAccel  -- re-exported from FMS.Core.Types.Config
   , burnInFilter
   , spliceBeforeF
+  , streamTranscodeTimeoutSec
   ) where
 
 import Control.Applicative ((<|>))
@@ -103,6 +104,11 @@ transcodeArgsWith hwaccel mBitrate path =
   ++ [ "-pix_fmt", "yuv420p" ]
   ++ bitrateArgs
   ++ [ "-c:a", "aac"
+     -- m52: force a keyframe every ~2s (x264 default keyint 250 would leave
+     -- long gaps in the fMP4 fragments, so the first seconds play black);
+     -- -g 48 caps the GOP at 2s at 24fps as a belt-and-braces measure.
+     , "-force_key_frames", "expr:gte(t,n_forced*2)"
+     , "-g", "48"
      , "-movflags", "frag_keyframe+empty_moov"
      , "-f", "mp4"
      , "pipe:1"
@@ -235,7 +241,16 @@ transcodeHandler captures req =
           mRelease <- acquireFfmpegSlot
           pure (responseStream status200
                   [("Content-Type", "video/mp4")]
-                  (streamTranscode (configFfmpegTimeoutSec cfg) mRelease args))
+                  -- m48: no job cap for the streamed transcode (0)
+                  (streamTranscode streamTranscodeTimeoutSec mRelease args))
+
+-- | m48: the job timeout for a STREAMED transcode is 0 (no cap). The
+-- configurable 'configFfmpegTimeoutSec' cap stays in force for the
+-- non-streaming ffmpeg uses (chapters probe, HLS/DASH segments); a
+-- streamed transcode runs until ffmpeg finishes or the client
+-- disconnects (which kills the process via the sink abort).
+streamTranscodeTimeoutSec :: Int
+streamTranscodeTimeoutSec = 0
 
 -- | The 'Network.Wai.StreamingBody' used with 'responseStream': run
 -- ffmpeg with @args@ and write its stdout to the WAI sink in chunks of

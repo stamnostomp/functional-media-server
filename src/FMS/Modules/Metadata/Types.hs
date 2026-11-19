@@ -1,6 +1,7 @@
 module FMS.Modules.Metadata.Types
   ( MediaMetadata(..)
   , emptyMetadata
+  , metadataStoredJSON
   , editableFieldNames
   , fieldNameFor
   , applyManualPatch
@@ -40,6 +41,7 @@ data MediaMetadata = MediaMetadata
   { metaTitle          :: Maybe Text          -- ^ <title>
   , metaOverview       :: Maybe Text          -- ^ <overview> / plot
   , metaGenres         :: [Text]              -- ^ all <genre> elements
+  , metaKeywords       :: [Text]              -- ^ TMDB keywords (m53a; server-side ONLY, never in the public JSON)
   , metaStudios        :: [Text]              -- ^ all <studio> elements (milestone 4h)
   , metaPersons        :: [Text]              -- ^ actor/director/person names (milestone 4h)
   , metaTags           :: [Text]              -- ^ all <tag> elements (milestone 4h)
@@ -60,6 +62,7 @@ emptyMetadata = MediaMetadata
   { metaTitle          = Nothing
   , metaOverview       = Nothing
   , metaGenres         = []
+  , metaKeywords       = []
   , metaStudios        = []
   , metaPersons        = []
   , metaTags           = []
@@ -89,12 +92,21 @@ instance ToJSON MediaMetadata where
     , "lockedFields"   .= metaLockedFields m
     ]
 
+-- | m53a: persistence-only JSON for a metadata record — the public
+-- 'ToJSON' shape PLUS @keywords@ (server-side only; the public item /
+-- metadata API responses never include keywords).
+metadataStoredJSON :: MediaMetadata -> Value
+metadataStoredJSON m = case toJSON m of
+  Object o -> Object (KM.insert (Key.fromText "keywords") (toJSON (metaKeywords m)) o)
+  v        -> v
+
 instance FromJSON MediaMetadata where
   parseJSON = withObject "MediaMetadata" $ \o ->
     MediaMetadata
       <$> o .:? "title"
       <*> o .:? "overview"
       <*> o .:? "genres" .!= []
+      <*> o .:? "keywords" .!= []    -- m53a; persisted, but NOT in ToJSON (server-side only)
       <*> o .:? "studios" .!= []      -- milestone 4h; absent in pre-4h metadata.json
       <*> o .:? "persons" .!= []
       <*> o .:? "tags" .!= []
@@ -201,6 +213,7 @@ applyProviderMerge :: MediaMetadata -> MediaMetadata -> MediaMetadata
 applyProviderMerge old new =
   (foldl keepLocked new { metaLockedFields = metaLockedFields old } locked)
     { metaTags = mergeTags (metaTags old) (metaTags new) }
+    { metaKeywords = if null (metaKeywords new) then metaKeywords old else metaKeywords new }  -- m53a
   where
     locked = map T.toLower (metaLockedFields old)
     keepLocked acc f = case getFieldValue old f of

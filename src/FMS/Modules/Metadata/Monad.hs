@@ -32,7 +32,7 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Images (hasStoredImage, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt, tmdbSearchTvAt)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieDetailsAt, tmdbSearchMovieAt, tmdbSearchTvAt, tmdbTvDetailsKwAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
@@ -275,7 +275,23 @@ refreshFromTmdb itemIdent item = do
             pure Nothing
           Just top -> do
             let fresh = tmdbResultToMetadata top
-            merged <- mergeWithStored itemIdent fresh
+            merged0 <- mergeWithStored itemIdent fresh
+            -- m53a: /search carries no genre ids; fetch the detail endpoint
+            -- (append_to_response=keywords) for genres + keywords
+            -- (failure-graceful: they just stay empty).
+            let detailsFn = if isEp then tmdbTvDetailsKwAt else tmdbMovieDetailsAt
+            dres <- liftIO (detailsFn (configTmdbBaseUrl cfg) apiKey (tmdbId top))
+            case dres of
+              Left err ->
+                logInfo ("metadata: TMDB " <> kindWord <> " details for id "
+                         <> T.pack (show (tmdbId top)) <> " failed: " <> T.pack err)
+              Right _ -> pure ()
+            let (gs, kws) = either (const ([], [])) id dres
+                locked = map T.toLower (metaLockedFields merged0)
+                merged = merged0
+                  { metaGenres   = if "genres" `elem` locked || null gs then metaGenres merged0 else gs
+                  , metaKeywords = kws
+                  }
             setMetadata itemIdent merged
             logInfo ("metadata: \"" <> itemTitle item <> "\" (" <> kindWord <> " \"" <> cleanQ
                      <> "\") matched TMDB id "
@@ -305,7 +321,7 @@ fetchAndStoreTmdbImages cfg itemIdent itemTy tmdbIdNum = do
           stateDir = configStateDir cfg
       r <- liftIO (try (fetchTmdbImages apiKey (configTmdbBaseUrl cfg) kind
                          (T.pack (show tmdbIdNum)) (configTmdbImageBaseUrl cfg)
-                         (configTmdbImageSize cfg))
+                         (configTmdbImageSize cfg) (configTmdbBackdropSize cfg))  -- m49
                       :: IO (Either SomeException (Either String [(Text, Text, BS.ByteString)])))
       case r of
         Left e ->
@@ -342,6 +358,7 @@ tmdbResultToMetadata r =
     { metaTitle          = Just (tmdbTitle r)
     , metaOverview       = tmdbOverview r
     , metaGenres         = []
+    , metaKeywords       = []                          -- m53a: filled from the detail endpoint
     , metaStudios        = []
     , metaPersons        = []
     , metaTags           = []

@@ -37,6 +37,7 @@ data Config = Config
   , configTmdbBaseUrl :: !Text          -- ^ TMDB v3 API base (env FMS_TMDB_BASE_URL, default https://api.themoviedb.org/3)
   , configTmdbImageBaseUrl :: !Text     -- ^ TMDB image CDN base (env FMS_TMDB_IMAGE_BASE_URL, default https://image.tmdb.org/t/p)
   , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
+  , configTmdbBackdropSize :: !Text      -- ^ TMDB image size for backdrops/logos (env FMS_TMDB_BACKDROP_SIZE, default w1280; m49)
   , configScanWorkers :: !Int            -- ^ parallel worker threads for the per-file stat phase of a library scan (env FMS_SCAN_WORKERS, default 4, min 1 = sequential)
   , configMaxBodyBytes :: !Int           -- ^ max request body size in bytes; larger bodies get 413 (env FMS_MAX_BODY_BYTES, default 10485760 = 10 MiB; 0 = unlimited)
   , configMemoryWarnMb :: !Int           -- ^ RSS warn threshold in MB (env FMS_MEMORY_WARN_MB, default 1024; memory monitoring)

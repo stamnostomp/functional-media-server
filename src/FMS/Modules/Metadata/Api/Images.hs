@@ -92,9 +92,10 @@ fetchTmdbImages
   -> Text                    -- ^ @movie@ or @tv@
   -> Text                    -- ^ TMDB id
   -> Text                    -- ^ image CDN base (configTmdbImageBaseUrl)
-  -> Text                    -- ^ image size (configTmdbImageSize, e.g. w500)
+  -> Text                    -- ^ poster image size (configTmdbImageSize, e.g. w500)
+  -> Text                    -- ^ backdrop/logo image size (m49: configTmdbBackdropSize, e.g. w1280)
   -> IO (Either String [(Text, Text, BS.ByteString)])
-fetchTmdbImages apiKey apiBase kind tmdbId imageBase imageSize = do
+fetchTmdbImages apiKey apiBase kind tmdbId imageBase imageSize backdropSize = do
   eres <- tmdbFetch (tmdbImagesUrl apiBase apiKey kind tmdbId)
   case eres of
     Left err -> pure (Left err)
@@ -103,10 +104,13 @@ fetchTmdbImages apiKey apiBase kind tmdbId imageBase imageSize = do
         Nothing -> pure (Left "tmdb images: malformed JSON body")
         Just v  -> do
           let dl = tmdbImageListToDownloads v
-              imgUrl fp = T.unpack (T.dropWhileEnd (== '/') imageBase)
-                          ++ "/" ++ T.unpack imageSize ++ T.unpack fp
+              -- m49: backdrops/logos download at the (higher-res) backdrop
+              -- size, posters at the normal image size
+              sizeFor ty = if ty == "Primary" then imageSize else backdropSize
+              imgUrl ty fp = T.unpack (T.dropWhileEnd (== '/') imageBase)
+                          ++ "/" ++ T.unpack (sizeFor ty) ++ T.unpack fp
           pairs <- mapM (\(ty, fp) -> do
-                    r <- try (tmdbFetch (imgUrl fp))
+                    r <- try (tmdbFetch (imgUrl ty fp))
                            :: IO (Either SomeException (Either String LBS.ByteString))
                     pure (fmap (fmap (\b -> (ty, fp, LBS.toStrict b))) r))
                 dl

@@ -102,8 +102,9 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
-import FMS.Modules.Requests.Routes (requestsRoutes)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
+import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
+import FMS.Modules.Requests.Routes (fetchTorrentStatuses, markImported, requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders, Tracker (..), trackerPublicJson)
@@ -4296,6 +4297,89 @@ main = do
         , "\"download_payload_rate\"" `isInfixOf` enc
         , "\"id\":4" `isInfixOf` enc ])
     [True, True, True, True]
+
+  -- milestone 38: only mark Imported when the deluge torrent is complete
+  check "m38 importComplete: matched Seeding 100 -> True"
+    (importComplete sts37 "Other Movie" Nothing) True
+  check "m38 importComplete: matched Downloading 42.5 -> False"
+    (importComplete sts37 "Shrek 2001" (Just "Shrek 2001 1080p BluRay x265-LAMA")) False
+  check "m38 importComplete: progress 99.95 (not Seeding) -> True"
+    (importComplete [("X Movie", "Downloading", 99.95, 0)] "X Movie" Nothing) True
+  check "m38 importComplete: no matching torrent -> True (fallback file mode)"
+    (importComplete sts37 "Nope" Nothing) True
+  check "m38 importComplete: empty statuses -> True (deluge down)"
+    (importComplete [] "Shrek 2001" Nothing) True
+
+  -- m38 live: markImported gated on the live mock-deluge status
+  case mPy of
+    Nothing -> putStrLn "PASS: m38 mock-deluge IO tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m38dir = "/tmp/fms-m38-state"
+          m38dl = m38dir </> "downloads"
+          m38mock = "/tmp/fms-m38-mock"
+          m38log = m38mock </> "calls.log"
+          cfg38 = cfg27 { configStateDir = m38dir, configDownloadDir = m38dl
+                        , configDelugeUrl = "http://127.0.0.1:8915/json", configDelugePassword = "deluge" }
+          mockSrc38 = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "port = int(sys.argv[1]); log = sys.argv[2]; mode = sys.argv[3]"
+            , "state = {'connected': False}"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def do_POST(self):"
+            , "        n = int(self.headers.get('Content-Length', 0))"
+            , "        req = json.loads(self.rfile.read(n))"
+            , "        m = req.get('method', '')"
+            , "        res = None; cookie = False"
+            , "        if m == 'auth.login':"
+            , "            res = 'sess123' if req.get('params', [''])[0] == 'deluge' else False; cookie = res != False"
+            , "        elif m == 'web.get_hosts':"
+            , "            res = [['host-1', '127.0.0.1', 58846, 'localclient', '']]"
+            , "        elif m == 'web.connect':"
+            , "            state['connected'] = True; res = True"
+            , "        elif m == 'core.get_torrents_status' and state['connected']:"
+            , "            if mode == 'full':"
+            , "                res = {'t1': {'name': 'Shrek.2001.1080p.BluRay.x265-LAMA', 'state': 'Seeding', 'progress': 100.0, 'download_payload_rate': 0}}"
+            , "            else:"
+            , "                res = {'t1': {'name': 'Shrek.2001.1080p.BluRay.x265-LAMA', 'state': 'Downloading', 'progress': 50.0, 'download_payload_rate': 2048}}"
+            , "        payload = json.dumps({'result': res, 'error': None, 'id': req.get('id')}).encode()"
+            , "        self.send_response(200)"
+            , "        self.send_header('Content-Type', 'application/json')"
+            , "        if cookie:"
+            , "            self.send_header('Set-Cookie', 'deluge_web_session=sess123; Path=/')"
+            , "        self.send_header('Content-Length', str(len(payload)))"
+            , "        self.end_headers()"
+            , "        self.wfile.write(payload)"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+          r38 = (mkReq "Shrek 2001" Downloading) { reqId = "r38"
+                 , reqSourceRelease = Just "Shrek 2001 1080p BluRay x265-LAMA" }
+      resetDir m38dir
+      resetDir m38mock
+      createDirectoryIfMissing True m38mock
+      createDirectoryIfMissing True m38dl
+      writeFile (m38mock </> "mock.py") mockSrc38
+      writeFile (m38dl </> "Shrek.2001.1080p.BluRay.x265-LAMA.mkv") "videobytes"
+      env38 <- newAppEnv cfg38
+      _ <- runApp env38 (loadRequestsIntoState >> loadRequestSettingsIntoState >> insertRequest r38)
+      let runMock mode act = bracket
+            (createProcess (proc "python3" [m38mock </> "mock.py", "8915", m38log, mode]))
+            (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+            (\_ -> do
+              rok <- waitForFile (m38log ++ ".ready") 40
+              if not rok then putStrLn "PASS: m38 mock phase skipped (mock did not start)" else act)
+      runMock "half" $ do
+        _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
+        st1 <- runApp env38 (fmap reqStatus <$> getRequest "r38")
+        check "m38 live: torrent at 50% with file present -> stays Downloading"
+          (either (const Nothing) id st1) (Just Downloading)
+      runMock "full" $ do
+        _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
+        st2 <- runApp env38 (fmap reqStatus <$> getRequest "r38")
+        check "m38 live: torrent Seeding 100% with file present -> Imported"
+          (either (const Nothing) id st2) (Just Imported)
 
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"

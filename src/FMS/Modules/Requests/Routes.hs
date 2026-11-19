@@ -1,6 +1,8 @@
 module FMS.Modules.Requests.Routes
   ( requestsRoutes
   , CreateRequest (..)
+  , markImported
+  , fetchTorrentStatuses
   ) where
 
 import Control.Applicative ((<|>))
@@ -25,7 +27,7 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
-import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
+import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
 jsonCT :: ResponseHeaders
@@ -88,32 +90,39 @@ instance FromJSON CreateRequest where
 -- walked RECURSIVELY (Deluge saves into <downloads>/<Torrent.Name>/...);
 -- 'scanDirectory' also filters isMediaFile and returns [] for a missing
 -- dir.
-markImported :: [Request] -> AppM ()
-markImported reqs = do
+markImported :: [(Text, Text, Double, Double)] -> [Request] -> AppM ()
+markImported statuses reqs = do
   s <- getRequestSettings   -- m27: effective (saved) download dir
   let dir = T.unpack (rsDownloadDir s)
   efiles <- liftIO (try (scanDirectory False dir) :: IO (Either SomeException [FilePath]))
   let files = either (const []) id efiles
-  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading, matchesRequestDownload (reqTitle r) (reqSourceRelease r) files ]
+  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading
+                     , matchesRequestDownload (reqTitle r) (reqSourceRelease r) files
+                     , importComplete statuses (reqTitle r) (reqSourceRelease r) ]  -- m38: only when the torrent is complete
   where
     markOne r = do
       _ <- setRequestStatus (reqId r) Imported Nothing
       pure ()
 
+-- | m38: fetch live Deluge torrent statuses ONCE per read (shared by
+-- 'markImported' and 'attachLiveProgress'); graceful [] on any failure.
+fetchTorrentStatuses :: AppM [(Text, Text, Double, Double)]
+fetchTorrentStatuses = do
+  s <- getRequestSettings
+  est <- liftIO (delugeTorrentStatuses (rsDelugeUrl s) (rsDelugePassword s))
+  case est of
+    Left err -> do
+      logWarn ("requests: deluge status query failed: " <> T.pack err)
+      pure []
+    Right sts -> pure sts
+
 -- | m37: fill live Deluge progress/state onto Downloading requests by
 -- querying the Deluge web API (core.get_torrents_status) with the effective
 -- settings. Failure-graceful: on any error the fields stay Nothing (null).
-attachLiveProgress :: [Request] -> AppM [Request]
-attachLiveProgress reqs
-  | not (any (\r -> reqStatus r == Downloading) reqs) = pure reqs
-  | otherwise = do
-      s <- getRequestSettings
-      est <- liftIO (delugeTorrentStatuses (rsDelugeUrl s) (rsDelugePassword s))
-      case est of
-        Left err -> do
-          logWarn ("requests: deluge status query failed: " <> T.pack err)
-          pure reqs
-        Right sts -> pure (map (fillOne sts) reqs)
+attachLiveProgress :: [(Text, Text, Double, Double)] -> [Request] -> [Request]
+attachLiveProgress statuses reqs
+  | not (any (\r -> reqStatus r == Downloading) reqs) = reqs
+  | otherwise = map (fillOne statuses) reqs
   where
     fillOne sts r
       | reqStatus r /= Downloading = r
@@ -129,9 +138,10 @@ listRequestsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 listRequestsHandler _captures req = do
   mUser <- currentUserFromReq req
   all0 <- listRequests
-  markImported all0
+  sts <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  markImported sts all0
   all' <- listRequests
-  all'' <- attachLiveProgress all'   -- m37: live Deluge progress on Downloading rows
+  let all'' = attachLiveProgress sts all'   -- m37: live Deluge progress on Downloading rows
   let isAdminUser = maybe True isAdmin mUser  -- open mode (no user) sees all
       qparams = queryParams (queryString req)
   filtered <- case lookup "userid" qparams of
@@ -154,7 +164,8 @@ getRequestHandler captures req = do
   rid <- captureId captures
   mUser <- currentUserFromReq req
   all0 <- listRequests
-  markImported all0
+  sts <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  markImported sts all0
   m <- getRequest rid
   case m of
     Nothing -> throwError (NotFound ("no request with id " <> rid))
@@ -162,9 +173,7 @@ getRequestHandler captures req = do
       case mUser of
         Just u | not (isAdmin u) && userId u /= reqUserId r ->
           throwError (Forbidden "not your request")
-        _ -> do
-          r' <- listToMaybe' <$> attachLiveProgress [r]   -- m37: live progress
-          pure (jsonResponse (maybe r id r'))
+        _ -> pure (jsonResponse (maybe r id (listToMaybe' (attachLiveProgress sts [r]))))
   where
     listToMaybe' [] = Nothing
     listToMaybe' (x : _) = Just x

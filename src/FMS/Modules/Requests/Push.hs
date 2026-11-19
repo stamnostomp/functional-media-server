@@ -12,6 +12,7 @@ module FMS.Modules.Requests.Push
   , parseTorrentStatuses
   , delugeTorrentStatuses
   , matchTorrentProgress
+  , importComplete
   , getFirstHostId
   , delugeAddMagnetBody
   , delugeAddFileBody
@@ -446,3 +447,14 @@ matchTorrentProgress title mRelease torrents =
     matchesOne name =
       let nn = normalizeTitle name
       in any (\c -> not (T.null c) && (nn == c || T.isInfixOf c nn || T.isInfixOf nn c)) cands
+
+-- | m38: should a Downloading request be marked Imported? When a live
+-- Deluge torrent matches (by title/release name), only when it is complete
+-- (progress >= 99.9 or state Seeding) -- Deluge creates the file
+-- immediately and fills it progressively. When no torrent matches (fallback
+-- file mode, Deluge down), keep the file-exists behavior.
+importComplete :: [(Text, Text, Double, Double)] -> Text -> Maybe Text -> Bool
+importComplete statuses title mRelease =
+  case matchTorrentProgress title mRelease statuses of
+    Just (p, st) -> p >= 99.9 || st == "Seeding"
+    Nothing      -> True

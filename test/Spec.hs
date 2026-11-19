@@ -111,7 +111,7 @@ import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
-import FMS.Modules.Requests.Routes (fetchTorrentStatuses, markImported, requestsRoutes)
+import FMS.Modules.Requests.Routes (attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders, Tracker (..), trackerPublicJson)
@@ -4355,6 +4355,15 @@ main = do
     (matchTorrentProgress "Nope" Nothing sts37) Nothing
   check "m37 matchTorrentProgress: empty torrent list -> Nothing"
     (matchTorrentProgress "Shrek 2001" Nothing []) Nothing
+  -- m50: attachLiveProgress fills ANY matching request (not only Downloading)
+  check "m50 attachLiveProgress: Imported request with matching Seeding torrent gets Progress 100/Seeding"
+    (map (\rq -> (reqStatus rq, reqProgress rq, reqTorrentState rq))
+      (attachLiveProgress sts37 [(mkReq "Other Movie" Imported) { reqSourceRelease = Just "Other Movie 2020" }]))
+    [(Imported, Just 100.0, Just "Seeding")]
+  check "m50 attachLiveProgress: non-matching stays null, Downloading still filled"
+    (map (\rq -> (reqProgress rq, reqTorrentState rq))
+      (attachLiveProgress sts37 [mkReq "Nope" Imported, mkReq "Shrek 2001" Downloading]))
+    [(Nothing, Nothing), (Just 42.5, Just "Downloading")]
   check "m37 parseTorrentStatuses: result object -> tuples (sorted; KeyMap order is arbitrary)"
     (fmap (sort . parseTorrentStatuses) (Aeson.decode' (LBSC.pack "{\"t1\":{\"name\":\"A Movie\",\"state\":\"Downloading\",\"progress\":42.5,\"download_payload_rate\":1024},\"t2\":{\"name\":\"B\",\"state\":\"Seeding\",\"progress\":100}}")))
     (Just [("A Movie", "Downloading", 42.5, 1024.0), ("B", "Seeding", 100.0, 0.0)])

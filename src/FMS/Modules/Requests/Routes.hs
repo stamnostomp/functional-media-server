@@ -3,6 +3,7 @@ module FMS.Modules.Requests.Routes
   , CreateRequest (..)
   , markImported
   , fetchTorrentStatuses
+  , attachLiveProgress
   ) where
 
 import Control.Applicative ((<|>))
@@ -116,19 +117,18 @@ fetchTorrentStatuses = do
       pure []
     Right sts -> pure sts
 
--- | m37: fill live Deluge progress/state onto Downloading requests by
--- querying the Deluge web API (core.get_torrents_status) with the effective
--- settings. Failure-graceful: on any error the fields stay Nothing (null).
+-- | m37: fill live Deluge progress/state onto requests whose title/release
+-- matches a live torrent by querying the Deluge web API
+-- (core.get_torrents_status) with the effective settings. m50: ANY request
+-- status is filled (not only Downloading), so an Imported-but-still-seeding
+-- torrent keeps Progress 100 / TorrentState Seeding. Failure-graceful: on
+-- any error the fields stay Nothing (null).
 attachLiveProgress :: [(Text, Text, Double, Double)] -> [Request] -> [Request]
-attachLiveProgress statuses reqs
-  | not (any (\r -> reqStatus r == Downloading) reqs) = reqs
-  | otherwise = map (fillOne statuses) reqs
+attachLiveProgress statuses reqs = map (fillOne statuses) reqs
   where
-    fillOne sts r
-      | reqStatus r /= Downloading = r
-      | otherwise = case matchTorrentProgress (reqTitle r) (reqSourceRelease r) sts of
-          Just (p, st) -> r { reqProgress = Just p, reqTorrentState = Just st }
-          Nothing      -> r
+    fillOne sts r = case matchTorrentProgress (reqTitle r) (reqSourceRelease r) sts of
+      Just (p, st) -> r { reqProgress = Just p, reqTorrentState = Just st }
+      Nothing      -> r
 
 -- | @GET /Requests@ -> @{\"Requests\": [...], \"TotalRecordCount\": n}@.
 -- Non-admins see only their own requests; admins see all. The optional

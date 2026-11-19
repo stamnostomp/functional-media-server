@@ -18,6 +18,7 @@ import Control.Monad (foldM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import qualified Data.ByteString as BS
+import Data.List (nub)
 import Data.HashMap.Strict (HashMap)
 import Data.Maybe (isJust)
 import qualified Data.HashMap.Strict as HM
@@ -29,7 +30,7 @@ import System.FilePath ((</>), takeDirectory, takeExtension)
 import FMS.Core.Monad (AppEnv (..), AppM, MonadLog (..), getState, putState)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.MediaItem (MediaItem (..))
-import FMS.Modules.Images (hasStoredImage, storeImageBytes)
+import FMS.Modules.Images (hasStoredImage, removeStoredImages, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
 import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieDetailsAt, tmdbSearchMovieAt, tmdbSearchTvAt, tmdbTvDetailsKwAt)
@@ -338,7 +339,13 @@ fetchAndStoreTmdbImages cfg force itemIdent itemTy tmdbIdNum = do
                   <> " failed: " <> T.pack (show e))
         Right (Left err) ->
           logInfo ("metadata: no TMDB images for item " <> itemIdent <> ": " <> T.pack err)
-        Right (Right dl) ->
+        Right (Right dl) -> do
+          -- m57: a forced refresh replaces the stored artwork of each type
+          -- first, so re-downloaded files land on the primary stems
+          -- (Backdrop, Primary, ...) instead of appending new index stems.
+          when force $
+            forM_ (nub [ ty | (ty, _, _) <- dl ]) $ \ty ->
+              liftIO (removeStoredImages stateDir itemIdent ty)
           forM_ dl $ \(ty, fp, bytes) -> do
             has <- liftIO (hasStoredImage stateDir itemIdent ty)
             if has && not force

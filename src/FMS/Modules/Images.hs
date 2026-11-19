@@ -14,6 +14,7 @@ module FMS.Modules.Images
   , blurhashPairsForItem
   , hasStoredImage
   , storeImageBytes
+  , removeStoredImages
   , isUnderDir
   , purgeBlurhashesForItem
   ) where
@@ -417,6 +418,21 @@ hasStoredImage stateDir i ty = do
       files <- backdropFiles dir
       pure (not (null files))
     else isJust <$> findStoredImage dir ty
+
+-- | Remove every stored image of @type@ for item @i@: all @Backdrop*@
+-- files for @Backdrop@, else the single stored file of that type. Used by
+-- the forced TMDB artwork refresh (m57) so re-downloaded artwork replaces
+-- the old files instead of appending new index stems.
+removeStoredImages :: FilePath -> Text -> Text -> IO ()
+removeStoredImages stateDir i ty = do
+  let dir = imagesDirFor stateDir i
+  if T.toLower ty == "backdrop"
+    then do
+      files <- backdropFiles dir
+      mapM_ removeFile files
+    else do
+      m <- findStoredImage dir ty
+      mapM_ (removeFile . fst) m
 
 -- | Store raw image bytes as the item's image of @ty@ in the same layout
 -- as 'uploadImageHandler', returning the path written. @Backdrop@ images

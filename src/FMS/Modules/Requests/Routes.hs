@@ -18,14 +18,14 @@ import qualified Network.Wai as Wai
 
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError (..), AppM, envConfig, runApp)
+import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, runApp)
 import FMS.Modules.Indexers (resolveReleaseBytes)
 import FMS.Core.Query (queryParams)
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
-import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, matchesRequestDownload, parseProxiedPath, pushRequest)
+import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
 jsonCT :: ResponseHeaders
@@ -100,6 +100,27 @@ markImported reqs = do
       _ <- setRequestStatus (reqId r) Imported Nothing
       pure ()
 
+-- | m37: fill live Deluge progress/state onto Downloading requests by
+-- querying the Deluge web API (core.get_torrents_status) with the effective
+-- settings. Failure-graceful: on any error the fields stay Nothing (null).
+attachLiveProgress :: [Request] -> AppM [Request]
+attachLiveProgress reqs
+  | not (any (\r -> reqStatus r == Downloading) reqs) = pure reqs
+  | otherwise = do
+      s <- getRequestSettings
+      est <- liftIO (delugeTorrentStatuses (rsDelugeUrl s) (rsDelugePassword s))
+      case est of
+        Left err -> do
+          logWarn ("requests: deluge status query failed: " <> T.pack err)
+          pure reqs
+        Right sts -> pure (map (fillOne sts) reqs)
+  where
+    fillOne sts r
+      | reqStatus r /= Downloading = r
+      | otherwise = case matchTorrentProgress (reqTitle r) (reqSourceRelease r) sts of
+          Just (p, st) -> r { reqProgress = Just p, reqTorrentState = Just st }
+          Nothing      -> r
+
 -- | @GET /Requests@ -> @{\"Requests\": [...], \"TotalRecordCount\": n}@.
 -- Non-admins see only their own requests; admins see all. The optional
 -- @userId@ filter is admin-only (403 otherwise). m20b: Downloading
@@ -110,16 +131,17 @@ listRequestsHandler _captures req = do
   all0 <- listRequests
   markImported all0
   all' <- listRequests
+  all'' <- attachLiveProgress all'   -- m37: live Deluge progress on Downloading rows
   let isAdminUser = maybe True isAdmin mUser  -- open mode (no user) sees all
       qparams = queryParams (queryString req)
   filtered <- case lookup "userid" qparams of
     Just uid
-      | isAdminUser -> pure (filter (\r -> reqUserId r == uid) all')
+      | isAdminUser -> pure (filter (\r -> reqUserId r == uid) all'')
       | otherwise   -> throwError (Forbidden "userId filter is admin-only")
     Nothing
-      | isAdminUser -> pure all'
+      | isAdminUser -> pure all''
       | otherwise   -> case mUser of
-          Just u  -> pure (filter (\r -> reqUserId r == userId u) all')
+          Just u  -> pure (filter (\r -> reqUserId r == userId u) all'')
           Nothing -> pure []
   pure (jsonResponse (object
     [ "Requests" .= filtered
@@ -140,7 +162,12 @@ getRequestHandler captures req = do
       case mUser of
         Just u | not (isAdmin u) && userId u /= reqUserId r ->
           throwError (Forbidden "not your request")
-        _ -> pure (jsonResponse r)
+        _ -> do
+          r' <- listToMaybe' <$> attachLiveProgress [r]   -- m37: live progress
+          pure (jsonResponse (maybe r id r'))
+  where
+    listToMaybe' [] = Nothing
+    listToMaybe' (x : _) = Just x
 
 -- | @POST /Requests@ — create a request for the current user (201 with the
 -- created request). Title must be non-empty (400). Duplicate check across
@@ -190,6 +217,8 @@ createRequestHandler _captures req = do
             , reqApprovedBy = Nothing
             , reqError = Nothing
             , reqDownloadDir = Just (rsDownloadDir s)   -- m27: stamp the location
+            , reqProgress = Nothing      -- m37: live-only, filled on read
+            , reqTorrentState = Nothing  -- m37: live-only, filled on read
             }
       _ <- insertRequest r0
       -- m20b: auto-approved requests are pushed immediately

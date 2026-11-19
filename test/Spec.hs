@@ -102,7 +102,7 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, getFirstHostId, matchesDownload, matchesRequestDownload, parseProxiedPath, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Routes (requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
@@ -326,6 +326,75 @@ m29MockTests = do
   fbB <- doesFileExist (m29dir </> "dl-b" </> "other-movie.magnet")
   check "m29 push falls back to the .magnet file when the daemon never connects" [mPushFb, Just fbB] [Just True, Just True]
 
+
+-- | m37: mock deluge that requires login -> get_hosts -> connect before
+-- core.get_torrents_status and returns two torrents with progress values.
+m37MockTests :: IO ()
+m37MockTests = do
+  let m37dir = "/tmp/fms-m37-mock"
+      mockPy = m37dir </> "mock.py"
+      logC = m37dir </> "calls-c.log"
+      mockSrc = unlines
+        [ "import json, sys"
+        , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+        , "port = int(sys.argv[1]); log = sys.argv[2]"
+        , "state = {'connected': False}"
+        , "class H(BaseHTTPRequestHandler):"
+        , "    def log_message(self, *a): pass"
+        , "    def do_POST(self):"
+        , "        n = int(self.headers.get('Content-Length', 0))"
+        , "        req = json.loads(self.rfile.read(n))"
+        , "        m = req.get('method', '')"
+        , "        with open(log, 'a') as f:"
+        , "            f.write(m + chr(10))"
+        , "        res = None; err = None; cookie = False"
+        , "        if m == 'auth.login':"
+        , "            if req.get('params', [''])[0] == 'deluge':"
+        , "                res = 'sess123'; cookie = True"
+        , "            else:"
+        , "                res = False"
+        , "        elif m == 'web.get_hosts':"
+        , "            res = [['host-1', '127.0.0.1', 58846, 'localclient', '']]"
+        , "        elif m == 'web.connect':"
+        , "            state['connected'] = True; res = True"
+        , "        elif m == 'core.get_torrents_status':"
+        , "            if state['connected']:"
+        , "                res = {'t1': {'name': 'Shrek.2001.1080p.BluRay.x265-LAMA', 'state': 'Downloading', 'progress': 42.5, 'download_payload_rate': 1024}, 't2': {'name': 'Other Movie 2020', 'state': 'Seeding', 'progress': 100.0, 'download_payload_rate': 0}}"
+        , "            else:"
+        , "                res = None; err = 'Unknown method'"
+        , "        payload = json.dumps({'result': res, 'error': err, 'id': req.get('id')}).encode()"
+        , "        self.send_response(200)"
+        , "        self.send_header('Content-Type', 'application/json')"
+        , "        if cookie:"
+        , "            self.send_header('Set-Cookie', 'deluge_web_session=sess123; Path=/')"
+        , "        self.send_header('Content-Length', str(len(payload)))"
+        , "        self.end_headers()"
+        , "        self.wfile.write(payload)"
+        , "srv = HTTPServer(('127.0.0.1', port), H)"
+        , "open(log + '.ready', 'w').write('ok')"
+        , "srv.serve_forever()" ]
+  resetDir m37dir
+  createDirectoryIfMissing True m37dir
+  writeFile mockPy mockSrc
+  bracket
+    (createProcess (proc "python3" [mockPy, "8914", logC]))
+    (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+    (\_ -> do
+      rok <- waitForFile (logC ++ ".ready") 40
+      if not rok
+        then putStrLn "PASS: m37 mock-deluge IO tests skipped (mock did not start)"
+        else do
+          res <- delugeTorrentStatuses "http://127.0.0.1:8914/json" "deluge"
+          check "m37 delugeTorrentStatuses: two torrents with progress parsed (sorted)"
+            (fmap sort res)
+            (Right (sort [ ("Shrek.2001.1080p.BluRay.x265-LAMA", "Downloading", 42.5, 1024.0)
+                         , ("Other Movie 2020", "Seeding", 100.0, 0.0) ]))
+          logTxt <- readFile logC
+          check "m37 delugeTorrentStatuses: mock saw login -> get_hosts -> connect -> get_torrents_status in order"
+            (lines logTxt) ["auth.login", "web.get_hosts", "web.connect", "core.get_torrents_status"]
+          resBad <- delugeTorrentStatuses "http://127.0.0.1:8914/json" "wrong"
+          check "m37 delugeTorrentStatuses: bad password -> Left"
+            (either (const True) (const False) resBad) True)
 
 main :: IO ()
 main = do
@@ -3772,7 +3841,8 @@ main = do
         , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
         , reqSourceUrl = Nothing, reqMagnet = Nothing, reqDownloadUrl = Nothing
         , reqCreatedAt = reqT0, reqUpdatedAt = reqT0
-        , reqApprovedBy = Nothing, reqError = Nothing, reqDownloadDir = Nothing }
+        , reqApprovedBy = Nothing, reqError = Nothing, reqDownloadDir = Nothing
+        , reqProgress = Nothing, reqTorrentState = Nothing }
       reqT0 = UTCTime (fromGregorian 2026 1 1) 0
   check "duplicateOf: active match, rejected ignored, other title no"
     [ fmap reqId (duplicateOf "The Matrix" [mkReq "the matrix" Pending])
@@ -3787,8 +3857,8 @@ main = do
   check "Request ToJSON: PascalCase API keys"
     reqKeys
     [ "ApprovedBy", "CreatedAt", "DownloadDir", "DownloadUrl", "Error", "Id", "Magnet"
-    , "MediaType", "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
-    , "Status", "Title", "UpdatedAt", "UserId", "UserName", "Year" ]
+    , "MediaType", "Progress", "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
+    , "Status", "Title", "TorrentState", "UpdatedAt", "UserId", "UserName", "Year" ]
   check "Request JSON roundtrip (PascalCase)"
     [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
     [True]
@@ -3921,8 +3991,8 @@ main = do
     [ Just "host-1", Nothing, Nothing, Nothing ]
   mPy <- findExecutable "python3"
   case mPy of
-    Just _  -> m29MockTests
-    Nothing -> putStrLn "PASS: m29 mock-deluge IO tests skipped (python3 not in PATH)"
+    Just _  -> m29MockTests >> m37MockTests
+    Nothing -> putStrLn "PASS: m29/m37 mock-deluge IO tests skipped (python3 not in PATH)"
   -- milestone 27: runtime download-client settings + DownloadDir stamp
   let rs0 = RequestSettings { rsDelugeUrl = "http://127.0.0.1:8112/json"
                             , rsDelugePassword = "deluge", rsDownloadDir = "/dl"
@@ -4203,6 +4273,29 @@ main = do
     (fmap tmdbId (pickTmdbResult Nothing rs36)) (Just 1)
   check "m36 pickTmdbResult: empty list -> Nothing"
     (pickTmdbResult (Just 1999) []) Nothing
+
+  -- milestone 37: live deluge progress on requests
+  let sts37 = [ ("Shrek.2001.1080p.BluRay.x265-LAMA", "Downloading", 42.5, 1024.0)
+              , ("Other Movie 2020", "Seeding", 100.0, 0.0) ]
+  check "m37 matchTorrentProgress: release-name match"
+    (matchTorrentProgress "Shrek 2001" (Just "Shrek 2001 1080p BluRay x265-LAMA") sts37)
+    (Just (42.5, "Downloading"))
+  check "m37 matchTorrentProgress: title containment match"
+    (matchTorrentProgress "Other Movie" Nothing sts37) (Just (100.0, "Seeding"))
+  check "m37 matchTorrentProgress: no match -> Nothing"
+    (matchTorrentProgress "Nope" Nothing sts37) Nothing
+  check "m37 matchTorrentProgress: empty torrent list -> Nothing"
+    (matchTorrentProgress "Shrek 2001" Nothing []) Nothing
+  check "m37 parseTorrentStatuses: result object -> tuples (sorted; KeyMap order is arbitrary)"
+    (fmap (sort . parseTorrentStatuses) (Aeson.decode' (LBSC.pack "{\"t1\":{\"name\":\"A Movie\",\"state\":\"Downloading\",\"progress\":42.5,\"download_payload_rate\":1024},\"t2\":{\"name\":\"B\",\"state\":\"Seeding\",\"progress\":100}}")))
+    (Just [("A Movie", "Downloading", 42.5, 1024.0), ("B", "Seeding", 100.0, 0.0)])
+  check "m37 delugeTorrentsStatusBody: method + keys + id in encoded JSON"
+    (let enc = BSC.unpack (LBS.toStrict (Aeson.encode (delugeTorrentsStatusBody 4)))
+     in [ "core.get_torrents_status" `isInfixOf` enc
+        , "\"progress\"" `isInfixOf` enc
+        , "\"download_payload_rate\"" `isInfixOf` enc
+        , "\"id\":4" `isInfixOf` enc ])
+    [True, True, True, True]
 
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"

@@ -93,6 +93,8 @@ requestFromPersist = withObject "request" $ \o ->
     <*> o .:? "approvedBy"
     <*> o .:? "error"
     <*> o .:? "downloadDir"   -- m27; old files without it load fine
+    <*> o .:? "progress"      -- m37: live-only; never written, tolerated on read
+    <*> o .:? "torrentState"
 
 -- | Load the persisted download-client settings
 -- (@stateDir/requests-settings.json@). A missing or unreadable file yields

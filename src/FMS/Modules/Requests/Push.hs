@@ -8,6 +8,10 @@ module FMS.Modules.Requests.Push
   , delugeGetHostsBody
   , delugeConnectBody
   , delugeConnectedBody
+  , delugeTorrentsStatusBody
+  , parseTorrentStatuses
+  , delugeTorrentStatuses
+  , matchTorrentProgress
   , getFirstHostId
   , delugeAddMagnetBody
   , delugeAddFileBody
@@ -19,6 +23,7 @@ module FMS.Modules.Requests.Push
 import Control.Exception (SomeException, try)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Char (isDigit)
+import Data.Maybe (listToMaybe)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -358,3 +363,86 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title reso
                 BS.writeFile (downloadDir </> (slug <.> "torrent")) bytes
                 pure (Right ())
           Nothing -> pure (Left "no download source")
+
+-- | Pure: Deluge core.get_torrents_status body (m37) -- all torrents, asking
+-- only for the keys the progress bar needs.
+delugeTorrentsStatusBody :: Int -> Value
+delugeTorrentsStatusBody rid =
+  object [ "method" .= ("core.get_torrents_status" :: Text)
+         , "params" .= [ object []
+                       , Aeson.toJSON (["name", "state", "progress", "download_payload_rate"] :: [Text]) ]
+         , "id" .= rid ]
+
+-- | Pure: parse a core.get_torrents_status result object (torrent id ->
+-- status object) into @(name, state, progress 0-100, download_payload_rate)@.
+-- Torrents missing any key are skipped.
+parseTorrentStatuses :: Aeson.Value -> [(Text, Text, Double, Double)]
+parseTorrentStatuses (Aeson.Object o) =
+  [ (name, state, prog, rate)
+  | Aeson.Object to <- KeyMap.elems o
+  , Just (Aeson.String name)  <- [KeyMap.lookup (Key.fromText "name") to]
+  , Just (Aeson.String state) <- [KeyMap.lookup (Key.fromText "state") to]
+  , Just prog <- [numField "progress" to]
+  , let rate = fromMaybe0 (numField "download_payload_rate" to)
+  ]
+  where
+    numField k m = case KeyMap.lookup (Key.fromText k) m of
+      Just (Aeson.Number n) -> Just (realToFrac n)
+      _ -> Nothing
+    fromMaybe0 (Just x) = x
+    fromMaybe0 Nothing  = 0
+parseTorrentStatuses _ = []
+
+-- | m37: query the Deluge web API for live torrent statuses. Same
+-- never-throw pattern as 'pushRequest': auth.login (id 1), best-effort
+-- web.get_hosts (id 2) + web.connect (id 3), then core.get_torrents_status
+-- (id 4). Returns @(name, state, progress, download_payload_rate)@ per
+-- torrent; Left err on any failure.
+delugeTorrentStatuses :: Text -> Text -> IO (Either String [(Text, Text, Double, Double)])
+delugeTorrentStatuses delugeUrl delugePassword = do
+  eres <- try $ do
+    manager <- newManager (tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro 10000000 })
+    eLogin <- postJson manager delugeUrl Nothing (delugeLoginBody delugePassword 1)
+    case eLogin of
+      Left err -> pure (Left err)
+      Right (body, cookie) ->
+        case rpcResult body of
+          Just res | rpcResultOk (Just res) -> do
+            eHosts <- postJson manager delugeUrl cookie (delugeGetHostsBody 2)
+            case eHosts of
+              Left _ -> pure ()   -- best-effort connect: proceed anyway
+              Right (hbody, _) ->
+                case getFirstHostId hbody of
+                  Nothing -> pure ()
+                  Just hid -> do
+                    _ <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+                    pure ()
+            eSt <- postJson manager delugeUrl cookie (delugeTorrentsStatusBody 4)
+            case eSt of
+              Left err -> pure (Left err)
+              Right (sbody, _) ->
+                case rpcResult sbody of
+                  Just v -> pure (Right (parseTorrentStatuses v))
+                  Nothing -> pure (Left "deluge get_torrents_status returned no result")
+          _ -> pure (Left "deluge auth.login failed")
+  case eres of
+    Left (e :: SomeException) -> pure (Left ("http failed: " ++ show e))
+    Right r                   -> pure r
+
+-- | m37: pure matcher -- find the live torrent matching a request by
+-- normalized name equality OR containment against the request title /
+-- source release name. Returns the first match's @(progress, state)@.
+matchTorrentProgress
+  :: Text                              -- ^ request title
+  -> Maybe Text                        -- ^ source release name (optional)
+  -> [(Text, Text, Double, Double)]    -- ^ (torrent name, state, progress, rate)
+  -> Maybe (Double, Text)
+matchTorrentProgress title mRelease torrents =
+  listToMaybe [ (prog, st) | (name, st, prog, _rate) <- torrents, matchesOne name ]
+  where
+    nt = normalizeTitle title
+    cands = nt : maybe [] (\rel -> [normalizeTitle rel]) mRelease
+    matchesOne name =
+      let nn = normalizeTitle name
+      in any (\c -> not (T.null c) && (nn == c || T.isInfixOf c nn || T.isInfixOf nn c)) cands

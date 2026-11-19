@@ -84,6 +84,8 @@ data Request = Request
   , reqApprovedBy   :: !(Maybe Text)
   , reqError        :: !(Maybe Text)
   , reqDownloadDir  :: !(Maybe Text)   -- ^ m27: download location stamped at creation from the effective settings
+  , reqProgress     :: !(Maybe Double) -- ^ m37: live Deluge progress 0-100 (not persisted; filled on read)
+  , reqTorrentState :: !(Maybe Text)   -- ^ m37: live Deluge torrent state (not persisted; filled on read)
   } deriving (Eq, Show)
 
 -- | API JSON (PascalCase keys, the API convention).
@@ -108,6 +110,8 @@ instance ToJSON Request where
     , "ApprovedBy"   .= reqApprovedBy r
     , "Error"        .= reqError r
     , "DownloadDir"  .= reqDownloadDir r
+    , "Progress"     .= reqProgress r      -- m37: live-only
+    , "TorrentState" .= reqTorrentState r  -- m37: live-only
     ]
 
 instance FromJSON Request where
@@ -132,6 +136,8 @@ instance FromJSON Request where
       <*> o .:? "ApprovedBy"
       <*> o .:? "Error"
       <*> o .:? "DownloadDir"
+      <*> o .:? "Progress"      -- m37: live-only, absent in API payloads sent by clients
+      <*> o .:? "TorrentState"
 
 -- | Pure: normalize a title for duplicate detection -- lowercase, keep
 -- alphanumerics only (everything else becomes a space), collapse and

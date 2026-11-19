@@ -1,6 +1,8 @@
 module FMS.Modules.Library
   ( libraryModule
   , MonadLibrary(..)
+  , metaMapNow
+  , metaTitleLookup
   ) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -21,6 +23,8 @@ import FMS.Modules.Library.Routes
   , libraryRoutes
   , mediaSourcesHandler
   , searchHintsHandler
+  , metaMapNow
+  , metaTitleLookup
   , similarHandler
   , specialFeaturesHandler
   )

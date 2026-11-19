@@ -42,7 +42,7 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Module (..), Route (..), Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders, withDisplayTitle, withDisplayTitleLower)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Memory (parseProcStatusRss, trimRing)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
@@ -4323,6 +4323,29 @@ main = do
     , ("Shrek", Just 2001), ("Se7en", Just 1995) ]
   check "m39 cleanTitleForProvider: hyphenated title word without group kept"
     (cleanTitleForProvider "Spider-Man") ("Spider Man", Nothing)
+
+  -- milestone 40: DisplayTitle / displayTitle on item JSON
+  let m40fieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value
+      m40fieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing
+      m40item = MediaItem
+        { itemId = "40", itemTitle = "Shrek.2001.1080p.BluRay.x265-LAMA", itemPath = "/lib/shrek.mkv"
+        , itemSize = 999, itemMime = "video/x-matroska", itemAddedAt = reqT0, itemFolder = "1"
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+      m40lookup i = if i == "40" then Just "Shrek" else Nothing
+  check "m40 withDisplayTitle: metadata title beats Name on the PascalCase shape"
+    (m40fieldOf "DisplayTitle" (withDisplayTitle m40lookup (Aeson.toJSON m40item)))
+    (Just (Aeson.String "Shrek"))
+  check "m40 withDisplayTitle: falls back to Name when no metadata"
+    (m40fieldOf "DisplayTitle" (withDisplayTitle (const Nothing) (Aeson.toJSON m40item)))
+    (Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA"))
+  check "m40 withDisplayTitleLower: /library handler shape gains displayTitle (meta) and keeps raw title"
+    [ m40fieldOf "displayTitle" (withDisplayTitleLower m40lookup (simpleItemJson m40item))
+    , m40fieldOf "title" (withDisplayTitleLower m40lookup (simpleItemJson m40item)) ]
+    [ Just (Aeson.String "Shrek"), Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA") ]
+  check "m40 withDisplayTitleLower: falls back to title when no metadata"
+    (m40fieldOf "displayTitle" (withDisplayTitleLower (const Nothing) (simpleItemJson m40item)))
+    (Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA"))
 
   -- milestone 38: only mark Imported when the deluge torrent is complete
   check "m38 importComplete: matched Seeding 100 -> True"

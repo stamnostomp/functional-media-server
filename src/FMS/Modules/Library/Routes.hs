@@ -6,6 +6,8 @@ module FMS.Modules.Library.Routes
   , itemDetailHandler
   , ancestorsHandler
   , searchHintsHandler
+  , metaMapNow
+  , metaTitleLookup
   , specialFeaturesHandler
   , similarHandler
   , mediaSourcesHandler
@@ -37,7 +39,7 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import Control.Monad.Reader (asks)
 import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet, withDisplayTitle, withDisplayTitleLower)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
 import FMS.Core.Types.User (User (..))
@@ -77,6 +79,17 @@ libraryRoutes =
   , get    [Lit "Shows", Capture "name", Lit "NextUp"] nextUpHandler
   ]
 
+-- | m40: read the metadata cache map via the literal registry key (same
+-- cycle-avoidance pattern as 'itemsQueryResponse') and expose the
+-- metadata-title lookup used by 'withDisplayTitle'.
+metaMapNow :: AppM (HashMap Text MediaMetadata)
+metaMapNow = do
+  mMetaTv <- getState "metadata.cache" :: AppM (Maybe (TVar (HashMap Text MediaMetadata)))
+  maybe (pure HM.empty) (liftIO . readTVarIO) mMetaTv
+
+metaTitleLookup :: HashMap Text MediaMetadata -> Text -> Maybe Text
+metaTitleLookup metaMap i = HM.lookup i metaMap >>= metaTitle
+
 -- | @GET \/library@ — JSON array of all items visible to the requester
 -- (milestone 5d: a valid non-admin token filters to the user's allowed
 -- folders; anonymous/open mode sees everything). LEGACY simple shape for
@@ -86,7 +99,8 @@ listItemsHandler :: [(Text, Text)] -> Request -> AppM Response
 listItemsHandler _captures req = do
   mUser <- currentUserFromReq req
   items <- listItems >>= visibleItems mUser
-  pure (jsonResponse (map simpleItemJson items))
+  metaMap <- metaMapNow   -- m40: displayTitle from metadata title
+  pure (jsonResponse (map (withDisplayTitleLower (metaTitleLookup metaMap) . simpleItemJson) items))
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
 -- query params @search@/@searchTerm@, @sortBy@, @sortOrder@, @startIndex@,
@@ -162,7 +176,8 @@ itemsQueryResponse mUser qparams = do
       renderItem i = do
         -- Item tags API: attach the metadata metaTags as "Tags" BEFORE
         -- projectFields so the fields= projection governs the key.
-        let base = projectFields fields
+        let base = withDisplayTitle (metaTitleLookup metaMap) $   -- m40
+                     projectFields fields
                      (attachTags (maybe [] metaTags (metaLookup (itemId i)))
                        (attachUserData mLookup i (toJSON i)))
         if not enableImages
@@ -406,7 +421,8 @@ itemDetailHandler captures req =
               let tagList = maybe [] metaTags (HM.lookup i metaMap)
               -- Milestone 4n: image tags on the detail JSON too
               -- (EnableImages/imageType), same as the /items list.
-              let base = projectFields fields (attachTags tagList (attachUserData mLookup item (toJSON item)))
+              let base = withDisplayTitle (metaTitleLookup metaMap) $   -- m40
+                           projectFields fields (attachTags tagList (attachUserData mLookup item (toJSON item)))
               if lookup "enableimages" qparams == Just "false"
                 then pure (jsonResponse base)
                 else do
@@ -521,7 +537,8 @@ searchHintsHandler _captures req = do
                else take limit (sortBy (comparing itemTitle)
                                 (searchItemsMeta (flip HM.lookup metaMap) term items))
   pure (jsonResponse
-    [ object ([ "ItemId" .= itemId i, "Name" .= itemTitle i, "Type" .= itemType i ]
+    [ withDisplayTitle (metaTitleLookup metaMap) $    -- m40
+        object ([ "ItemId" .= itemId i, "Name" .= itemTitle i, "Type" .= itemType i ]
               ++ maybe [] (\s -> ["Series" .= s]) (itemSeries i))
     | i <- hits ])
 

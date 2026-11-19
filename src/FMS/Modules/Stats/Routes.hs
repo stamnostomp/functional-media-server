@@ -21,7 +21,8 @@ import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM)
 import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
 import FMS.Core.Types.Progress (simpleProgressEntry)
-import FMS.Modules.Library (MonadLibrary (..))
+import FMS.Core.Query (withDisplayTitleLower)
+import FMS.Modules.Library (MonadLibrary (..), metaMapNow, metaTitleLookup)
 import FMS.Modules.Stats.Monad (MonadStats (..), continueWatching, popular)
 
 -- | Body of @POST /progress@: which item, and where playback is.
@@ -69,7 +70,8 @@ continueWatchingHandler = do
         | (ident, p) <- continueWatching allStats
         , Just item <- [HM.lookup ident byId]
         ]
-  pure (jsonResponse [ simpleProgressEntry item p | (item, p) <- entries ])
+  metaMap <- metaMapNow   -- m40: displayTitle from metadata title
+  pure (jsonResponse [ withDisplayTitleLower (metaTitleLookup metaMap) (simpleProgressEntry item p) | (item, p) <- entries ])
 
 -- | @GET /popular@ — items played at least once, most-played first
 -- (top 20), in the legacy simple lowercase shape ('simpleItemJson').
@@ -82,14 +84,16 @@ popularHandler = do
         | (ident, _s) <- take 20 (popular allStats)
         , Just item <- [HM.lookup ident byId]
         ]
-  pure (jsonResponse (map simpleItemJson ranked))
+  metaMap <- metaMapNow   -- m40
+  pure (jsonResponse (map (withDisplayTitleLower (metaTitleLookup metaMap) . simpleItemJson) ranked))
 
 -- | @GET /new@ — the most recently added library items (by file mtime),
 -- newest first, top 20, in the legacy simple lowercase shape.
 newHandler :: AppM Response
 newHandler = do
   items <- listItems
-  pure (jsonResponse (map simpleItemJson (take 20 (sortOn (Down . itemAddedAt) items))))
+  metaMap <- metaMapNow   -- m40
+  pure (jsonResponse (map (withDisplayTitleLower (metaTitleLookup metaMap) . simpleItemJson) (take 20 (sortOn (Down . itemAddedAt) items))))
 
 -- | The library items keyed by id, for joining stats against titles.
 indexById :: MonadLibrary m => m (HashMap Text MediaItem)

@@ -8,6 +8,8 @@ module FMS.Core.Query
   , backdropImageTagsValue
   , attachImageTags
   , attachTags
+  , withDisplayTitle
+  , withDisplayTitleLower
   , imageBlurHashesValue
   , attachImageBlurHashes
   , filterByFolder
@@ -558,3 +560,42 @@ applyItemQuery params items =
       start    = get "startIndex" >>= readMaybe . T.unpack
       limit    = get "limit" >>= readMaybe . T.unpack
   in (total, paginate (clampNonNegative <$> start) (min 1000 . max 1 <$> limit) sorted)
+
+-- | m40: add @DisplayTitle@ to a PascalCase item JSON object -- the
+-- metadata title when the lookup yields a non-empty one, otherwise the
+-- existing @Name@ value. Non-object values pass through unchanged.
+withDisplayTitle :: (Text -> Maybe Text) -> Value -> Value
+withDisplayTitle metaTitleOf v = case v of
+  Object o ->
+    let mId = case KeyMap.lookup (Key.fromText "Id") o of
+                Just (String t) -> Just t
+                _               -> Nothing
+        fallback = case KeyMap.lookup (Key.fromText "Name") o of
+                     Just (String t) -> Just t
+                     _               -> Nothing
+        disp = case mId >>= metaTitleOf of
+                 Just t | not (T.null t) -> Just t
+                 _                       -> fallback
+    in case disp of
+         Just t  -> Object (KeyMap.insert (Key.fromText "DisplayTitle") (String t) o)
+         Nothing -> v
+  _ -> v
+
+-- | m40: lowercase variant for the legacy simple item shape
+-- (@id@/@title@): adds @displayTitle@ (metadata title, else @title@).
+withDisplayTitleLower :: (Text -> Maybe Text) -> Value -> Value
+withDisplayTitleLower metaTitleOf v = case v of
+  Object o ->
+    let mId = case KeyMap.lookup (Key.fromText "id") o of
+                Just (String t) -> Just t
+                _               -> Nothing
+        fallback = case KeyMap.lookup (Key.fromText "title") o of
+                     Just (String t) -> Just t
+                     _               -> Nothing
+        disp = case mId >>= metaTitleOf of
+                 Just t | not (T.null t) -> Just t
+                 _                       -> fallback
+    in case disp of
+         Just t  -> Object (KeyMap.insert (Key.fromText "displayTitle") (String t) o)
+         Nothing -> v
+  _ -> v

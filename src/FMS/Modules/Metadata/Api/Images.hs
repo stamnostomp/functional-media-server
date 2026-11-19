@@ -93,7 +93,7 @@ fetchTmdbImages
   -> Text                    -- ^ TMDB id
   -> Text                    -- ^ image CDN base (configTmdbImageBaseUrl)
   -> Text                    -- ^ poster image size (configTmdbImageSize, e.g. w500)
-  -> Text                    -- ^ backdrop/logo image size (m49: configTmdbBackdropSize, e.g. w1280)
+  -> Text                    -- ^ backdrop/logo image size (m49/m57: configTmdbBackdropSize, e.g. original)
   -> IO (Either String [(Text, Text, BS.ByteString)])
 fetchTmdbImages apiKey apiBase kind tmdbId imageBase imageSize backdropSize = do
   eres <- tmdbFetch (tmdbImagesUrl apiBase apiKey kind tmdbId)

@@ -103,7 +103,8 @@ refreshMetadataHandler captures req = do
       case mItem of
         Nothing -> throwError (NotFound ("no library item with id " <> i))
         Just _ -> do
-          mMeta <- refreshMetadata i
+          -- m57: explicit refresh also re-downloads TMDB artwork (force)
+          mMeta <- refreshMetadataForced True i
           case mMeta of
             Nothing -> throwError (NotFound "no metadata found for item")
             Just meta -> pure (jsonResponse meta)

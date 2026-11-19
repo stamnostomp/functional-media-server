@@ -3056,7 +3056,7 @@ main = do
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
+      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -3190,7 +3190,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -4071,7 +4071,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
         , configJackettUrl = Nothing
@@ -4259,8 +4259,8 @@ main = do
             , "            return self._send(200, 'POSTERBYTES', 'image/jpeg')"
             , "        if u.path == '/img/w500/b.jpg':"
             , "            return self._send(200, 'BACKDROPBYTES', 'image/jpeg')"
-            , "        if u.path == '/img/w1280/b.jpg':"
-            , "            return self._send(200, 'BACKDROPBYTES-W1280', 'image/jpeg')"
+            , "        if u.path == '/img/original/b.jpg':"
+            , "            return self._send(200, 'BACKDROPBYTES-ORIGINAL', 'image/jpeg')"
             , "        return self._send(404, '{}')"
             , "srv = HTTPServer(('127.0.0.1', port), H)"
             , "open(log + '.ready', 'w').write('ok')"
@@ -4275,7 +4275,7 @@ main = do
             , itemExtraType = Nothing, itemVersions = [] }
           cfg35m = cfg35 { configTmdbBaseUrl = "http://127.0.0.1:8930/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8930/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
       bracket
         (createProcess (proc "python3" [m35mock ++ "/mock.py", "8930", m35log]))
         (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
@@ -4289,7 +4289,7 @@ main = do
                 loadMetadataIntoState
                 loadMetadataSettingsIntoState
                 _ <- updateMetadataSettings (\s -> s { msTmdbApiKey = "SAVEDKEY", msFetchImages = True })
-                refreshFromTmdb "1" m35item
+                refreshFromTmdb False "1" m35item
               rGet <- runApp envM (getMetadata "1")
               let mMeta = either (const Nothing) id rGet
               check "m35 refreshFromTmdb uses the SAVED key against the mock (source tmdb)"
@@ -4309,8 +4309,8 @@ main = do
                 (any ("ENVKEY" `isInfixOf`) callLines) False
               check "m35 mock: image CDN was hit for poster+backdrop"
                 (length (filter ("/img/" `isPrefixOf`) callLines)) 2
-              check "m49: backdrop downloaded at w1280, poster at w500 (per-kind sizes)"
-                [ any ("/img/w1280/b.jpg" `isPrefixOf`) callLines
+              check "m57: backdrop downloaded at original, poster at w500 (per-kind sizes)"
+                [ any ("/img/original/b.jpg" `isPrefixOf`) callLines
                 , any ("/img/w500/p.jpg" `isPrefixOf`) callLines ]
                 [ True, True ])
 
@@ -4573,7 +4573,7 @@ main = do
           cfg45 = cfg27 { configStateDir = m45dir, configTmdbApiKey = "K"
                          , configTmdbBaseUrl = "http://127.0.0.1:8931/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8931/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
           m45mockSrc = unlines
             [ "import json, sys"
             , "from http.server import BaseHTTPRequestHandler, HTTPServer"
@@ -4621,7 +4621,7 @@ main = do
                 loadMetadataIntoState
                 loadMetadataSettingsIntoState
                 _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K", msFetchImages = True })
-                refreshFromTmdb "ep45" ep45
+                refreshFromTmdb False "ep45" ep45
               rGet <- runApp env45 (getMetadata "ep45")
               let mMeta = either (const Nothing) id rGet
               check "m45 episode refresh: TV search stored series title"
@@ -4849,7 +4849,7 @@ main = do
           cfg47 = cfg27 { configStateDir = m47mock, configTmdbApiKey = "ENVKEY47"
                         , configTmdbBaseUrl = "http://127.0.0.1:8947/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8947/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
       resetDir m47mock
       createDirectoryIfMissing True m47mock
       writeFile (m47mock ++ "/mock.py") mockSrc
@@ -4953,8 +4953,8 @@ main = do
     , "frag_keyframe+empty_moov" `elem` transcodeArgsWith "none" Nothing "/m/a.mkv" ]
 
   -- m49: backdrop size config + per-kind image download sizes
-  check "m49: configTmdbBackdropSize defaults to w1280 in the test config"
-    "w1280" (configTmdbBackdropSize cfg27)
+  check "m57: configTmdbBackdropSize defaults to original (full-res backdrops) in the test config"
+    "original" (configTmdbBackdropSize cfg27)
   check "m49: poster size stays w500"
     "w500" (configTmdbImageSize cfg27)
 
@@ -5095,7 +5095,7 @@ main = do
       let cfg53 = cfg27 { configStateDir = m53mock, configTmdbApiKey = "K53", configFetchImages = False
                         , configTmdbBaseUrl = "http://127.0.0.1:8949/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8949/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
           m53item = MediaItem
             { itemId = "1", itemTitle = "Test Movie", itemPath = "/x.mp4"
             , itemSize = 1, itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1"
@@ -5113,7 +5113,7 @@ main = do
               _ <- runApp env53 $ do
                 loadMetadataIntoState
                 loadMetadataSettingsIntoState
-                refreshFromTmdb "1" m53item
+                refreshFromTmdb False "1" m53item
               rGet <- runApp env53 (getMetadata "1")
               let mMeta = either (const Nothing) id rGet
               check "m53a refreshFromTmdb: genres from the detail endpoint"

@@ -109,7 +109,9 @@ updateMetadataSettings f = do
 class Monad m => MonadMetadata m where
   getMetadata     :: Text -> m (Maybe MediaMetadata)
   setMetadata     :: Text -> MediaMetadata -> m ()
+  refreshMetadataForced :: Bool -> Text -> m (Maybe MediaMetadata)
   refreshMetadata :: Text -> m (Maybe MediaMetadata)
+  refreshMetadata = refreshMetadataForced False
   listAllMetadata :: m [MediaMetadata]   -- ^ every stored metadata record (milestone 10a /Genres)
   listAllMetadataMap :: m (HashMap Text MediaMetadata)  -- ^ the whole cache keyed by itemId (milestone 4h /items filters)
 
@@ -138,7 +140,7 @@ instance MonadMetadata AppM where
       readTVar tv
     liftIO (saveMetadata (metadataFilePath cfg) updated)
 
-  refreshMetadata itemIdent = do
+  refreshMetadataForced force itemIdent = do
     mItem <- getItem itemIdent
     case mItem of
       Nothing -> pure Nothing
@@ -152,7 +154,9 @@ instance MonadMetadata AppM where
             pure (Just merged)
           -- Milestone 4c: no usable NFO -> remote provider fallback (TMDB),
           -- keyed by the item's title, only when an API key is configured.
-          Nothing -> refreshFromTmdb itemIdent item
+          -- m57: force is threaded through so an explicit refresh also
+          -- re-downloads artwork at the current size.
+          Nothing -> refreshFromTmdb force itemIdent item
 
 -- | Milestone 4m (docs/todo.org section 3): refresh the metadata of EVERY
 -- library item sequentially (NFO first, TMDB fallback -- the same path as
@@ -175,7 +179,7 @@ refreshAllMetadata replaceAll = do
   where
     step :: Int -> MediaItem -> AppM Int
     step acc item = do
-      m <- refreshMetadata (itemId item)
+      m <- refreshMetadataForced True (itemId item)  -- m57: bulk refresh re-downloads artwork too
       pure (acc + (if isJust m then 1 else 0))
     -- replaceAll keeps only the user-curated fields of each record
     keepUserCurated :: MediaMetadata -> MediaMetadata
@@ -240,8 +244,8 @@ readTvShowNfo nfoPath = do
 -- and cache the first hit with 'metaSource' = @\"tmdb\"@. Empty results or
 -- any TMDB error are logged and yield 'Nothing' — never throw, so the
 -- router keeps mapping this to a graceful 404.
-refreshFromTmdb :: Text -> MediaItem -> AppM (Maybe MediaMetadata)
-refreshFromTmdb itemIdent item = do
+refreshFromTmdb :: Bool -> Text -> MediaItem -> AppM (Maybe MediaMetadata)
+refreshFromTmdb force itemIdent item = do
   cfg <- asks envConfig
   ms <- getMetadataSettings          -- m35: effective (saved) settings
   let apiKey = msTmdbApiKey ms
@@ -297,21 +301,26 @@ refreshFromTmdb itemIdent item = do
                      <> "\") matched TMDB id "
                      <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
             -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /
-            -- backdrops / logo into the item image store, but never overwrite
-            -- an already stored (user-uploaded) image of that type.
+            -- backdrops / logo into the item image store. m57: on an explicit
+            -- refresh the artwork is re-downloaded (force), so a size change
+            -- (e.g. w1280 -> original backdrops) takes effect; on a plain
+            -- scan an already stored (user-uploaded) image is never
+            -- overwritten.
             when (msFetchImages ms) $   -- m35: effective fetch-images flag
-              fetchAndStoreTmdbImages cfg itemIdent (itemType item) (tmdbId top)
+              fetchAndStoreTmdbImages cfg force itemIdent (itemType item) (tmdbId top)
             pure (Just merged)
 
 -- | TMDB artwork download for one item (opt-in, FMS_FETCH_IMAGES): fetch
 -- the image list for the resolved TMDB id (@movie@ vs @tv@ by item type)
 -- and store each image under @stateDir/images/<id>@ via
--- 'FMS.Modules.Images.storeImageBytes' — only when no image of that type
--- is stored yet. Every step is failure-graceful (logged, never thrown) so
--- a scan is never crashed by artwork; each HTTP call has the 10 s TMDB
--- timeout.
-fetchAndStoreTmdbImages :: Config -> Text -> Text -> Int -> AppM ()
-fetchAndStoreTmdbImages cfg itemIdent itemTy tmdbIdNum = do
+-- 'FMS.Modules.Images.storeImageBytes'. When @force@ is False an image of
+-- that type that is already stored (e.g. user-uploaded) is kept; when
+-- @force@ is True (explicit metadata refresh, m57) stored artwork is
+-- re-downloaded so size changes take effect. Every step is
+-- failure-graceful (logged, never thrown) so a scan is never crashed by
+-- artwork; each HTTP call has the 10 s TMDB timeout.
+fetchAndStoreTmdbImages :: Config -> Bool -> Text -> Text -> Int -> AppM ()
+fetchAndStoreTmdbImages cfg force itemIdent itemTy tmdbIdNum = do
   ms <- getMetadataSettings          -- m35: effective (saved) settings
   let apiKey = msTmdbApiKey ms
   if T.null apiKey
@@ -332,7 +341,7 @@ fetchAndStoreTmdbImages cfg itemIdent itemTy tmdbIdNum = do
         Right (Right dl) ->
           forM_ dl $ \(ty, fp, bytes) -> do
             has <- liftIO (hasStoredImage stateDir itemIdent ty)
-            if has
+            if has && not force
               then pure ()
               else do
                 w <- liftIO (try (storeImageBytes stateDir itemIdent ty

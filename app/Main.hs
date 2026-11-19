@@ -170,7 +170,7 @@ main = do
         , configTmdbBaseUrl = T.pack (fromMaybe "https://api.themoviedb.org/3" mTmdbBase)
         , configTmdbImageBaseUrl = T.pack (fromMaybe "https://image.tmdb.org/t/p" mTmdbImgBase)
         , configTmdbImageSize = T.pack (fromMaybe "w500" mTmdbImgSize)
-        , configTmdbBackdropSize = T.pack (fromMaybe "w1280" mTmdbBdSize)  -- m49
+        , configTmdbBackdropSize = T.pack (fromMaybe "original" mTmdbBdSize)  -- m49/m57: full-res backdrops
         , configSeriesCacheTtlSec = case mSeriesCacheTtl >>= readMaybe of
             Just n | n >= 0 -> n
             _               -> 86400  -- default 24h; 0 = always refetch (m56)

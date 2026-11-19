@@ -51,7 +51,7 @@ runTaskAction t = case stId t of
     pure "library rescan finished"
   "metadata-refresh" -> do
     items <- listItems
-    results <- forM items (refreshMetadata . itemId)
+    results <- forM items (refreshMetadataForced True . itemId)  -- m57: force artwork re-download
     let n = length [ () | Just _ <- results ]
     pure (T.pack (show n ++ " of " ++ show (length items) ++ " item(s) refreshed"))
   "acid-checkpoint" -> do

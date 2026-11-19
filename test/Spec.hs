@@ -144,7 +144,7 @@ import FMS.Modules.Library.State
   , UpdateItemMeta(..)
   , initialLibraryState
   )
-import FMS.Modules.Metadata.Api.Images (tmdbImageListToDownloads, tmdbImagesUrl)
+import FMS.Modules.Metadata.Api.Images (TmdbImageEntry (..), pickByLanguage, tmdbImageListToDownloads, tmdbImagesUrl)
 import FMS.Modules.Metadata.Api.Tmdb
   ( parseTmdbResults
   , parseTmdbTvResults
@@ -4258,10 +4258,10 @@ main = do
     , cleanTitleForProvider "Movie (Extended Edition) 2010"
     , cleanTitleForProvider "Amelie" ]
     [ ("The Movie Returns", Just 2001), ("a b c", Nothing), ("Movie", Just 2010), ("Amelie", Nothing) ]
-  check "m36 cleanTitleForProvider: already-clean title unchanged, year out of range ignored"
+  check "m36 cleanTitleForProvider: already-clean title unchanged, out-of-range year token dropped as pure digit (m39)"
     [ cleanTitleForProvider "Fight Club"
     , cleanTitleForProvider "Movie 1850 Tag" ]
-    [ ("Fight Club", Nothing), ("Movie 1850 Tag", Nothing) ]
+    [ ("Fight Club", Nothing), ("Movie Tag", Nothing) ]
   let mkRes i y = TmdbResult { tmdbId = i, tmdbTitle = "T" <> T.pack (show i)
                              , tmdbOverview = Nothing, tmdbReleaseYear = y
                              , tmdbVoteAverage = Nothing, tmdbPoster = Nothing }
@@ -4297,6 +4297,32 @@ main = do
         , "\"download_payload_rate\"" `isInfixOf` enc
         , "\"id\":4" `isInfixOf` enc ])
     [True, True, True, True]
+
+  -- milestone 39: poster language preference + harder release-tag cleaning
+  check "m39 pickByLanguage: en and no-lang entries first (stable), rest after"
+    (map tieLang (pickByLanguage
+      [ TmdbImageEntry (Just "zh.jpg") (Just "zh")
+      , TmdbImageEntry (Just "en.jpg") (Just "en")
+      , TmdbImageEntry (Just "nolang.jpg") Nothing
+      , TmdbImageEntry (Just "fr.jpg") (Just "fr") ]))
+    [ Just "en", Nothing, Just "zh", Just "fr" ]
+  check "m39 pickByLanguage: only zh -> zh stays first"
+    (map tieFilePath (pickByLanguage [ TmdbImageEntry (Just "zh.jpg") (Just "zh") ]))
+    [ Just "zh.jpg" ]
+  check "m39 tmdbImageListToDownloads: zh poster first, en poster -> Primary is the en one"
+    (case Aeson.decode (LBSC.pack "{\"posters\":[{\"file_path\":\"/zh.jpg\",\"iso_639_1\":\"zh\"},{\"file_path\":\"/en.jpg\",\"iso_639_1\":\"en\"}],\"backdrops\":[],\"logos\":[]}") of
+      Just v  -> tmdbImageListToDownloads v
+      Nothing -> [])
+    [("Primary", "/en.jpg")]
+  check "m39 cleanTitleForProvider: spec examples (10Bit/DD5.1/H265-d3g, WEBRip 2026, Se7en guard)"
+    [ cleanTitleForProvider "Inception.2010.BluRay.10Bit.1080p.DD5.1.H265-d3g"
+    , cleanTitleForProvider "Spider-Man.Brand.New.Day.2026.1080p.WEBRip.10Bit.DDP5.1.x265-NeoNoir"
+    , cleanTitleForProvider "Shrek.2001.1080p.BluRay.x265-LAMA"
+    , cleanTitleForProvider "Se7en.1995.1080p.BluRay.x264-GRP" ]
+    [ ("Inception", Just 2010), ("Spider Man Brand New Day", Just 2026)
+    , ("Shrek", Just 2001), ("Se7en", Just 1995) ]
+  check "m39 cleanTitleForProvider: hyphenated title word without group kept"
+    (cleanTitleForProvider "Spider-Man") ("Spider Man", Nothing)
 
   -- milestone 38: only mark Imported when the deluge torrent is complete
   check "m38 importComplete: matched Seeding 100 -> True"

@@ -1,6 +1,8 @@
 module FMS.Modules.Metadata.Api.Images
   ( tmdbImagesUrl
   , tmdbImageListToDownloads
+  , pickByLanguage
+  , TmdbImageEntry (..)
   , fetchTmdbImages
   ) where
 
@@ -29,12 +31,27 @@ tmdbImagesUrl apiBase apiKey kind tmdbId =
   where
     stripSlash t = T.unpack (T.dropWhileEnd (== '/') t)
 
--- | One entry of a TMDB @/images@ list: just the @file_path@ matters.
-data TmdbImageEntry = TmdbImageEntry { tieFilePath :: Maybe Text }
+-- | One entry of a TMDB @/images@ list: @file_path@ plus the m39
+-- @iso_639_1@ language tag (used to prefer English artwork).
+data TmdbImageEntry = TmdbImageEntry
+  { tieFilePath :: Maybe Text
+  , tieLang     :: Maybe Text
+  }
 
 instance FromJSON TmdbImageEntry where
   parseJSON = withObject "TmdbImageEntry" $ \o ->
-    TmdbImageEntry <$> o .:? "file_path"
+    TmdbImageEntry
+      <$> o .:? "file_path"
+      <*> o .:? "iso_639_1"
+
+-- | m39: stable reorder putting English (lang @en@) and language-less
+-- entries FIRST, then everything else in original order.
+pickByLanguage :: [TmdbImageEntry] -> [TmdbImageEntry]
+pickByLanguage es = filter isPreferred es ++ filter (not . isPreferred) es
+  where
+    isPreferred e = case tieLang e of
+      Just l  -> T.toLower l == "en"
+      Nothing -> True
 
 -- | The TMDB @/images@ document: @posters@ / @backdrops@ / @logos@.
 data TmdbImagesDoc = TmdbImagesDoc
@@ -58,9 +75,9 @@ instance FromJSON TmdbImagesDoc where
 tmdbImageListToDownloads :: Value -> [(Text, Text)]
 tmdbImageListToDownloads v = case fromJSON v :: Result TmdbImagesDoc of
   Success doc ->
-       take 1 [ ("Primary", p) | Just p <- map tieFilePath (tidPosters doc), not (T.null p) ]
-    ++ take 3 [ ("Backdrop", p) | Just p <- map tieFilePath (tidBackdrops doc), not (T.null p) ]
-    ++ take 1 [ ("Logo", p) | Just p <- map tieFilePath (tidLogos doc), not (T.null p) ]
+       take 1 [ ("Primary", p) | Just p <- map tieFilePath (pickByLanguage (tidPosters doc)), not (T.null p) ]
+    ++ take 3 [ ("Backdrop", p) | Just p <- map tieFilePath (pickByLanguage (tidBackdrops doc)), not (T.null p) ]
+    ++ take 1 [ ("Logo", p) | Just p <- map tieFilePath (pickByLanguage (tidLogos doc)), not (T.null p) ]
   _ -> []
 
 -- | Fetch the TMDB image list for @kind@ \/ @tmdbId@ and download each

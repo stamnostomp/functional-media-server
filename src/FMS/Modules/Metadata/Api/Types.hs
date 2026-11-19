@@ -6,6 +6,7 @@ module FMS.Modules.Metadata.Api.Types
   ) where
 
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
+import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -59,7 +60,8 @@ releaseTagTokens =
   , "bluray", "blu-ray", "bdrip", "bdremux", "remux", "webrip", "web-dl"
   , "web", "dl", "hdtv", "dvdrip", "dvd", "cam", "ts", "m2ts", "pdtv"
   , "uhd", "hdrip"
-  , "aac", "dts", "ddp", "dd", "ac3", "atmos", "truehd", "mp3", "flac"
+  , "aac", "dts", "ddp", "dd", "ac3", "eac3", "atmos", "truehd", "mp3", "flac"
+  , "dd5", "ddp5", "dd51", "ddp51", "vp8"
   , "hdr", "hdr10", "hdr10plus", "dv", "dolbyvision", "proper", "repack"
   , "extended", "unrated", "imax", "anime", "remastered"
   ]
@@ -78,7 +80,14 @@ cleanTitleForProvider raw =
       toks0 = filter (not . T.null) (T.words spaced)
       isBracketed t = T.any (\c -> c == '(' || c == ')' || c == '[' || c == ']'
                                    || c == '{' || c == '}') t
-      isTag t = T.toLower t `elem` releaseTagTokens
+      isBitsTok l = T.isSuffixOf "bit" l && case T.dropEnd 3 l of
+        d | not (T.null d) -> T.all isDigit d
+        _ -> False
+      -- release tags EXCEPT pure digits (those are dropped only AFTER year
+      -- extraction, so a 4-digit year is still found first)
+      isTag t =
+        let l = T.toLower t
+        in l `elem` releaseTagTokens || isBitsTok l
       toks1 = filter (\t -> not (isBracketed t) && not (isTag t)) toks0
       isYearTok t = case T.unpack t of
         [a, b, c, d] -> all (`elem` ("0123456789" :: String)) [a, b, c, d]
@@ -87,16 +96,34 @@ cleanTitleForProvider raw =
       (mYear, toks2) = case break isYearTok toks1 of
         (before, yt : after) -> (Just (read (T.unpack yt) :: Int), before ++ after)
         (_, [])              -> (Nothing, toks1)
-      -- a trailing release-group token: all-caps (LAMA) or camel-mixed
-      -- (FraMeSToR); a plain capitalized word (Club) is kept
+      -- m39: leftover pure-digit tokens (the 1 of DD5.1 etc.); title tokens
+      -- that merely CONTAIN a digit (Se7en) are kept
+      isPureDigit t = not (T.null t) && T.all isDigit t
+      toks2d = filter (not . isPureDigit) toks2
+      -- m39: trailing release-group handling. (a) text after the last dash
+      -- of the ORIGINAL title, when short and (digit-containing or all
+      -- uppercase), e.g. -d3g / -GRP / -LAMA; (b) a trailing all-caps or
+      -- camel-mixed token (FraMeSToR); a plain capitalized word (Club) and
+      -- hyphenated title words (Spider-Man -> Spider Man) are kept
+      dashGroup =
+        case T.breakOnEnd "-" raw of
+          (before, sep) | not (T.null before) && not (T.null sep) ->
+            let g = sep  -- breakOnEnd keeps the dash in the prefix
+            in if not (T.null g) && T.length g <= 10
+                 && (T.any isDigit g || all (\c -> not (c >= 'a' && c <= 'z')) (T.unpack g))
+                 then Just g
+                 else Nothing
+          _ -> Nothing
       isGroupTok t =
         let letters = T.unpack (T.filter (\c -> c /= '\'' && c /= '&') t)
         in length letters >= 2
            && (all (\c -> not (c >= 'a' && c <= 'z')) letters
                || any (\c -> c >= 'A' && c <= 'Z') (drop 1 letters))
-      toks3 = case reverse toks2 of
-        (t : rest) | isGroupTok t -> reverse rest
-        _                        -> toks2
+      dropTrailing ts = case reverse ts of
+        (t : rest)
+          | isGroupTok t || maybe False (== t) dashGroup -> reverse rest
+        _ -> ts
+      toks3 = dropTrailing toks2d
       clean = T.unwords toks3
       clean' = if T.null clean then T.unwords toks0 else clean
   in (clean', mYear)

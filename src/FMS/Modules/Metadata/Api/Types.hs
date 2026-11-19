@@ -83,11 +83,21 @@ cleanTitleForProvider raw =
       isBitsTok l = T.isSuffixOf "bit" l && case T.dropEnd 3 l of
         d | not (T.null d) -> T.all isDigit d
         _ -> False
+      -- m42: audio-codec prefix matcher -- a token whose lowercase form
+      -- starts with a codec prefix (aac ac3 eac3 dts dd ddp truehd atmos)
+      -- AND whose remainder is only digits/dots is an audio tag
+      -- (aac5, dd5, ddp5.1, dts51, ac3, atmos); plain codec words match with
+      -- an empty remainder. A normal word starting with those letters
+      -- (add, atmosphere) has a non-digit remainder and is kept.
+      audioPrefixes = ["aac", "ac3", "eac3", "dts", "dd", "ddp", "truehd", "atmos"]
+      isAudioTok l = any (\pr ->
+        let rest = T.drop (T.length pr) l
+        in pr `T.isPrefixOf` l && T.all (\c -> isDigit c || c == '.') rest) audioPrefixes
       -- release tags EXCEPT pure digits (those are dropped only AFTER year
       -- extraction, so a 4-digit year is still found first)
       isTag t =
         let l = T.toLower t
-        in l `elem` releaseTagTokens || isBitsTok l
+        in l `elem` releaseTagTokens || isBitsTok l || isAudioTok l
       toks1 = filter (\t -> not (isBracketed t) && not (isTag t)) toks0
       isYearTok t = case T.unpack t of
         [a, b, c, d] -> all (`elem` ("0123456789" :: String)) [a, b, c, d]

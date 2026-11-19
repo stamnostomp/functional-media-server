@@ -4324,6 +4324,22 @@ main = do
   check "m39 cleanTitleForProvider: hyphenated title word without group kept"
     (cleanTitleForProvider "Spider-Man") ("Spider Man", Nothing)
 
+  -- milestone 42: audio-token prefix matching (aac5/ddp5.1/dts51...)
+  check "m42 cleanTitleForProvider: AAC5.1 audio tag + dash group (live bug)"
+    (cleanTitleForProvider "Heart.Of.The.Beast.2026.1080p.WEBRip.x264.AAC5.1-LAMA")
+    ("Heart Of The Beast", Just 2026)
+  check "m42 cleanTitleForProvider: audio variants aac5/ac3/dts51/eac3 dropped"
+    [ cleanTitleForProvider "Movie.2020.1080p.AAC5"
+    , cleanTitleForProvider "Movie.2020.1080p.AC3"
+    , cleanTitleForProvider "Movie.2020.1080p.DTS51"
+    , cleanTitleForProvider "Movie.2020.1080p.EAC3" ]
+    [ ("Movie", Just 2020), ("Movie", Just 2020), ("Movie", Just 2020), ("Movie", Just 2020) ]
+  check "m42 cleanTitleForProvider: words starting with codec letters are kept"
+    [ cleanTitleForProvider "Ad Astra"
+    , cleanTitleForProvider "Addams Family"
+    , cleanTitleForProvider "Atmosphere" ]
+    [ ("Ad Astra", Nothing), ("Addams Family", Nothing), ("Atmosphere", Nothing) ]
+
   -- milestone 40: DisplayTitle / displayTitle on item JSON
   let m40fieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value
       m40fieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing

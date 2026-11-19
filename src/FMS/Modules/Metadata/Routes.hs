@@ -21,12 +21,16 @@ module FMS.Modules.Metadata.Routes
   , discoverPopularHandler
   , discoverEntry
   , discoverSection
+  , matchDownloaded
+  , seriesSearchHandler
+  , seriesEpisodesHandler
   , getMetadataSettingsHandler
   , postMetadataSettingsHandler
   , testMetadataSettingsHandler
   ) where
 
-import Control.Monad (forM_)
+import Control.Applicative ((<|>))
+import Control.Monad (forM, forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
@@ -38,6 +42,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.Wai (Request, Response, queryString, strictRequestBody)
+import Text.Read (readMaybe)
 
 import FMS.Core.Module (jsonResponse)
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig)
@@ -47,8 +52,8 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
-import FMS.Modules.Metadata.Api.Tmdb (tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv)
-import FMS.Modules.Metadata.Api.Types (TmdbResult (..))
+import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, updateMetadataSettings)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), MetadataSettingsPatch (..), applyManualPatch, emptyMetadata, mergeMetadataSettings, mergeTags, metadataSettingsPublicJson, removeTag)
 
@@ -284,7 +289,6 @@ remoteSearchHandler _captures req = do
   let qp = queryParams (queryString req)
   case lookup "searchterm" qp of
     Just t | not (T.null (T.strip t)) -> do
-      cfg <- asks envConfig
       ms <- getMetadataSettings     -- m35: effective (saved) key
       let apiKey = msTmdbApiKey ms
       if T.null apiKey
@@ -432,3 +436,99 @@ testMetadataSettingsHandler _captures req = do
   pure $ jsonResponse $ case eres of
     Right results -> object [ "Ok" .= True, "Results" .= length results ]
     Left err      -> object [ "Ok" .= False, "Error" .= T.pack err ]
+
+-- | m47: pure matcher -- is season @se@ / episode @ep@ of the series
+-- @seriesName@ (case-insensitive) present as a library Episode item?
+matchDownloaded :: Text -> Int -> Int -> [MediaItem] -> Bool
+matchDownloaded seriesName se ep items =
+  any (\i -> T.toLower (itemType i) == "episode"
+        && maybe False (\sn -> T.toLower sn == T.toLower seriesName) (itemSeries i)
+        && itemSeason i == Just se
+        && itemEpisode i == Just ep) items
+
+-- | m47: @GET /Series/Search?name=..@ — TMDB TV search with the effective
+-- key; 200 @[{Id,Name,Type,ProductionYear,Overview,VoteAverage,PosterUrl}]@
+-- (the 'discoverEntry' shape, Type = "Series"). Empty key or error -> 200 [].
+seriesSearchHandler :: [(Text, Text)] -> Request -> AppM Response
+seriesSearchHandler _captures req = do
+  cfg <- asks envConfig
+  ms <- getMetadataSettings
+  let qparams = queryParams (queryString req)
+      name = fromMaybe "" (lookup "name" qparams <|> lookup "q" qparams)
+      apiKey = msTmdbApiKey ms
+      imgBase = configTmdbImageBaseUrl cfg
+      imgSize = configTmdbImageSize cfg
+  if T.null apiKey || T.null (T.strip name)
+    then pure (jsonResponse ([] :: [Value]))
+    else do
+      res <- liftIO (tmdbSearchTvAt (configTmdbBaseUrl cfg) apiKey (T.strip name))
+      case res of
+        Left err -> do
+          logWarn ("series search for \"" <> name <> "\" failed: " <> T.pack err)
+          pure (jsonResponse ([] :: [Value]))
+        Right rs ->
+          pure (jsonResponse (map (discoverEntry "Series" imgBase imgSize) (take 20 rs)))
+
+-- | m47: @GET /Series/:id/Episodes@ — TMDB @\/tv\/<id>@ plus every season's
+-- episodes, each flagged @Downloaded@ when a matching Episode item exists in
+-- the library. Graceful: no key / any TMDB error -> 200 with empty Seasons.
+seriesEpisodesHandler :: [(Text, Text)] -> Request -> AppM Response
+seriesEpisodesHandler captures _req = do
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just tidTxt -> case readMaybe (T.unpack tidTxt) of
+      Nothing -> throwError (BadRequest "invalid series id")
+      Just tid -> do
+        cfg <- asks envConfig
+        ms <- getMetadataSettings
+        let apiKey = msTmdbApiKey ms
+            base = configTmdbBaseUrl cfg
+            imgBase = configTmdbImageBaseUrl cfg
+            imgSize = configTmdbImageSize cfg
+        if T.null apiKey
+          then pure (jsonResponse (emptySeriesDetail tidTxt))
+          else do
+            items <- listItems
+            ed <- liftIO (tmdbTvDetailsAt base apiKey tid)
+            case ed of
+              Left err -> do
+                logWarn ("series details for " <> tidTxt <> " failed: " <> T.pack err)
+                pure (jsonResponse (emptySeriesDetail tidTxt))
+              Right d -> do
+                let seriesName = fromMaybe "" (tdName d)
+                    posterUrl = fmap (\p -> imgBase <> "/" <> imgSize <> p) (tdPoster d)
+                    year = tdFirstAirDate d >>= releaseYear
+                    seasonsSorted = sortOn (\sn -> (tsSeasonNumber sn == 0, tsSeasonNumber sn)) (tdSeasons d)
+                seasonVals <- forM seasonsSorted $ \sn -> do
+                  let n = tsSeasonNumber sn
+                  eres <- liftIO (tmdbSeasonAt base apiKey tid n)
+                  eps <- case eres of
+                    Left err -> do
+                      logWarn ("series season " <> T.pack (show n) <> " failed: " <> T.pack err)
+                      pure []
+                    Right es -> pure
+                      [ object
+                          [ "EpisodeNumber" .= teEpisodeNumber e
+                          , "Name"          .= teName e
+                          , "Overview"      .= teOverview e
+                          , "AirDate"       .= teAirDate e
+                          , "StillUrl"      .= fmap (\p -> imgBase <> "/" <> imgSize <> p) (teStill e)
+                          , "Downloaded"    .= matchDownloaded seriesName n (teEpisodeNumber e) items
+                          ]
+                      | e <- es ]
+                  pure (object
+                    [ "SeasonNumber" .= n
+                    , "Name"         .= tsName sn
+                    , "Episodes"     .= eps ])
+                pure (jsonResponse (object
+                  [ "Id" .= tidTxt
+                  , "Name" .= tdName d
+                  , "Year" .= year
+                  , "Overview" .= tdOverview d
+                  , "PosterUrl" .= posterUrl
+                  , "Seasons" .= seasonVals ]))
+  where
+    emptySeriesDetail tidTxt = object
+      [ "Id" .= tidTxt, "Name" .= (Nothing :: Maybe Text), "Year" .= (Nothing :: Maybe Int)
+      , "Overview" .= (Nothing :: Maybe Text), "PosterUrl" .= (Nothing :: Maybe Text)
+      , "Seasons" .= ([] :: [Value]) ]

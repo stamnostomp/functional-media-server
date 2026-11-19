@@ -16,6 +16,8 @@ import FMS.Modules.Metadata.Routes
   , postMetadataSettingsHandler
   , refreshMetadataHandler
   , removeItemTagHandler
+  , seriesEpisodesHandler
+  , seriesSearchHandler
   , studiosHandler
   , tagsHandler
   , testMetadataSettingsHandler
@@ -40,6 +42,9 @@ metadataModule =
           get  [Lit "Metadata", Lit "Settings"] getMetadataSettingsHandler
         , post [Lit "Metadata", Lit "Settings"] postMetadataSettingsHandler
         , post [Lit "Metadata", Lit "Settings", Lit "Test"] testMetadataSettingsHandler
+        -- m47: series view routes (literals before the items captures)
+        , get [Lit "Series", Lit "Search"] seriesSearchHandler
+        , get [Lit "Series", Capture "id", Lit "Episodes"] seriesEpisodesHandler
         , get  [Lit "Genres"] genresHandler
         , get  [Lit "Studios"] studiosHandler      -- milestone 4h
         , get  [Lit "Persons"] personsHandler      -- milestone 4h

@@ -610,9 +610,17 @@ withLegacyType :: MediaItem -> Value -> Value
 withLegacyType i v = case v of
   Object o ->
     let o1 = KeyMap.insert (Key.fromText "type") (String (itemType i)) o
-    in case itemSeries i of
-         Just sn -> Object (KeyMap.insert (Key.fromText "seriesName") (String sn) o1)
-         Nothing -> Object o1
+        o2 = case itemSeries i of
+               Just sn -> KeyMap.insert (Key.fromText "seriesName") (String sn) o1
+               Nothing -> o1
+        -- m47: season/episode numbers so the UI can match series episodes
+        o3 = case itemSeason i of
+               Just se -> KeyMap.insert (Key.fromText "seasonNumber") (Number (fromIntegral se)) o2
+               Nothing -> o2
+        o4 = case itemEpisode i of
+               Just ep -> KeyMap.insert (Key.fromText "episodeNumber") (Number (fromIntegral ep)) o3
+               Nothing -> o3
+    in Object o4
   _ -> v
 
 -- | m43: per-item display title -- the metadata title when a non-empty one

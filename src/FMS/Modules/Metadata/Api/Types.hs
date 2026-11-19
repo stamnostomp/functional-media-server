@@ -143,9 +143,9 @@ cleanTitleForProvider raw =
 -- result. 'Nothing' on an empty list (caller treats that as no results).
 pickTmdbResult :: Maybe Int -> [TmdbResult] -> Maybe TmdbResult
 pickTmdbResult _ [] = Nothing
-pickTmdbResult mYear rs =
+pickTmdbResult mYear rs@(r0 : _) =
   case mYear of
-    Nothing -> Just (head rs)
+    Nothing -> Just r0
     Just y  -> case [ r | r <- rs, tmdbReleaseYear r == Just y ] of
       (r : _) -> Just r
-      []      -> Just (head rs)
+      []      -> Just r0

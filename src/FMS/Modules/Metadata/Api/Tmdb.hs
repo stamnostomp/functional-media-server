@@ -17,11 +17,21 @@ module FMS.Modules.Metadata.Api.Tmdb
   , tmdbPopularTvUrlAt
   , tmdbPopularTv
   , tmdbPopularTvAt
+  , TmdbSeason(..)
+  , TmdbEpisode(..)
+  , TmdbTvDetails(..)
+  , parseTmdbTvDetails
+  , parseTmdbSeasonEpisodes
+  , tmdbTvDetailsUrlAt
+  , tmdbSeasonUrlAt
+  , tmdbTvDetailsAt
+  , tmdbSeasonAt
   ) where
 
 import Control.Exception (SomeException, try)
 import qualified Data.Aeson as Aeson
-import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), Result (..), withObject, (.!=), (.:), (.:?))
+import Data.Aeson.Types (parse)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -243,3 +253,99 @@ tmdbPopularTvAt base apiKey page = do
 -- | Popular TV shows from the default API base.
 tmdbPopularTv :: Text -> Int -> IO (Either String [TmdbResult])
 tmdbPopularTv apiKey page = tmdbPopularTvAt (T.pack tmdbApiBase) apiKey page
+
+-- Milestone 47: TV series details + season episodes (for the series view).
+
+-- | One entry of the @seasons@ array of @\/tv\/<id>@.
+data TmdbSeason = TmdbSeason
+  { tsSeasonNumber :: Int
+  , tsName         :: Maybe Text
+  , tsEpisodeCount :: Maybe Int
+  , tsPoster       :: Maybe Text
+  } deriving (Show, Eq)
+
+instance FromJSON TmdbSeason where
+  parseJSON = withObject "TmdbSeason" $ \o ->
+    TmdbSeason
+      <$> o .:  "season_number"
+      <*> o .:? "name"
+      <*> o .:? "episode_count"
+      <*> o .:? "poster_path"
+
+-- | One entry of the @episodes@ array of @\/tv\/<id>\/season\/<n>@.
+data TmdbEpisode = TmdbEpisode
+  { teEpisodeNumber :: Int
+  , teName          :: Maybe Text
+  , teOverview      :: Maybe Text
+  , teAirDate       :: Maybe Text
+  , teStill         :: Maybe Text
+  , teVote          :: Maybe Double
+  } deriving (Show, Eq)
+
+instance FromJSON TmdbEpisode where
+  parseJSON = withObject "TmdbEpisode" $ \o ->
+    TmdbEpisode
+      <$> o .:  "episode_number"
+      <*> o .:? "name"
+      <*> o .:? "overview"
+      <*> o .:? "air_date"
+      <*> o .:? "still_path"
+      <*> o .:? "vote_average"
+
+-- | The @\/tv\/<id>@ details document (name/overview/first_air_date/poster
+-- plus the season list).
+data TmdbTvDetails = TmdbTvDetails
+  { tdName         :: Maybe Text
+  , tdOverview     :: Maybe Text
+  , tdFirstAirDate :: Maybe Text
+  , tdPoster       :: Maybe Text
+  , tdSeasons      :: [TmdbSeason]
+  } deriving (Show, Eq)
+
+instance FromJSON TmdbTvDetails where
+  parseJSON = withObject "TmdbTvDetails" $ \o ->
+    TmdbTvDetails
+      <$> o .:? "name"
+      <*> o .:? "overview"
+      <*> o .:? "first_air_date"
+      <*> o .:? "poster_path"
+      <*> o .:? "seasons" .!= []
+
+-- | Pure: parse a @\/tv\/<id>@ response body.
+parseTmdbTvDetails :: LBS.ByteString -> Either String TmdbTvDetails
+parseTmdbTvDetails body = do
+  v <- Aeson.eitherDecode body
+  case Aeson.fromJSON v of
+    Success d -> Right d
+    Error e   -> Left e
+
+-- | Pure: parse a @\/tv\/<id>\/season\/<n>@ response body into its episodes.
+parseTmdbSeasonEpisodes :: LBS.ByteString -> Either String [TmdbEpisode]
+parseTmdbSeasonEpisodes body = do
+  v <- Aeson.eitherDecode body
+  case parse (withObject "SeasonDoc" (\o -> o .:? "episodes" .!= [])) v of
+    Success es -> Right es
+    Error e    -> Left e
+
+-- | @\/tv\/<id>?api_key=<key>@ URL against an explicit API base (pure).
+tmdbTvDetailsUrlAt :: Text -> Text -> Int -> String
+tmdbTvDetailsUrlAt base apiKey tid =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/tv/" ++ show tid ++ "?api_key=" ++ T.unpack apiKey
+
+-- | @\/tv\/<id>\/season\/<n>?api_key=<key>@ URL (pure).
+tmdbSeasonUrlAt :: Text -> Text -> Int -> Int -> String
+tmdbSeasonUrlAt base apiKey tid n =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/tv/" ++ show tid ++ "/season/" ++ show n
+    ++ "?api_key=" ++ T.unpack apiKey
+
+-- | Fetch @\/tv\/<id>@ from an explicit base (10s timeout, never throws).
+tmdbTvDetailsAt :: Text -> Text -> Int -> IO (Either String TmdbTvDetails)
+tmdbTvDetailsAt base apiKey tid = do
+  eres <- tmdbFetch (tmdbTvDetailsUrlAt base apiKey tid)
+  pure (parseTmdbTvDetails =<< eres)
+
+-- | Fetch @\/tv\/<id>\/season\/<n>@ from an explicit base (never throws).
+tmdbSeasonAt :: Text -> Text -> Int -> Int -> IO (Either String [TmdbEpisode])
+tmdbSeasonAt base apiKey tid n = do
+  eres <- tmdbFetch (tmdbSeasonUrlAt base apiKey tid n)
+  pure (parseTmdbSeasonEpisodes =<< eres)

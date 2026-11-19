@@ -15,7 +15,7 @@ module FMS.Modules.Metadata.Types
   , metadataSettingsPublicJson
   ) where
 
-import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), fromJSON, object, withObject, (.!=), (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), fromJSON, object, withObject, (.!=), (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM

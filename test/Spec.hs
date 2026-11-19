@@ -13,6 +13,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
+import Data.Aeson (object, (.=))
+import Data.ByteString.Builder (toLazyByteString)
+import Network.Wai (defaultRequest, queryString)
+import Network.Wai.Internal (Response (..))
 import qualified Data.HashMap.Strict as HM
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (fromMaybe, isNothing, listToMaybe)
@@ -48,7 +52,7 @@ import FMS.Core.Memory (parseProcStatusRss, trimRing)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
 import FMS.Core.SceneDetect (blackdetectArgs, intervalsOverlap, mergeIntervals, parseBlackdetect, parseSilencedetect, proposeSegments, silencedetectArgs)
 import FMS.Core.RateLimit (Bucket (..), bucketKeyFor, newBucket, refill, requestIdHex, rateLimitClass, retryAfterSeconds, tryTake)
-import FMS.Core.Monad (AppError (..), errorMessage, newAppEnv, runApp, statusForError)
+import FMS.Core.Monad (AppError (..), errorMessage, newAppEnv, putState, runApp, statusForError)
 import FMS.Core.Router (allowedOriginsHeader, errorBody, exceedsMaxBody, firstMatch, isOpenPath, isOpenRoutePattern, matchSegments, matchSegmentsExact, normalizeSegments, openPathsExact, openRoutePatterns, parseCorsOrigins, parseTokenHeader, securityHeaders, tokenFromQuery, tokenFromRequestParts)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.Log (LogEntry (..), logLevelAllows, logRank, pushLogEntry)
@@ -68,7 +72,7 @@ import FMS.Core.Types.User (User(..), checkPasswordPolicy, toInternalJSON)
 import FMS.Modules.Auth.Monad (canAccessFolder, hashPassword, verifyPassword)
 import FMS.Modules.Auth.Routes (PermissionsRequest (..), PolicyPatch (..), applyPolicyPatch)
 import FMS.Modules.Auth.State (loadUsers, saveUsers)
-import FMS.Modules.Library.Monad (scanProgressData, withScanLock)
+import FMS.Modules.Library.Monad (libraryAcidKey, scanProgressData, withScanLock)
 import FMS.Modules.Library.Watch (eventsPending, watchFile, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
@@ -149,7 +153,12 @@ import FMS.Modules.Library.State
   )
 import FMS.Modules.Metadata.Api.Images (TmdbImageEntry (..), pickByLanguage, tmdbImageListToDownloads, tmdbImagesUrl)
 import FMS.Modules.Metadata.Api.Tmdb
-  ( parseTmdbResults
+  ( TmdbEpisode (..)
+  , TmdbSeason (..)
+  , TmdbTvDetails (..)
+  , parseTmdbResults
+  , parseTmdbSeasonEpisodes
+  , parseTmdbTvDetails
   , parseTmdbTvResults
   , tmdbPopularMoviesUrl
   , tmdbPopularMoviesUrlAt
@@ -157,13 +166,15 @@ import FMS.Modules.Metadata.Api.Tmdb
   , tmdbPopularTvUrlAt
   , tmdbSearchTvUrl
   , tmdbSearchUrl
+  , tmdbSeasonUrlAt
+  , tmdbTvDetailsUrlAt
   )
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, personsFromMetadata, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
@@ -4266,7 +4277,7 @@ main = do
             then putStrLn "PASS: m35 mock-tmdb IO tests skipped (mock did not start)"
             else do
               envM <- newAppEnv cfg35m
-              rMeta <- runApp envM $ do
+              _ <- runApp envM $ do
                 loadMetadataIntoState
                 loadMetadataSettingsIntoState
                 _ <- updateMetadataSettings (\s -> s { msTmdbApiKey = "SAVEDKEY", msFetchImages = True })
@@ -4390,6 +4401,10 @@ main = do
     [ Just (Aeson.String "Episode"), Just (Aeson.String "Family Guy")
     , Just (Aeson.String "Family Guy S25E00")
     , Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA") ]
+  check "m47 withLegacyItem: episode row also carries seasonNumber/episodeNumber"
+    [ m43fieldOf "seasonNumber" m43row, m43fieldOf "episodeNumber" m43row
+    , m43fieldOf "seasonNumber" m43movieRow ]
+    [ Just (Aeson.Number 25), Just (Aeson.Number 0), Nothing ]
   check "m43 withLegacyItem: movie row type movie, no seriesName, raw-title displayTitle fallback"
     [ m43fieldOf "type" m43movieRow
     , m43fieldOf "seriesName" m43movieRow
@@ -4518,14 +4533,14 @@ main = do
               if not rok then putStrLn "PASS: m38 mock phase skipped (mock did not start)" else act)
       runMock "half" $ do
         _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
-        st1 <- runApp env38 (fmap reqStatus <$> getRequest "r38")
+        st38a <- runApp env38 (fmap reqStatus <$> getRequest "r38")
         check "m38 live: torrent at 50% with file present -> stays Downloading"
-          (either (const Nothing) id st1) (Just Downloading)
+          (either (const Nothing) id st38a) (Just Downloading)
       runMock "full" $ do
         _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
-        st2 <- runApp env38 (fmap reqStatus <$> getRequest "r38")
+        st38b <- runApp env38 (fmap reqStatus <$> getRequest "r38")
         check "m38 live: torrent Seeding 100% with file present -> Imported"
-          (either (const Nothing) id st2) (Just Imported)
+          (either (const Nothing) id st38b) (Just Imported)
 
   -- milestone 45: episodes refresh via TMDB TV search (mock /search/tv)
   case mPy of
@@ -4696,4 +4711,200 @@ main = do
         Just i  -> indexerCategories i
         Nothing -> [] ]
     [ [2000, 5000] ]
+
+  -- milestone 47: series view (TMDB tv details + seasons/episodes + Downloaded)
+  check "m47 tmdbTvDetailsUrlAt / tmdbSeasonUrlAt builders (trailing slash stripped)"
+    [ tmdbTvDetailsUrlAt "http://127.0.0.1:9147/3" "K" 1942
+    , tmdbTvDetailsUrlAt "http://127.0.0.1:9147/3/" "K" 1
+    , tmdbSeasonUrlAt "http://127.0.0.1:9147/3" "K" 1942 25 ]
+    [ "http://127.0.0.1:9147/3/tv/1942?api_key=K"
+    , "http://127.0.0.1:9147/3/tv/1?api_key=K"
+    , "http://127.0.0.1:9147/3/tv/1942/season/25?api_key=K" ]
+  let tvDetailsJson = Aeson.encode (object
+        [ "name" .= ("Family Guy" :: T.Text), "overview" .= ("A cartoon." :: T.Text)
+        , "first_air_date" .= ("1999-01-31" :: T.Text), "poster_path" .= ("/fg.jpg" :: T.Text)
+        , "seasons" .= [ object [ "season_number" .= (25 :: Int), "name" .= ("Season 25" :: T.Text), "episode_count" .= (2 :: Int) ]
+                       , object [ "season_number" .= (0 :: Int) ] ] ])
+      tvDetails = parseTmdbTvDetails tvDetailsJson
+  check "m47 parseTmdbTvDetails: name/overview/date/poster/seasons"
+    (fmap (\d -> (tdName d, tdOverview d, tdFirstAirDate d, tdPoster d, map tsSeasonNumber (tdSeasons d))) tvDetails)
+    (Right (Just "Family Guy", Just "A cartoon.", Just "1999-01-31", Just "/fg.jpg", [25, 0]))
+  check "m47 parseTmdbTvDetails: missing optional keys tolerated"
+    (fmap (\d -> (tdName d, tdSeasons d)) (parseTmdbTvDetails (Aeson.encode (object []))))
+    (Right (Nothing, []))
+  check "m47 parseTmdbTvDetails on garbage -> Left"
+    True (isLeftStr (parseTmdbTvDetails (LBS.fromStrict (BSC.pack "[1]"))))
+  let seasonJson = Aeson.encode (object [ "episodes" .=
+        [ object [ "episode_number" .= (0 :: Int), "name" .= ("Pilot" :: T.Text), "overview" .= ("o0" :: T.Text)
+                 , "air_date" .= ("1999-01-31" :: T.Text), "still_path" .= ("/s0.jpg" :: T.Text), "vote_average" .= (8.5 :: Double) ]
+        , object [ "episode_number" .= (1 :: Int) ] ] ])
+      eps47 = parseTmdbSeasonEpisodes seasonJson
+  check "m47 parseTmdbSeasonEpisodes: fields + missing tolerated"
+    (fmap (map (\e -> (teEpisodeNumber e, teName e, teOverview e, teAirDate e, teStill e, teVote e))) eps47)
+    (Right [ (0, Just "Pilot", Just "o0", Just "1999-01-31", Just "/s0.jpg", Just 8.5)
+           , (1, Nothing, Nothing, Nothing, Nothing, Nothing) ])
+  check "m47 parseTmdbSeasonEpisodes on garbage -> Left"
+    True (isLeftStr (parseTmdbSeasonEpisodes (LBS.fromStrict (BSC.pack "nope"))))
+  check "m47 parseTmdbSeasonEpisodes: no episodes key -> []"
+    (parseTmdbSeasonEpisodes (Aeson.encode (object []))) (Right [])
+  let fgEp47 = MediaItem
+        { itemId = "ep1", itemTitle = "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+        , itemPath = "/tv/fg.mkv", itemSize = 1, itemMime = "video/x-matroska", itemAddedAt = reqT0
+        , itemFolder = "1", itemType = "Episode", itemSeries = Just "Family Guy"
+        , itemSeason = Just 25, itemEpisode = Just 0, itemExtraType = Nothing, itemVersions = [] }
+      mv47 = MediaItem
+        { itemId = "m1", itemTitle = "Shrek", itemPath = "/mv/shrek.mp4", itemSize = 1
+        , itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1", itemType = "Movie"
+        , itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+  check "m47 matchDownloaded matrix (series case-insensitive, S/E exact, Episode only)"
+    [ matchDownloaded "Family Guy" 25 0 [fgEp47]
+    , matchDownloaded "family guy" 25 0 [fgEp47]
+    , matchDownloaded "FAMILY GUY" 25 0 [fgEp47, mv47]
+    , matchDownloaded "Family Guy" 25 1 [fgEp47]
+    , matchDownloaded "Family Guy" 24 0 [fgEp47]
+    , matchDownloaded "Simpsons" 25 0 [fgEp47]
+    , matchDownloaded "Family Guy" 25 0 [mv47]
+    , matchDownloaded "Family Guy" 25 0 [] ]
+    [ True, True, True, False, False, False, False, False ]
+  -- route order: the Series literals must win over the items captures
+  check "m47 firstMatch: GET /Series/Search -> the literal route"
+    [Just [Lit "Series", Lit "Search"]]
+    [fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["Series", "Search"])]
+  check "m47 firstMatch: GET /series/1942/episodes -> capture route (case-insensitive)"
+    [Just [Lit "Series", Capture "id", Lit "Episodes"]]
+    [fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["series", "1942", "episodes"])]
+  check "m47 firstMatch: GET /Series/1942/Episodes exact case also matches"
+    [Just [Lit "Series", Capture "id", Lit "Episodes"]]
+    [fmap (routePattern . fst) (firstMatch (moduleRoutes metadataModule) "GET" ["Series", "1942", "Episodes"])]
+  -- handler-level tests against a mock TMDB (guarded: no python3 in the nix sandbox)
+  let respBody47 :: Response -> BSC.ByteString
+      respBody47 (ResponseBuilder _ _ b) = LBS.toStrict (toLazyByteString b)
+      respBody47 _ = ""
+      countSub47 pat str = go (0 :: Int) str
+        where
+          go n rest = case BSC.breakSubstring pat rest of
+            (_, b) | BSC.null b -> n
+                   | otherwise -> go (n + 1) (BSC.drop (BSC.length pat) b)
+  mPy47 <- findExecutable "python3"
+  case mPy47 of
+    Nothing -> putStrLn "PASS: m47 mock-tmdb handler tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m47mock = "/tmp/fms-m47-mock"
+          m47log = m47mock ++ "/calls.log"
+          mockSrc = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "from urllib.parse import urlparse, parse_qs"
+            , "port = int(sys.argv[1]); log = sys.argv[2]"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def _send(self, code, body):"
+            , "        b = body.encode() if isinstance(body, str) else body"
+            , "        self.send_response(code)"
+            , "        self.send_header('Content-Type', 'application/json')"
+            , "        self.send_header('Content-Length', str(len(b)))"
+            , "        self.end_headers()"
+            , "        self.wfile.write(b)"
+            , "    def do_GET(self):"
+            , "        u = urlparse(self.path); q = parse_qs(u.query)"
+            , "        key = q.get('api_key', [''])[0]"
+            , "        with open(log, 'a') as f:"
+            , "            f.write(u.path + '?api_key=' + key + chr(10))"
+            , "        if u.path.startswith('/3/') and key != 'K47':"
+            , "            return self._send(401, json.dumps({'status_message': 'bad key'}))"
+            , "        if u.path == '/3/search/tv':"
+            , "            return self._send(200, json.dumps({'results': [{'id': 1942, 'name': 'Family Guy', 'first_air_date': '1999-01-31', 'overview': 'A cartoon.', 'vote_average': 8.9, 'poster_path': '/fg.jpg'}]}))"
+            , "        if u.path == '/3/tv/1942':"
+            , "            return self._send(200, json.dumps({'name': 'Family Guy', 'overview': 'A cartoon.', 'first_air_date': '1999-01-31', 'poster_path': '/fg.jpg', 'seasons': [{'season_number': 25, 'name': 'Season 25', 'episode_count': 2}, {'season_number': 0, 'name': 'Specials'}]}))"
+            , "        if u.path == '/3/tv/1942/season/25':"
+            , "            return self._send(200, json.dumps({'episodes': [{'episode_number': 0, 'name': 'Happy Hell-o-ween', 'overview': 'o0', 'air_date': '2024-10-27', 'still_path': '/s0.jpg', 'vote_average': 7.1}, {'episode_number': 1, 'name': 'Ep One'}]}))"
+            , "        if u.path == '/3/tv/1942/season/0':"
+            , "            return self._send(200, json.dumps({'episodes': [{'episode_number': 1, 'name': 'Special'}]}))"
+            , "        return self._send(404, '{}')"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+          cfg47 = cfg27 { configStateDir = m47mock, configTmdbApiKey = "ENVKEY47"
+                        , configTmdbBaseUrl = "http://127.0.0.1:8947/3"
+                        , configTmdbImageBaseUrl = "http://127.0.0.1:8947/img"
+                        , configTmdbImageSize = "w500" }
+      resetDir m47mock
+      createDirectoryIfMissing True m47mock
+      writeFile (m47mock ++ "/mock.py") mockSrc
+      bracket
+        (createProcess (proc "python3" [m47mock ++ "/mock.py", "8947", m47log]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          rok <- waitForFile (m47log ++ ".ready") 40
+          if not rok
+            then putStrLn "PASS: m47 mock-tmdb handler tests skipped (mock did not start)"
+            else do
+              acid47 <- openLocalStateFrom (m47mock </> "acid") initialLibraryState
+              _ <- update acid47 (RegisterItem "/tv/fg.mkv" fgEp47)
+              env47 <- newAppEnv cfg47
+              respS <- runApp env47 $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K47" })
+                putState libraryAcidKey acid47
+                seriesSearchHandler [] (defaultRequest { queryString = [("name", Just "Family Guy")] })
+              let sb = either (const "") respBody47 respS
+              check "m47 handler /Series/Search: mock hit, Type Series, full PosterUrl"
+                (map (`BSC.isInfixOf` sb)
+                  [ "\"Id\":\"1942\"", "\"Name\":\"Family Guy\"", "\"Type\":\"Series\""
+                  , "\"PosterUrl\":\"http://127.0.0.1:8947/img/w500/fg.jpg\"" ])
+                [True, True, True, True]
+              respE <- runApp env47 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              let eb47 = either (const "") respBody47 respE
+              check "m47 handler /Series/:id/Episodes: series fields + both seasons"
+                (map (`BSC.isInfixOf` eb47)
+                  [ "\"Id\":\"1942\"", "\"Name\":\"Family Guy\"", "\"Year\":1999"
+                  , "\"SeasonNumber\":25", "\"SeasonNumber\":0" ])
+                [True, True, True, True, True]
+              check "m47 handler episodes: S25E00 Downloaded true (in library), S25E01 + special false"
+                [ countSub47 "\"Downloaded\":true" eb47, countSub47 "\"Downloaded\":false" eb47 ]
+                [1, 2]
+              check "m47 handler episodes: StillUrl built from image base/size"
+                True ("\"StillUrl\":\"http://127.0.0.1:8947/img/w500/s0.jpg\"" `BSC.isInfixOf` eb47)
+              let (_, after25) = BSC.breakSubstring "\"SeasonNumber\":25" eb47
+              check "m47 handler: specials (season 0) sorted LAST"
+                [ "\"SeasonNumber\":0" `BSC.isInfixOf` after25
+                , "\"SeasonNumber\":0" `BSC.isInfixOf` fst (BSC.breakSubstring "\"SeasonNumber\":25" eb47) ]
+                [True, False]
+              mockCalls <- readFile m47log
+              let apiLines = filter ("/3/" `isPrefixOf`) (lines mockCalls)
+              check "m47 mock: every API call used the SAVED key K47"
+                (all (\l -> "api_key=K47" `isSuffixOf` l) apiLines) True
+              check "m47 mock: env key never sent" (any ("ENVKEY47" `isInfixOf`) (lines mockCalls)) False
+              -- empty effective key -> graceful 200 with empty payload
+              let m47s2 = m47mock </> "s2"
+              createDirectoryIfMissing True m47s2
+              env47n <- newAppEnv (cfg47 { configStateDir = m47s2, configTmdbApiKey = "" })
+              respN <- runApp env47n $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                seriesSearchHandler [] (defaultRequest { queryString = [("name", Just "Family Guy")] })
+              check "m47 handler: empty key -> /Series/Search 200 []" (either (const "") respBody47 respN) "[]"
+              respN2 <- runApp env47n (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              check "m47 handler: empty key -> /Series/:id/Episodes 200 empty Seasons"
+                True ("\"Seasons\":[]" `BSC.isInfixOf` either (const "") respBody47 respN2)
+              -- bad id -> 400, never a crash
+              rBad <- runApp env47n (seriesEpisodesHandler [("id", "abc")] defaultRequest)
+              check "m47 handler: non-numeric series id -> 400"
+                (either statusForError (const 200) rBad) 400
+              -- TMDB down -> graceful empty seasons, not a 500
+              let m47s3 = m47mock </> "s3"
+              createDirectoryIfMissing True m47s3
+              env47d <- newAppEnv (cfg47 { configStateDir = m47s3, configTmdbBaseUrl = "http://127.0.0.1:8999/3" })
+              respD <- runApp env47d $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K47" })
+                putState libraryAcidKey acid47
+                seriesEpisodesHandler [("id", "1942")] defaultRequest
+              check "m47 handler: TMDB down -> 200 with empty Seasons (graceful)"
+                True ("\"Seasons\":[]" `BSC.isInfixOf` either (const "") respBody47 respD)
+              closeAcidState acid47)
+
   putStrLn "All tests passed."

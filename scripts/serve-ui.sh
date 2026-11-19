@@ -5,9 +5,7 @@
 #
 # usage: serve-ui.sh [LIBRARY_DIR] [PORT]
 #
-#   LIBRARY_DIR   media library root (default: scripts/demo-library);
-#                 when it contains no media files, 3 sample mp4s are
-#                 generated with ffmpeg (one with an .nfo title)
+#   LIBRARY_DIR   media library root (default: scripts/demo-library)
 #   PORT          HTTP port (default 8080)
 #
 # env overrides:
@@ -38,37 +36,8 @@ else
 fi
 echo "UI dir: $UI_OUT"
 
-# --- sample library --------------------------------------------------------
+# --- library ---------------------------------------------------------------
 mkdir -p "$LIB"
-FFMPEG_BIN=""
-if command -v ffmpeg >/dev/null 2>&1; then
-  FFMPEG_BIN="ffmpeg"
-else
-  FF_OUT="$(nix eval --raw nixpkgs#ffmpeg.outPath 2>/dev/null || echo none)"
-  if [ "$FF_OUT" != "none" ] && [ -x "$FF_OUT/bin/ffmpeg" ]; then
-    FFMPEG_BIN="$FF_OUT/bin/ffmpeg"
-  fi
-fi
-has_media() {
-  find "$LIB" -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mp3' \
-    -o -iname '*.webm' -o -iname '*.flac' -o -iname '*.ogg' -o -iname '*.wav' \
-    -o -iname '*.jpg' -o -iname '*.png' -o -iname '*.epub' -o -iname '*.pdf' \) 2>/dev/null | head -1
-}
-if [ -z "$(has_media)" ]; then
-  if [ -z "$FFMPEG_BIN" ]; then
-    echo "no media files in $LIB and no ffmpeg found; library stays empty" >&2
-  else
-    echo "generating 3 sample videos in $LIB ..."
-    "$FFMPEG_BIN" -hide_banner -loglevel error -f lavfi -i testsrc=s=320x240:d=30 \
-      -pix_fmt yuv420p -y "$LIB/sample-short.mp4"
-    "$FFMPEG_BIN" -hide_banner -loglevel error -f lavfi -i testsrc=s=320x240:d=60 \
-      -pix_fmt yuv420p -y "$LIB/sample-medium.mp4"
-    "$FFMPEG_BIN" -hide_banner -loglevel error -f lavfi -i testsrc=s=320x240:d=120 \
-      -pix_fmt yuv420p -y "$LIB/sample-long.mp4"
-    printf '<?xml version="1.0" encoding="UTF-8"?>\n<movie><title>Sample Long Movie</title><overview>Generated sample.</overview></movie>\n' \
-      > "$LIB/sample-long.nfo"
-  fi
-fi
 
 # --- server binary ---------------------------------------------------------
 if [ -n "${FMS_BIN:-}" ]; then

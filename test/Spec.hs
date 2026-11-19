@@ -1156,8 +1156,8 @@ main = do
   check "firstMatch: case-variant literal not shadowed by capture (/Items)"
     [Just [Lit "items"]] [fmap (routePattern . fst) (firstMatch [get [Lit "items"] undefined, get [Capture "file"] undefined] "GET" ["Items"])]
   -- milestone 19d: route-aware open check
-  check "openRoutePatterns is root/web/dashboard/capture"
-    [[], [Lit "web"], [Lit "dashboard"], [Capture "file"]] openRoutePatterns
+  check "openRoutePatterns is root/web/dashboard/api-docs/capture"
+    [[], [Lit "web"], [Lit "dashboard"], [Lit "api-docs"], [Capture "file"]] openRoutePatterns
   check "isOpenRoutePattern matrix (Lit exact, Capture only matches Capture)"
     [ isOpenRoutePattern [] []
     , isOpenRoutePattern [] [Lit "web"]

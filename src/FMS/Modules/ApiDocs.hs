@@ -22,6 +22,7 @@ import Network.Wai (Request, Response, responseLBS)
 import FMS (version)
 import FMS.Core.Module (Module (..), Route (..), Segment (..), get)
 import FMS.Core.Monad (AppM, getState)
+import FMS.Modules.Web (pageAuthOk, redirectToRoot)
 
 -- | The API-docs module (docs/todo.org section 1, milestone 1c): serves a
 -- GENERATED OpenAPI 3.0.3 spec at @/api-docs/openapi.json@, built from the
@@ -50,10 +51,16 @@ openApiHandler _captures _req = do
     [("Content-Type", "application/json")] (encode spec))
 
 -- | @GET /api-docs@ — tiny ASCII HTML index linking to the spec.
+-- m58: the index route is open so anonymous visitors in auth mode get a
+-- 302 to @/@ (the sign-in page) instead of a bare 401 JSON body; the
+-- spec itself (@/api-docs/openapi.json@) stays auth-gated.
 apiDocsPageHandler :: [(Text, Text)] -> Request -> AppM Response
-apiDocsPageHandler _captures _req =
-  pure (responseLBS status200
-    [("Content-Type", "text/html; charset=utf-8")] apiDocsPageHtml)
+apiDocsPageHandler _captures req = do
+  ok <- pageAuthOk req
+  if ok
+    then pure (responseLBS status200
+           [("Content-Type", "text/html; charset=utf-8")] apiDocsPageHtml)
+    else pure redirectToRoot
 
 -- Pure OpenAPI generators (exported for tests) ------------------------------
 

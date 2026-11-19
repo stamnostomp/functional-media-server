@@ -5,6 +5,8 @@ module FMS.Modules.Web
   , dashboardBeforeCapture
   , safeUiPath
   , contentTypeFor
+  , pageAuthOk
+  , redirectToRoot
   ) where
 
 import Control.Monad.Except (throwError)
@@ -15,9 +17,10 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
 import Data.Char (toLower)
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Types (status200)
+import Network.HTTP.Types (status200, status302)
 import Network.Wai (Request, Response, responseLBS)
 import System.Directory (doesFileExist)
 import System.FilePath (isAbsolute, normalise, splitDirectories, takeExtension, (</>))
@@ -25,6 +28,7 @@ import System.FilePath (isAbsolute, normalise, splitDirectories, takeExtension, 
 import FMS.Core.Module (Module (..), Route (..), Segment (..), get)
 import FMS.Core.Monad (AppError (..), AppM, envConfig)
 import FMS.Core.Types.Config (Config (..))
+import FMS.Modules.Auth.Monad (currentUserFromReq)
 
 -- | The web module: a single-page client served at @/@ and @/web@.
 -- Without 'configUiDir' that is the built-in minimal vanilla-JS page
@@ -59,13 +63,36 @@ dashboardBeforeCapture rs =
     (i : _) -> any (\(j, r) -> j > i && routePattern r == [Capture "file"]) (zip [0 ..] rs)
     []      -> False
 
+-- | m58: in auth mode a browser page may only be served to a signed-in
+-- user; anonymous visitors get a 302 to @/@ (the single-page client,
+-- whose login screen is the one sign-in page). In open mode (no
+-- FMS_REQUIRE_AUTH) every page is served. Used by the HTML page
+-- handlers (/dashboard, /api-docs); API routes keep their 401 JSON.
+pageAuthOk :: Request -> AppM Bool
+pageAuthOk req = do
+  cfg <- asks envConfig
+  if not (configRequireAuth cfg)
+    then pure True
+    else do
+      mUser <- currentUserFromReq req
+      pure (isJust mUser)
+
+-- | 302 to the single-page client at @/@ (the sign-in page).
+redirectToRoot :: Response
+redirectToRoot =
+  responseLBS status302 [("Location", "/")] LBS.empty
+
 -- | @GET /dashboard@ -- the built-in admin dashboard page
 -- (milestone 19b), served regardless of 'configUiDir' (the Lit route
 -- wins over the static capture, see 'dashboardBeforeCapture').
+-- m58: anonymous visitors in auth mode are redirected to @/@.
 dashboardHandler :: [(Text, Text)] -> Request -> AppM Response
-dashboardHandler _captures _req =
-  pure (responseLBS status200
-    [("Content-Type", "text/html; charset=utf-8")] dashboardPageHtml)
+dashboardHandler _captures req = do
+  ok <- pageAuthOk req
+  if ok
+    then pure (responseLBS status200
+           [("Content-Type", "text/html; charset=utf-8")] dashboardPageHtml)
+    else pure redirectToRoot
 
 -- | Both the root @/@ and @/web@ serve the single-page client: the
 -- stamno-media @index.html@ when 'configUiDir' is set, else the built-in

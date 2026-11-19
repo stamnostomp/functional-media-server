@@ -297,6 +297,7 @@ openRoutePatterns =
   [ []
   , [Lit "web"]
   , [Lit "dashboard"]
+  , [Lit "api-docs"]          -- m58: page handler redirects anonymous to /
   , [Capture "file"]
   ]
 

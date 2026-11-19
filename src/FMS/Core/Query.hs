@@ -10,6 +10,9 @@ module FMS.Core.Query
   , attachTags
   , withDisplayTitle
   , withDisplayTitleLower
+  , withLegacyType
+  , displayTitleForItem
+  , withLegacyItem
   , imageBlurHashesValue
   , attachImageBlurHashes
   , filterByFolder
@@ -48,6 +51,7 @@ import Data.Aeson (ToJSON (..), Value (..), object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
+import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
 import Data.List (sortBy)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -599,3 +603,38 @@ withDisplayTitleLower metaTitleOf v = case v of
          Just t  -> Object (KeyMap.insert (Key.fromText "displayTitle") (String t) o)
          Nothing -> v
   _ -> v
+
+-- | m43: add the lowercase @type@ (and @seriesName@ when present) keys to
+-- a legacy simple item JSON object, so the Elm UI can split Movies/Shows.
+withLegacyType :: MediaItem -> Value -> Value
+withLegacyType i v = case v of
+  Object o ->
+    let o1 = KeyMap.insert (Key.fromText "type") (String (itemType i)) o
+    in case itemSeries i of
+         Just sn -> Object (KeyMap.insert (Key.fromText "seriesName") (String sn) o1)
+         Nothing -> Object o1
+  _ -> v
+
+-- | m43: per-item display title -- the metadata title when a non-empty one
+-- exists, else an episode label @Series S01E02@ for episodes, else 'Nothing'
+-- (the caller then falls back to the raw title).
+displayTitleForItem :: HM.HashMap Text MediaMetadata -> MediaItem -> Maybe Text
+displayTitleForItem metaMap i =
+  case HM.lookup (itemId i) metaMap >>= metaTitle of
+    Just t | not (T.null t) -> Just t
+    _ -> case (itemType i, itemSeries i, itemSeason i, itemEpisode i) of
+      ("Episode", Just sn, Just se, Just ep) ->
+        Just (sn <> T.pack (" S" ++ pad2 se ++ "E" ++ pad2 ep))
+      _ -> Nothing
+  where
+    pad2 n = let str = show n in if length str < 2 then '0' : str else str
+
+-- | m43: full legacy-row enrichment for the stamno-media UI: type /
+-- seriesName keys plus the episode-aware displayTitle.
+withLegacyItem :: HM.HashMap Text MediaMetadata -> MediaItem -> Value -> Value
+withLegacyItem metaMap i = withDisplayTitleLower lk . withLegacyType i
+  where
+    lk ident =
+      if ident == itemId i
+        then displayTitleForItem metaMap i
+        else HM.lookup ident metaMap >>= metaTitle

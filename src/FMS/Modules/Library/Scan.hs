@@ -8,6 +8,8 @@ module FMS.Modules.Library.Scan
   , itemFromPath
   , classifyItem
   , parseEpisodeFilename
+  , parseEpisodeTagPos
+  , seriesFromEpisodeName
   , extraTypeFor
   , hasTvShowNfo
   , isMediaFile
@@ -50,6 +52,7 @@ import System.Directory
 import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
+import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider)
 import FMS.Modules.Metadata.Nfo (nfoPathFor)
 
 -- | Extensions recognised as media files (lowercase, with dot).
@@ -135,18 +138,35 @@ mimeFor p = case map toLower (takeExtension p) of
 -- @s1e2@ / @S01E02E03@ in a file base name and return the first
 -- @(season, episode)@ pair. Manual scanning, no regex dependency.
 parseEpisodeFilename :: Text -> Maybe (Int, Int)
-parseEpisodeFilename t = go (T.unpack t)
+parseEpisodeFilename t = parseEpisodeTagPos t >>= \(_, s, e) -> Just (s, e)
+
+-- | m44: like 'parseEpisodeFilename' but also returns the character offset
+-- where the @SxxEyy@ tag STARTS: @(start, season, episode)@.
+parseEpisodeTagPos :: Text -> Maybe (Int, Int, Int)
+parseEpisodeTagPos t = go 0 (T.unpack t)
   where
-    go [] = Nothing
-    go (c : rest)
+    go _ [] = Nothing
+    go i (c : rest)
       | c == 's' || c == 'S' =
           case span isDigit rest of
             (ds, e : rest') | not (null ds), e == 'e' || e == 'E' ->
               case span isDigit rest' of
-                (es, _) | not (null es) -> Just (read ds, read es)
-                _                       -> go rest
-            _ -> go rest
-      | otherwise = go rest
+                (es, _) | not (null es) -> Just (i, read ds, read es)
+                _                       -> go (i + 1) rest
+            _ -> go (i + 1) rest
+      | otherwise = go (i + 1) rest
+
+-- | m44: the series name of an episode file base name -- the part BEFORE
+-- the first @SxxEyy@ tag, cleaned of release tags via
+-- 'cleanTitleForProvider'. When the tag is at the very start (empty
+-- prefix) the whole base name is cleaned instead.
+seriesFromEpisodeName :: Text -> Text
+seriesFromEpisodeName baseName =
+  let prefix = case parseEpisodeTagPos baseName of
+        Just (pos, _, _) -> T.pack (take pos (T.unpack baseName))
+        Nothing          -> baseName
+      use = if T.null (T.strip prefix) then baseName else prefix
+  in fst (cleanTitleForProvider use)
 
 -- | IO: does the file's parent directory contain a @tvshow.nfo@?
 hasTvShowNfo :: FilePath -> IO Bool
@@ -191,7 +211,9 @@ parentDirNames p = go (takeDirectory p)
 -- @(itemType, series, season, episode)@. When the parent directory has a
 -- @tvshow.nfo@ the file is an 'Episode' of the series named after the
 -- directory, with season/episode from 'parseEpisodeFilename'; otherwise
--- the type comes from the mime and the episode fields are 'Nothing'.
+-- (m43) a scene-style @SxxEyy@ file name is also an 'Episode', with the
+-- series name cleaned from the file name; in all other cases the type
+-- comes from the mime and the episode fields are 'Nothing'.
 classifyItem
   :: Bool      -- ^ hasTvShowNfo (parent dir contains tvshow.nfo)
   -> FilePath  -- ^ the file path
@@ -204,6 +226,11 @@ classifyItem hasNfo path baseName
             Just (s, e) -> (Just s, Just e)
             Nothing     -> (Nothing, Nothing)
       in ("Episode", Just series, season, episode)
+  | Just (s, e) <- parseEpisodeFilename baseName =
+      -- m43/m44: scene release without tvshow.nfo -> Episode; series name is
+      -- the part of the file name BEFORE the SxxEyy tag, cleaned of tags
+      let series = seriesFromEpisodeName baseName
+      in ("Episode", Just series, Just s, Just e)
   | otherwise = (itemTypeFromMime (mimeFor path), Nothing, Nothing, Nothing)
 
 -- | Milestone 4j quality/codec tokens stripped by 'normalizeVersionTitle'

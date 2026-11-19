@@ -39,7 +39,7 @@ import FMS.Core.Module (Route, Segment(..), delete, get, jsonResponse, post)
 import Control.Monad.Reader (asks)
 import FMS.Core.Monad (AppError(..), AppM, envConfig, getState)
 import FMS.Core.Types.Config (Config(..))
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet, withDisplayTitle, withDisplayTitleLower)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, clampLimit, clampStartIndex, filterByParent, notInAnyCollection, searchItemsMeta, filterBySeries, isUserDataSortKey, nextUpEpisodes, projectFields, queryParams, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, specialFeaturesOf, typeFilterIncludesBoxSet, withDisplayTitle, displayTitleForItem, withLegacyItem)
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Core.Types.MediaItem (MediaItem (..), simpleItemJson)
 import FMS.Core.Types.User (User (..))
@@ -99,8 +99,8 @@ listItemsHandler :: [(Text, Text)] -> Request -> AppM Response
 listItemsHandler _captures req = do
   mUser <- currentUserFromReq req
   items <- listItems >>= visibleItems mUser
-  metaMap <- metaMapNow   -- m40: displayTitle from metadata title
-  pure (jsonResponse (map (withDisplayTitleLower (metaTitleLookup metaMap) . simpleItemJson) items))
+  metaMap <- metaMapNow   -- m40/m43: displayTitle + type/seriesName from metadata
+  pure (jsonResponse (map (\i -> withLegacyItem metaMap i (simpleItemJson i)) items))
 
 -- | @GET \/items@ — Jellyfin-shaped items query (docs/todo.org section 4):
 -- query params @search@/@searchTerm@, @sortBy@, @sortOrder@, @startIndex@,
@@ -176,7 +176,7 @@ itemsQueryResponse mUser qparams = do
       renderItem i = do
         -- Item tags API: attach the metadata metaTags as "Tags" BEFORE
         -- projectFields so the fields= projection governs the key.
-        let base = withDisplayTitle (metaTitleLookup metaMap) $   -- m40
+        let base = withDisplayTitle (const (displayTitleForItem metaMap i)) $   -- m40/m43
                      projectFields fields
                      (attachTags (maybe [] metaTags (metaLookup (itemId i)))
                        (attachUserData mLookup i (toJSON i)))
@@ -421,7 +421,7 @@ itemDetailHandler captures req =
               let tagList = maybe [] metaTags (HM.lookup i metaMap)
               -- Milestone 4n: image tags on the detail JSON too
               -- (EnableImages/imageType), same as the /items list.
-              let base = withDisplayTitle (metaTitleLookup metaMap) $   -- m40
+              let base = withDisplayTitle (const (displayTitleForItem metaMap item)) $   -- m40/m43
                            projectFields fields (attachTags tagList (attachUserData mLookup item (toJSON item)))
               if lookup "enableimages" qparams == Just "false"
                 then pure (jsonResponse base)

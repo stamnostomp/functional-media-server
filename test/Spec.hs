@@ -42,7 +42,7 @@ import FMS.Core.Cli (parseCliArgs)
 import FMS.Core.Module (Module (..), Route (..), Segment (..), get, post)
 import FMS.Core.Types.Config (Config (..), validateConfig)
 import FMS.Core.Process (ffmpegTimeoutArgs, runProcessBS, showBS, tryAcquireSlot)
-import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders, withDisplayTitle, withDisplayTitleLower)
+import FMS.Core.Query (applyItemQuery, applyMetadataFilters, applyUserDataFilters, attachImageBlurHashes, attachImageTags, attachTags, attachUserData, backdropImageTagsValue, clampLimit, clampNonNegative, clampStartIndex, filterByFolder, imageBlurHashesValue, imageTagsValue, filterByParent, filterByIncludeTypes, filterBySeries, filterByType, filterByYears, isUserDataSortKey, itemYear, latestItems, nextUpEpisodes, normalizeQueryParams, paginate, parseBoundedInt, projectFields, queryParams, notInAnyCollection, searchItems, searchItemsMeta, showsFromItems, similarItems, sortByUserDataField, sortEpisodes, sortItems, specialFeaturesOf, typeFilterIncludesBoxSet, versionParam, versionPathFor, viewsFromFolders, displayTitleForItem, withDisplayTitle, withDisplayTitleLower, withLegacyItem)
 import FMS.Core.Blurhash (base83Alphabet, base83Decode, base83Encode, decodeBlurhashSize, encodeBlurhash)
 import FMS.Core.Memory (parseProcStatusRss, trimRing)
 import FMS.Core.Range (ByteRange(..), parseRangeHeader)
@@ -82,6 +82,8 @@ import FMS.Modules.Library.Scan
   , isNfoFile
   , itemIdsForNfo
   , parseEpisodeFilename
+  , parseEpisodeTagPos
+  , seriesFromEpisodeName
   , itemFromPath
   , mediaExtensions
   , mimeFor
@@ -2155,6 +2157,27 @@ main = do
   check "classifyItem without nfo -> Movie from mime"
     ("Movie", Nothing, Nothing, Nothing)
     (classifyItem False "/lib/movie.mp4" "movie")
+  check "m43 classifyItem: scene SxxEyy file without nfo -> Episode with cleaned series"
+    (classifyItem False "/dl/Family.Guy.S25E00.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.1080p.HEVC.x265-MeGusta")
+    ("Episode", Just "Family Guy", Just 25, Just 0)
+  check "m44 classifyItem: exact live filename -> series cut at the SxxEyy tag"
+    (classifyItem False "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
+    ("Episode", Just "Family Guy", Just 25, Just 0)
+  check "m44 parseEpisodeTagPos returns the tag start offset"
+    (parseEpisodeTagPos "Family.Guy.S25E00.1080p.x265-MeGusta")
+    (Just (11, 25, 0))
+  check "m44 seriesFromEpisodeName: part BEFORE the SxxEyy tag, cleaned (live filename)"
+    (seriesFromEpisodeName "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
+    "Family Guy"
+  check "m44 seriesFromEpisodeName: tag at start -> fall back to full cleaned name"
+    (seriesFromEpisodeName "S01E02.The.Beginning.1080p.x265-GRP")
+    "S01E02 The Beginning"
+  check "m44 seriesFromEpisodeName: no tag -> whole name cleaned"
+    (seriesFromEpisodeName "Family.Guy.1080p.x265-MeGusta")
+    "Family Guy"
+  check "m43 classifyItem with tvshow.nfo still wins (unchanged)"
+    (classifyItem True "/lib/MyShow/S01E02.mkv" "S01E02.mkv")
+    ("Episode", Just "MyShow", Just 1, Just 2)
   check "classifyItem without nfo, audio -> Audio"
     ("Audio", Nothing, Nothing, Nothing)
     (classifyItem False "/lib/song.mp3" "song")
@@ -4323,6 +4346,41 @@ main = do
     , ("Shrek", Just 2001), ("Se7en", Just 1995) ]
   check "m39 cleanTitleForProvider: hyphenated title word without group kept"
     (cleanTitleForProvider "Spider-Man") ("Spider Man", Nothing)
+
+  -- milestone 43: legacy rows carry type/seriesName + episode displayTitle
+  let m43fieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value
+      m43fieldOf k v = case v of Aeson.Object o -> KeyMap.lookup (Key.fromText k) o; _ -> Nothing
+      m43movie = MediaItem
+        { itemId = "40", itemTitle = "Shrek.2001.1080p.BluRay.x265-LAMA", itemPath = "/lib/shrek.mkv"
+        , itemSize = 999, itemMime = "video/x-matroska", itemAddedAt = reqT0, itemFolder = "1"
+        , itemType = "Movie", itemSeries = Nothing, itemSeason = Nothing, itemEpisode = Nothing
+        , itemExtraType = Nothing, itemVersions = [] }
+      m43ep = m43movie { itemId = "ep1", itemType = "Episode"
+                       , itemSeries = Just "Family Guy", itemSeason = Just 25, itemEpisode = Just 0 }
+      m43row = withLegacyItem HM.empty m43ep (simpleItemJson m43ep)
+      m43movieRow = withLegacyItem HM.empty m43movie (simpleItemJson m43movie)
+  check "m43 withLegacyItem: /library episode row carries type + seriesName + SxxEyy displayTitle"
+    [ m43fieldOf "type" m43row
+    , m43fieldOf "seriesName" m43row
+    , m43fieldOf "displayTitle" m43row
+    , m43fieldOf "title" m43row ]
+    [ Just (Aeson.String "Episode"), Just (Aeson.String "Family Guy")
+    , Just (Aeson.String "Family Guy S25E00")
+    , Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA") ]
+  check "m43 withLegacyItem: movie row type movie, no seriesName, raw-title displayTitle fallback"
+    [ m43fieldOf "type" m43movieRow
+    , m43fieldOf "seriesName" m43movieRow
+    , m43fieldOf "displayTitle" m43movieRow ]
+    [ Just (Aeson.String "Movie"), Nothing
+    , Just (Aeson.String "Shrek.2001.1080p.BluRay.x265-LAMA") ]
+  check "m44 displayTitleForItem: live filename -> Family Guy S25E00"
+    (displayTitleForItem HM.empty
+        (m43movie { itemId = "ep2", itemType = "Episode", itemSeries = Just "Family Guy"
+                  , itemSeason = Just 25, itemEpisode = Just 0 }))
+    (Just "Family Guy S25E00")
+  check "m43 displayTitleForItem: metadata title beats the episode label"
+    (displayTitleForItem (HM.fromList [("ep1", emptyMetadata { metaTitle = Just "Family Guy" })]) m43ep)
+    (Just "Family Guy")
 
   -- milestone 42: audio-token prefix matching (aac5/ddp5.1/dts51...)
   check "m42 cleanTitleForProvider: AAC5.1 audio tag + dash group (live bug)"

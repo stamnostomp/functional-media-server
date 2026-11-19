@@ -68,6 +68,7 @@ library
                       FMS.Modules.UserData.Routes
                       FMS.Modules.Metadata
                       FMS.Modules.Metadata.Api.Types
+                      FMS.Modules.Metadata.Cache
                       FMS.Modules.Metadata.Api.Tmdb
                       FMS.Modules.Metadata.Api.Images
                       FMS.Modules.Metadata.Types

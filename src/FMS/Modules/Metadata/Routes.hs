@@ -24,6 +24,8 @@ module FMS.Modules.Metadata.Routes
   , matchDownloaded
   , seriesSearchHandler
   , seriesEpisodesHandler
+  , seriesNameOfPayload
+  , attachDownloadedLive
   , getMetadataSettingsHandler
   , postMetadataSettingsHandler
   , testMetadataSettingsHandler
@@ -34,13 +36,17 @@ import Control.Monad (forM, forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecode, object, withObject, (.:?), (.!=), (.=))
 import Data.HashMap.Strict (HashMap)
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.HashMap.Strict as HM
 import Data.List (nub, sortOn)
 import Data.Maybe (fromMaybe)
+import Data.Time.Clock (getCurrentTime)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import Network.Wai (Request, Response, queryString, strictRequestBody)
 import Text.Read (readMaybe)
 
@@ -52,6 +58,7 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, lookupSeriesCache, storeSeriesCache)
 import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, updateMetadataSettings)
@@ -458,22 +465,33 @@ seriesSearchHandler _captures req = do
       apiKey = msTmdbApiKey ms
       imgBase = configTmdbImageBaseUrl cfg
       imgSize = configTmdbImageSize cfg
+      refresh = lookup "refresh" qparams == Just "true"   -- m56: force live refetch
+      cacheKey = "search:" <> T.toLower (T.strip name)    -- m56
   if T.null apiKey || T.null (T.strip name)
     then pure (jsonResponse ([] :: [Value]))
     else do
-      res <- liftIO (tmdbSearchTvAt (configTmdbBaseUrl cfg) apiKey (T.strip name))
-      case res of
-        Left err -> do
-          logWarn ("series search for \"" <> name <> "\" failed: " <> T.pack err)
-          pure (jsonResponse ([] :: [Value]))
-        Right rs ->
-          pure (jsonResponse (map (discoverEntry "Series" imgBase imgSize) (take 20 rs)))
+      -- m56: serve from the persistent cache when fresh (unless ?refresh=true)
+      now <- liftIO getCurrentTime
+      mCached <- lookupSeriesCache cacheKey
+      case mCached of
+        Just e | not refresh && cacheFresh now (configSeriesCacheTtlSec cfg) e ->
+          pure (jsonResponse (scePayload e))
+        _ -> do
+          res <- liftIO (tmdbSearchTvAt (configTmdbBaseUrl cfg) apiKey (T.strip name))
+          case res of
+            Left err -> do
+              logWarn ("series search for \"" <> name <> "\" failed: " <> T.pack err)
+              pure (jsonResponse ([] :: [Value]))
+            Right rs -> do
+              let payload = toJSON (map (discoverEntry "Series" imgBase imgSize) (take 20 rs))
+              storeSeriesCache cacheKey payload   -- cache successful payloads only
+              pure (jsonResponse payload)
 
 -- | m47: @GET /Series/:id/Episodes@ — TMDB @\/tv\/<id>@ plus every season's
 -- episodes, each flagged @Downloaded@ when a matching Episode item exists in
 -- the library. Graceful: no key / any TMDB error -> 200 with empty Seasons.
 seriesEpisodesHandler :: [(Text, Text)] -> Request -> AppM Response
-seriesEpisodesHandler captures _req = do
+seriesEpisodesHandler captures req = do
   case lookup "id" captures of
     Nothing -> throwError (BadRequest "missing id capture")
     Just tidTxt -> case readMaybe (T.unpack tidTxt) of
@@ -485,50 +503,105 @@ seriesEpisodesHandler captures _req = do
             base = configTmdbBaseUrl cfg
             imgBase = configTmdbImageBaseUrl cfg
             imgSize = configTmdbImageSize cfg
+            qparams = queryParams (queryString req)
+            refresh = lookup "refresh" qparams == Just "true"   -- m56
         if T.null apiKey
           then pure (jsonResponse (emptySeriesDetail tidTxt))
           else do
             items <- listItems
-            ed <- liftIO (tmdbTvDetailsAt base apiKey tid)
-            case ed of
-              Left err -> do
-                logWarn ("series details for " <> tidTxt <> " failed: " <> T.pack err)
-                pure (jsonResponse (emptySeriesDetail tidTxt))
-              Right d -> do
-                let seriesName = fromMaybe "" (tdName d)
-                    posterUrl = fmap (\p -> imgBase <> "/" <> imgSize <> p) (tdPoster d)
-                    year = tdFirstAirDate d >>= releaseYear
-                    seasonsSorted = sortOn (\sn -> (tsSeasonNumber sn == 0, tsSeasonNumber sn)) (tdSeasons d)
-                seasonVals <- forM seasonsSorted $ \sn -> do
-                  let n = tsSeasonNumber sn
-                  eres <- liftIO (tmdbSeasonAt base apiKey tid n)
-                  eps <- case eres of
-                    Left err -> do
-                      logWarn ("series season " <> T.pack (show n) <> " failed: " <> T.pack err)
-                      pure []
-                    Right es -> pure
-                      [ object
-                          [ "EpisodeNumber" .= teEpisodeNumber e
-                          , "Name"          .= teName e
-                          , "Overview"      .= teOverview e
-                          , "AirDate"       .= teAirDate e
-                          , "StillUrl"      .= fmap (\p -> imgBase <> "/" <> imgSize <> p) (teStill e)
-                          , "Downloaded"    .= matchDownloaded seriesName n (teEpisodeNumber e) items
-                          ]
-                      | e <- es ]
-                  pure (object
-                    [ "SeasonNumber" .= n
-                    , "Name"         .= tsName sn
-                    , "Episodes"     .= eps ])
-                pure (jsonResponse (object
-                  [ "Id" .= tidTxt
-                  , "Name" .= tdName d
-                  , "Year" .= year
-                  , "Overview" .= tdOverview d
-                  , "PosterUrl" .= posterUrl
-                  , "Seasons" .= seasonVals ]))
+            -- m56: serve the cached raw payload (Downloaded attached live below)
+            -- when fresh, unless ?refresh=true
+            now <- liftIO getCurrentTime
+            mCached <- lookupSeriesCache tidTxt
+            case mCached of
+              Just e | not refresh && cacheFresh now (configSeriesCacheTtlSec cfg) e ->
+                pure (jsonResponse (attachDownloadedLive (seriesNameOfPayload (scePayload e)) (scePayload e) items))
+              _ -> fetchAndCacheEpisodes apiKey base imgBase imgSize tid tidTxt items
+
+-- | m56: fetch the TMDB tv details + every season, build the RAW payload
+-- (no Downloaded flags -- those are attached live per request), cache it
+-- under the tmdb id, and answer with Downloaded attached.
+fetchAndCacheEpisodes
+  :: Text -> Text -> Text -> Text -> Int -> Text -> [MediaItem] -> AppM Response
+fetchAndCacheEpisodes apiKey base imgBase imgSize tid tidTxt items = do
+  ed <- liftIO (tmdbTvDetailsAt base apiKey tid)
+  case ed of
+    Left err -> do
+      logWarn ("series details for " <> tidTxt <> " failed: " <> T.pack err)
+      pure (jsonResponse (emptySeriesDetail tidTxt))
+    Right d -> do
+      let seriesName = fromMaybe "" (tdName d)
+          posterUrl = fmap (\p -> imgBase <> "/" <> imgSize <> p) (tdPoster d)
+          year = tdFirstAirDate d >>= releaseYear
+          seasonsSorted = sortOn (\sn -> (tsSeasonNumber sn == 0, tsSeasonNumber sn)) (tdSeasons d)
+      seasonVals <- forM seasonsSorted $ \sn -> do
+        let n = tsSeasonNumber sn
+        eres <- liftIO (tmdbSeasonAt base apiKey tid n)
+        eps <- case eres of
+          Left err -> do
+            logWarn ("series season " <> T.pack (show n) <> " failed: " <> T.pack err)
+            pure []
+          Right es -> pure
+            [ object
+                [ "EpisodeNumber" .= teEpisodeNumber e
+                , "Name"          .= teName e
+                , "Overview"      .= teOverview e
+                , "AirDate"       .= teAirDate e
+                , "StillUrl"      .= fmap (\p -> imgBase <> "/" <> imgSize <> p) (teStill e)
+                ]
+            | e <- es ]
+        pure (object
+          [ "SeasonNumber" .= n
+          , "Name"         .= tsName sn
+          , "Episodes"     .= eps ])
+      let rawPayload = object
+            [ "Id" .= tidTxt
+            , "Name" .= tdName d
+            , "Year" .= year
+            , "Overview" .= tdOverview d
+            , "PosterUrl" .= posterUrl
+            , "Seasons" .= seasonVals ]
+      storeSeriesCache tidTxt rawPayload   -- m56: cache the raw payload
+      pure (jsonResponse (attachDownloadedLive seriesName rawPayload items))
+
+-- | m56: empty Episodes payload for handlers when the TMDB key is missing
+-- or the fetch failed (never a 500).
+emptySeriesDetail :: Text -> Value
+emptySeriesDetail tidTxt = object
+  [ "Id" .= tidTxt, "Name" .= (Nothing :: Maybe Text), "Year" .= (Nothing :: Maybe Int)
+  , "Overview" .= (Nothing :: Maybe Text), "PosterUrl" .= (Nothing :: Maybe Text)
+  , "Seasons" .= ([] :: [Value]) ]
+
+-- | m56 pure: the series name stored in a cached Episodes payload.
+seriesNameOfPayload :: Value -> Text
+seriesNameOfPayload v = case v of
+  Object o -> case KeyMap.lookup (Key.fromText "Name") o of
+    Just (String t) -> t
+    _               -> ""
+  _ -> ""
+
+-- | m56 pure: attach live @Downloaded@ flags to every episode of a (cached
+-- or fresh) Episodes payload, matching the library per request.
+attachDownloadedLive :: Text -> Value -> [MediaItem] -> Value
+attachDownloadedLive seriesName payload items = case payload of
+  Object o -> case KeyMap.lookup (Key.fromText "Seasons") o of
+    Just (Array seasons) ->
+      Object (KeyMap.insert (Key.fromText "Seasons") (Array (V.fromList (map seasonV (V.toList seasons)))) o)
+    _ -> payload
+  _ -> payload
   where
-    emptySeriesDetail tidTxt = object
-      [ "Id" .= tidTxt, "Name" .= (Nothing :: Maybe Text), "Year" .= (Nothing :: Maybe Int)
-      , "Overview" .= (Nothing :: Maybe Text), "PosterUrl" .= (Nothing :: Maybe Text)
-      , "Seasons" .= ([] :: [Value]) ]
+    seasonV sv = case sv of
+      Object so -> case KeyMap.lookup (Key.fromText "SeasonNumber") so of
+        Just (Number snNum) -> case KeyMap.lookup (Key.fromText "Episodes") so of
+          Just (Array eps) ->
+            Object (KeyMap.insert (Key.fromText "Episodes")
+                     (Array (V.fromList (map (epV (round snNum)) (V.toList eps)))) so)
+          _ -> sv
+        _ -> sv
+      _ -> sv
+    epV sn ev = case ev of
+      Object eo -> case KeyMap.lookup (Key.fromText "EpisodeNumber") eo of
+        Just (Number en) ->
+          Object (KeyMap.insert (Key.fromText "Downloaded") (toJSON (matchDownloaded seriesName sn (round en) items)) eo)
+        _ -> ev
+      _ -> ev

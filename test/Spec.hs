@@ -176,9 +176,10 @@ import FMS.Modules.Metadata.Api.Tmdb
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata (metadataModule)
+import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, cacheGet, cachePut, emptySeriesCache, loadSeriesCache, loadSeriesCacheIntoState, saveSeriesCache, seriesCachePath)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Routes (attachDownloadedLive, discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesNameOfPayload, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, metadataStoredJSON, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
@@ -3055,7 +3056,7 @@ main = do
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
+      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -3189,7 +3190,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -4070,7 +4071,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280"
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
         , configJackettUrl = Nothing
@@ -4274,7 +4275,7 @@ main = do
             , itemExtraType = Nothing, itemVersions = [] }
           cfg35m = cfg35 { configTmdbBaseUrl = "http://127.0.0.1:8930/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8930/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
       bracket
         (createProcess (proc "python3" [m35mock ++ "/mock.py", "8930", m35log]))
         (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
@@ -4572,7 +4573,7 @@ main = do
           cfg45 = cfg27 { configStateDir = m45dir, configTmdbApiKey = "K"
                          , configTmdbBaseUrl = "http://127.0.0.1:8931/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8931/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
           m45mockSrc = unlines
             [ "import json, sys"
             , "from http.server import BaseHTTPRequestHandler, HTTPServer"
@@ -4848,7 +4849,7 @@ main = do
           cfg47 = cfg27 { configStateDir = m47mock, configTmdbApiKey = "ENVKEY47"
                         , configTmdbBaseUrl = "http://127.0.0.1:8947/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8947/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
       resetDir m47mock
       createDirectoryIfMissing True m47mock
       writeFile (m47mock ++ "/mock.py") mockSrc
@@ -5094,7 +5095,7 @@ main = do
       let cfg53 = cfg27 { configStateDir = m53mock, configTmdbApiKey = "K53", configFetchImages = False
                         , configTmdbBaseUrl = "http://127.0.0.1:8949/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8949/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280" }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "w1280", configSeriesCacheTtlSec = 86400 }
           m53item = MediaItem
             { itemId = "1", itemTitle = "Test Movie", itemPath = "/x.mp4"
             , itemSize = 1, itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1"
@@ -5138,5 +5139,202 @@ main = do
                 [ any ("/img/w500/p.jpg" `isPrefixOf`) imgLines
                 , any ("/img/w1280/b.jpg" `isPrefixOf`) imgLines ]
                 [ True, True ])
+
+  -- m56: persistent TMDB series cache with TTL ------------------------------
+  let m56now = UTCTime (fromGregorian 2026 6 1) 43200   -- 2026-06-01 12:00:00 UTC
+      m56e :: Int -> SeriesCacheEntry
+      m56e age = SeriesCacheEntry (addUTCTime (fromIntegral (negate age)) m56now) (Aeson.String "x")
+      m56count pat str = go (0 :: Int) str
+        where
+          go n rest = case BSC.breakSubstring pat rest of
+            (_, b) | BSC.null b -> n
+                   | otherwise -> go (n + 1) (BSC.drop (BSC.length pat) b)
+      fgEp56 = MediaItem
+        { itemId = "ep56", itemTitle = "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+        , itemPath = "/tv/fg.mkv", itemSize = 1, itemMime = "video/x-matroska", itemAddedAt = m56now
+        , itemFolder = "1", itemType = "Episode", itemSeries = Just "Family Guy"
+        , itemSeason = Just 25, itemEpisode = Just 0, itemExtraType = Nothing, itemVersions = [] }
+      fgEp56b = fgEp56 { itemId = "ep56b", itemPath = "/tv/fg2.mkv", itemEpisode = Just 1 }
+      m56payload = object
+        [ "Id" .= ("1942" :: T.Text), "Name" .= ("Family Guy" :: T.Text)
+        , "Seasons" .= [ object [ "SeasonNumber" .= (25 :: Int)
+                                 , "Episodes" .= [ object [ "EpisodeNumber" .= (0 :: Int), "Name" .= ("E0" :: T.Text) ]
+                                                 , object [ "EpisodeNumber" .= (1 :: Int), "Name" .= ("E1" :: T.Text) ] ] ] ] ]
+  check "m56 cacheFresh: ttl 86400 fresh(100s)/expired(90000s), ttl 0 and negative never fresh"
+    [ cacheFresh m56now 86400 (m56e 100), cacheFresh m56now 86400 (m56e 90000)
+    , cacheFresh m56now 0 (m56e 1), cacheFresh m56now (-5) (m56e 1) ]
+    [ True, False, False, False ]
+  check "m56 cachePut/cacheGet roundtrip + overwrite keeps the newest payload"
+    [ fmap scePayload (cacheGet "k" (cachePut "k" m56now (Aeson.String "v") emptySeriesCache))
+    , fmap scePayload (cacheGet "k" (cachePut "k" m56now (Aeson.String "v2") (cachePut "k" m56now (Aeson.String "v") emptySeriesCache))) ]
+    [ Just (Aeson.String "v"), Just (Aeson.String "v2") ]
+  check "m56 cacheGet: missing key -> Nothing"
+    True (isNothing (cacheGet "missing" (cachePut "k" m56now (Aeson.String "v") emptySeriesCache)))
+  check "m56 seriesNameOfPayload: Name field / non-object -> empty"
+    [ seriesNameOfPayload m56payload, seriesNameOfPayload (Aeson.String "x") ]
+    [ "Family Guy", "" ]
+  let m56att = LBS.toStrict (Aeson.encode (attachDownloadedLive "Family Guy" m56payload [fgEp56]))
+  check "m56 attachDownloadedLive: matching S25E00 true, S25E01 false, raw payload untouched"
+    [ m56count "\"Downloaded\":true" m56att, m56count "\"Downloaded\":false" m56att
+    , m56count "Downloaded" (LBS.toStrict (Aeson.encode m56payload)) ]
+    [ 1, 1, 0 ]
+  -- persistence: save/load roundtrip, missing + malformed file -> empty
+  let m56dir = "/tmp/fms-m56-cache-test"
+  resetDir m56dir
+  createDirectoryIfMissing True m56dir
+  let cpath = seriesCachePath m56dir
+  check "m56 seriesCachePath" (m56dir ++ "/series-cache.json") cpath
+  cEmpty <- loadSeriesCache cpath
+  check "m56 loadSeriesCache: missing file -> empty map" True (isNothing (cacheGet "any" cEmpty))
+  saveSeriesCache cpath (cachePut "1942" m56now (object ["Name" .= ("Family Guy" :: T.Text)]) emptySeriesCache)
+  cLoaded <- loadSeriesCache cpath
+  check "m56 save/load roundtrip preserves the payload"
+    (fmap scePayload (cacheGet "1942" cLoaded))
+    (Just (object ["Name" .= ("Family Guy" :: T.Text)]))
+  check "m56 save/load roundtrip preserves fetchedAt"
+    (fmap sceFetchedAt (cacheGet "1942" cLoaded))
+    (Just m56now)
+  writeFile cpath "{ not json"
+  cBad <- loadSeriesCache cpath
+  check "m56 loadSeriesCache: malformed JSON -> empty (never crash)" True (isNothing (cacheGet "1942" cBad))
+  removeDirectoryRecursive m56dir
+  -- live mock-TMDB test: cache hits, ?refresh=true, live Downloaded, TTL=0
+  mPy56 <- findExecutable "python3"
+  case mPy56 of
+    Nothing -> putStrLn "PASS: m56 mock-tmdb cache tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m56mock = "/tmp/fms-m56-mock"
+          m56log = m56mock ++ "/calls.log"
+          mockSrc56 = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "from urllib.parse import urlparse, parse_qs"
+            , "port = int(sys.argv[1]); log = sys.argv[2]"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def _send(self, code, body):"
+            , "        b = body.encode() if isinstance(body, str) else body"
+            , "        self.send_response(code)"
+            , "        self.send_header('Content-Type', 'application/json')"
+            , "        self.send_header('Content-Length', str(len(b)))"
+            , "        self.end_headers()"
+            , "        self.wfile.write(b)"
+            , "    def do_GET(self):"
+            , "        u = urlparse(self.path); q = parse_qs(u.query)"
+            , "        key = q.get('api_key', [''])[0]"
+            , "        with open(log, 'a') as f:"
+            , "            f.write(u.path + '?api_key=' + key + chr(10))"
+            , "        if u.path.startswith('/3/') and key != 'K56':"
+            , "            return self._send(401, json.dumps({'status_message': 'bad key'}))"
+            , "        if u.path == '/3/search/tv':"
+            , "            return self._send(200, json.dumps({'results': [{'id': 1942, 'name': 'Family Guy', 'first_air_date': '1999-01-31', 'overview': 'A cartoon.', 'vote_average': 8.9, 'poster_path': '/fg.jpg'}]}))"
+            , "        if u.path == '/3/tv/1942':"
+            , "            return self._send(200, json.dumps({'name': 'Family Guy', 'overview': 'A cartoon.', 'first_air_date': '1999-01-31', 'poster_path': '/fg.jpg', 'seasons': [{'season_number': 25, 'name': 'Season 25', 'episode_count': 2}, {'season_number': 0, 'name': 'Specials'}]}))"
+            , "        if u.path == '/3/tv/1942/season/25':"
+            , "            return self._send(200, json.dumps({'episodes': [{'episode_number': 0, 'name': 'Happy Hell-o-ween', 'overview': 'o0', 'air_date': '2024-10-27', 'still_path': '/s0.jpg', 'vote_average': 7.1}, {'episode_number': 1, 'name': 'Ep One'}]}))"
+            , "        if u.path == '/3/tv/1942/season/0':"
+            , "            return self._send(200, json.dumps({'episodes': [{'episode_number': 1, 'name': 'Special'}]}))"
+            , "        return self._send(404, '{}')"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+          cfg56 = cfg27 { configStateDir = m56mock, configTmdbApiKey = "ENVKEY56"
+                        , configTmdbBaseUrl = "http://127.0.0.1:8956/3"
+                        , configTmdbImageBaseUrl = "http://127.0.0.1:8956/img"
+                        , configSeriesCacheTtlSec = 86400 }
+          respBody56 :: Response -> BSC.ByteString
+          respBody56 (ResponseBuilder _ _ b) = LBS.toStrict (toLazyByteString b)
+          respBody56 _ = ""
+          apiCount pat = do
+            mc <- BSC.readFile m56log   -- strict: count the calls made SO FAR
+            pure (length (filter (BSC.isPrefixOf pat) (BSC.lines mc)))
+      resetDir m56mock
+      createDirectoryIfMissing True m56mock
+      writeFile (m56mock ++ "/mock.py") mockSrc56
+      bracket
+        (createProcess (proc "python3" [m56mock ++ "/mock.py", "8956", m56log]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          rok <- waitForFile (m56log ++ ".ready") 40
+          if not rok
+            then putStrLn "PASS: m56 mock-tmdb cache tests skipped (mock did not start)"
+            else do
+              acid56 <- openLocalStateFrom (m56mock </> "acid") initialLibraryState
+              _ <- update acid56 (RegisterItem "/tv/fg.mkv" fgEp56)
+              env56 <- newAppEnv cfg56
+              _ <- runApp env56 $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                loadSeriesCacheIntoState
+                _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K56" })
+                putState libraryAcidKey acid56
+              -- first call: live fetch, then cached
+              r1 <- runApp env56 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              let b1 = either (const "") respBody56 r1
+              check "m56 mock: first /Series/:id/Episodes fetches live (S25E00 downloaded true, others false)"
+                [ m56count "\"Downloaded\":true" b1, m56count "\"Downloaded\":false" b1 ]
+                [1, 2]
+              cDet1 <- apiCount "/3/tv/1942?"
+              cS251 <- apiCount "/3/tv/1942/season/25"
+              cS01 <- apiCount "/3/tv/1942/season/0"
+              check "m56 mock: first call hit tv details + both seasons exactly once"
+                [cDet1, cS251, cS01] [1, 1, 1]
+              -- second call: served from the persistent cache, no new mock calls
+              r2 <- runApp env56 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              let b2 = either (const "") respBody56 r2
+              cDet2 <- apiCount "/3/tv/1942?"
+              check "m56 mock: second call served from cache (details still hit once)"
+                cDet2 1
+              check "m56 mock: cached response keeps shape + live Downloaded"
+                [ m56count "\"Downloaded\":true" b2, m56count "\"SeasonNumber\":25" b2, m56count "\"SeasonNumber\":0" b2 ]
+                [1, 1, 1]
+              -- add another downloaded episode between calls -> recomputed live from the cached payload
+              _ <- update acid56 (RegisterItem "/tv/fg2.mkv" fgEp56b)
+              r3 <- runApp env56 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              let b3 = either (const "") respBody56 r3
+              cDet3 <- apiCount "/3/tv/1942?"
+              check "m56 mock: library change visible on cached payload (2 downloaded, still 1 detail call)"
+                [ m56count "\"Downloaded\":true" b3, cDet3 ] [2, 1]
+              -- ?refresh=true forces a live refetch
+              _ <- runApp env56 (seriesEpisodesHandler [("id", "1942")] (defaultRequest { queryString = [("refresh", Just "true")] }))
+              cDet4 <- apiCount "/3/tv/1942?"
+              check "m56 mock: ?refresh=true refetches from TMDB" cDet4 2
+              -- cache persisted to disk under the state dir
+              let cacheFile = seriesCachePath m56mock
+              cacheExists <- doesFileExist cacheFile
+              cacheTxt <- BSC.unpack <$> BSC.readFile cacheFile   -- strict: do not hold a lock on the file
+              check "m56 mock: series-cache.json persisted with fetchedAt + payload under the tmdb id"
+                [ cacheExists, "fetchedAt" `isInfixOf` cacheTxt, "\"payload\"" `isInfixOf` cacheTxt, "\"1942\"" `isInfixOf` cacheTxt ]
+                [True, True, True, True]
+              -- /Series/Search caching under search:<lowercase query>
+              rs1 <- runApp env56 (seriesSearchHandler [] (defaultRequest { queryString = [("name", Just "Family Guy")] }))
+              cs1 <- apiCount "/3/search/tv"
+              rs2 <- runApp env56 (seriesSearchHandler [] (defaultRequest { queryString = [("name", Just "Family Guy")] }))
+              cs2 <- apiCount "/3/search/tv"
+              _ <- runApp env56 (seriesSearchHandler [] (defaultRequest { queryString = [("name", Just "Family Guy"), ("refresh", Just "true")] }))
+              cs3 <- apiCount "/3/search/tv"
+              let bs1 = either (const "") respBody56 rs1
+                  bs2 = either (const "") respBody56 rs2
+              check "m56 mock: /Series/Search cached on 2nd call, ?refresh=true refetches"
+                [ cs1, cs2, cs3 ] [1, 1, 2]
+              check "m56 mock: cached search response identical to the fresh one" True (bs1 == bs2)
+              cacheTxt2 <- BSC.unpack <$> BSC.readFile cacheFile
+              check "m56 mock: search cached under search:<lowercase query>"
+                True ("search:family guy" `isInfixOf` cacheTxt2)
+              -- TTL=0 -> always refetch
+              let m56t0 = m56mock </> "t0"
+              createDirectoryIfMissing True m56t0
+              envT0 <- newAppEnv (cfg56 { configStateDir = m56t0, configSeriesCacheTtlSec = 0 })
+              _ <- runApp envT0 $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                loadSeriesCacheIntoState
+                _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K56" })
+                putState libraryAcidKey acid56
+              _ <- runApp envT0 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              _ <- runApp envT0 (seriesEpisodesHandler [("id", "1942")] defaultRequest)
+              cT0 <- apiCount "/3/tv/1942?"
+              check "m56 mock: TTL=0 always refetches (4 detail hits total: 2 + refresh + 2 ttl0)" cT0 4
+              closeAcidState acid56)
 
   putStrLn "All tests passed."

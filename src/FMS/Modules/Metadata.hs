@@ -4,6 +4,7 @@ module FMS.Modules.Metadata
   ) where
 
 import FMS.Core.Module (Module (..), Segment (..), delete, get, post)
+import FMS.Modules.Metadata.Cache (loadSeriesCacheIntoState)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState, loadMetadataSettingsIntoState)
 import FMS.Modules.Metadata.Routes
   ( addItemTagsHandler
@@ -37,6 +38,7 @@ metadataModule =
     , moduleInit = do
         loadMetadataIntoState
         loadMetadataSettingsIntoState   -- m35: seed metadata-settings.json from env on first boot
+        loadSeriesCacheIntoState        -- m56: load series-cache.json into the state registry
     , moduleRoutes =
         [ -- m35: settings routes are literals, before any capture (first-match-wins)
           get  [Lit "Metadata", Lit "Settings"] getMetadataSettingsHandler

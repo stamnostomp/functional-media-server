@@ -32,7 +32,7 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Images (hasStoredImage, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt, tmdbSearchTvAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
@@ -249,26 +249,35 @@ refreshFromTmdb itemIdent item = do
     then pure Nothing
     else do
       -- m36: clean scene/release names (Shrek.2001.1080p... -> "Shrek" 2001)
-      -- before searching, and prefer the hit whose year matches
-      let (cleanQ, mYear) = cleanTitleForProvider (itemTitle item)
-      res0 <- liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey cleanQ)
+      -- before searching, and prefer the hit whose year matches.
+      -- m45: episodes search TMDB TV (/search/tv) with the SERIES name
+      -- (itemSeries, falling back to the cleaned file title); movies keep
+      -- the movie search.
+      let isEp = T.toLower (itemType item) == "episode"
+          rawQ = case itemSeries item of
+                   Just sn | not (T.null sn) -> sn
+                   _                         -> itemTitle item
+          (cleanQ, mYear) = cleanTitleForProvider rawQ
+          searchFn = if isEp then tmdbSearchTvAt else tmdbSearchMovieAt
+          kindWord = if isEp then "tv" else "movie"
+      res0 <- liftIO (searchFn (configTmdbBaseUrl cfg) apiKey cleanQ)
       res <- case res0 of
-        Right [] | cleanQ /= itemTitle item ->
-          liftIO (tmdbSearchMovieAt (configTmdbBaseUrl cfg) apiKey (itemTitle item))
+        Right [] | cleanQ /= rawQ ->
+          liftIO (searchFn (configTmdbBaseUrl cfg) apiKey rawQ)
         _ -> pure res0
       case res of
         Left err -> do
-          logErr ("metadata: TMDB search for \"" <> cleanQ <> "\" failed: " <> T.pack err)
+          logErr ("metadata: TMDB " <> kindWord <> " search for \"" <> cleanQ <> "\" failed: " <> T.pack err)
           pure Nothing
         Right rs -> case pickTmdbResult mYear rs of
           Nothing -> do
-            logInfo ("metadata: TMDB has no results for \"" <> cleanQ <> "\"")
+            logInfo ("metadata: TMDB " <> kindWord <> " has no results for \"" <> cleanQ <> "\"")
             pure Nothing
           Just top -> do
             let fresh = tmdbResultToMetadata top
             merged <- mergeWithStored itemIdent fresh
             setMetadata itemIdent merged
-            logInfo ("metadata: \"" <> itemTitle item <> "\" (cleaned \"" <> cleanQ
+            logInfo ("metadata: \"" <> itemTitle item <> "\" (" <> kindWord <> " \"" <> cleanQ
                      <> "\") matched TMDB id "
                      <> T.pack (show (tmdbId top)) <> " (\"" <> tmdbTitle top <> "\")")
             -- TMDB artwork (opt-in via FMS_FETCH_IMAGES): download poster /

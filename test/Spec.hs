@@ -4504,6 +4504,81 @@ main = do
         check "m38 live: torrent Seeding 100% with file present -> Imported"
           (either (const Nothing) id st2) (Just Imported)
 
+  -- milestone 45: episodes refresh via TMDB TV search (mock /search/tv)
+  case mPy of
+    Nothing -> putStrLn "PASS: m45 mock-tmdb-tv IO tests skipped (python3 not in PATH)"
+    Just _ -> do
+      let m45dir = "/tmp/fms-m45-state"
+          m45mock = "/tmp/fms-m45-mock"
+          m45log = m45mock ++ "/calls.log"
+          cfg45 = cfg27 { configStateDir = m45dir, configTmdbApiKey = "K"
+                         , configTmdbBaseUrl = "http://127.0.0.1:8931/3"
+                         , configTmdbImageBaseUrl = "http://127.0.0.1:8931/img"
+                         , configTmdbImageSize = "w500" }
+          m45mockSrc = unlines
+            [ "import json, sys"
+            , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+            , "from urllib.parse import urlparse, parse_qs"
+            , "port = int(sys.argv[1]); log = sys.argv[2]"
+            , "class H(BaseHTTPRequestHandler):"
+            , "    def log_message(self, *a): pass"
+            , "    def do_GET(self):"
+            , "        u = urlparse(self.path); q = parse_qs(u.query)"
+            , "        with open(log, 'a') as f:"
+            , "            f.write(u.path + chr(10))"
+            , "        if u.path == '/3/search/tv':"
+            , "            return self._send(200, json.dumps({'results': [{'id': 1234, 'name': 'Family Guy', 'first_air_date': '1999-01-31', 'overview': 'o', 'vote_average': 8.0, 'poster_path': '/fg.jpg'}]}))"
+            , "        if u.path == '/3/tv/1234/images':"
+            , "            return self._send(200, json.dumps({'posters': [{'file_path': '/fg.jpg'}], 'backdrops': [], 'logos': []}))"
+            , "        if u.path == '/img/w500/fg.jpg':"
+            , "            self.send_response(200); self.send_header('Content-Type', 'image/jpeg')"
+            , "            b = b'POSTER'; self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b); return"
+            , "        return self._send(404, '{}')"
+            , "    def _send(self, code, body):"
+            , "        b = body.encode(); self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)"
+            , "srv = HTTPServer(('127.0.0.1', port), H)"
+            , "open(log + '.ready', 'w').write('ok')"
+            , "srv.serve_forever()" ]
+          ep45 = MediaItem
+            { itemId = "ep45", itemTitle = "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+            , itemPath = "/dl/fg.mkv", itemSize = 1, itemMime = "video/x-matroska"
+            , itemAddedAt = reqT0, itemFolder = "1", itemType = "Episode"
+            , itemSeries = Just "Family Guy", itemSeason = Just 25, itemEpisode = Just 0
+            , itemExtraType = Nothing, itemVersions = [] }
+      resetDir m45dir
+      resetDir m45mock
+      createDirectoryIfMissing True m45mock
+      writeFile (m45mock ++ "/mock.py") m45mockSrc
+      bracket
+        (createProcess (proc "python3" [m45mock ++ "/mock.py", "8931", m45log]))
+        (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+        (\_ -> do
+          rok <- waitForFile (m45log ++ ".ready") 40
+          if not rok
+            then putStrLn "PASS: m45 mock-tmdb-tv IO tests skipped (mock did not start)"
+            else do
+              env45 <- newAppEnv cfg45
+              _ <- runApp env45 $ do
+                loadMetadataIntoState
+                loadMetadataSettingsIntoState
+                _ <- updateMetadataSettings (\st -> st { msTmdbApiKey = "K", msFetchImages = True })
+                refreshFromTmdb "ep45" ep45
+              rGet <- runApp env45 (getMetadata "ep45")
+              let mMeta = either (const Nothing) id rGet
+              check "m45 episode refresh: TV search stored series title"
+                (fmap metaTitle mMeta) (Just (Just "Family Guy"))
+              check "m45 episode refresh: TV search stored source tmdb"
+                (fmap metaSource mMeta) (Just "tmdb")
+              check "m45 episode refresh: providerIds carries tmdb id"
+                (fmap (HM.lookup "tmdb" . metaProviderIds) mMeta) (Just (Just "1234"))
+              img45 <- doesFileExist (m45dir </> "images" </> "ep45" </> "Primary.jpg")
+              check "m45 episode refresh: tv artwork stored" img45 True
+              calls45 <- readFile m45log
+              let cl = lines calls45
+              check "m45 mock: hit /search/tv and /tv/1234/images, never /search/movie"
+                [ any ("/3/search/tv" ==) cl, any ("/3/tv/1234/images" ==) cl, any ("/3/search/movie" ==) cl ]
+                [ True, True, False ])
+
   -- milestone 21: built-in Jackett-style indexers module
   let idx = Indexer { indexerId = "i1", indexerName = "MyIdx", indexerBaseUrl = "http://127.0.0.1:9117/"
                     , indexerApiKey = "SECRET", indexerCategories = [2000, 5000], indexerType = "torznab"

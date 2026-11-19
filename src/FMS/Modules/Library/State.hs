@@ -15,6 +15,7 @@ module FMS.Modules.Library.State
   , ListPaths(..)
   , GetAllItems(..)
   , RekeyItem(..)
+  , ReclassifyItem(..)
   ) where
 
 import Control.Monad.Reader (ask)
@@ -156,6 +157,29 @@ rekeyItem oldPath newPath versions = do
             }
           pure True
 
+-- | m46: recompute the classification (type/series/season/episode) of the
+-- item registered at @path@; no-op when the path is unknown, returns
+-- 'True' when the stored fields actually changed.
+reclassifyItem
+  :: FilePath -> Text -> Maybe Text -> Maybe Int -> Maybe Int
+  -> Update LibraryState Bool
+reclassifyItem path ty series mSeason mEpisode = do
+  st <- get
+  case Map.lookup path (pathToId st) of
+    Nothing -> pure False
+    Just i ->
+      case Map.lookup i (idToItem st) of
+        Nothing -> pure False
+        Just item
+          | itemType item == ty && itemSeries item == series
+              && itemSeason item == mSeason && itemEpisode item == mEpisode -> pure False
+          | otherwise -> do
+              put st
+                { idToItem = Map.insert i
+                    item { itemType = ty, itemSeries = series
+                         , itemSeason = mSeason, itemEpisode = mEpisode } (idToItem st) }
+              pure True
+
 makeAcidic ''LibraryState
   [ 'newId
   , 'registerItem
@@ -168,4 +192,5 @@ makeAcidic ''LibraryState
   , 'listPaths
   , 'getAllItems
   , 'rekeyItem
+  , 'reclassifyItem
   ]

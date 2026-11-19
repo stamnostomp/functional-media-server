@@ -34,7 +34,7 @@ import System.Directory
   , removeDirectory
   , removeDirectoryRecursive
   )
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeBaseName)
 
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig, getState, putState, runApp)
 import FMS.Core.Types.Config (Config(..))
@@ -43,7 +43,7 @@ import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Folders
   ( defaultFolders, foldersFilePath, loadFolders, nextFolderId, saveFolders )
 import FMS.Modules.Library.Scan
-  ( groupVersions, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
+  ( classifyItem, groupVersions, hasTvShowNfo, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
   , pooledMapIO, statFile, walkWithLoops
   )
 import FMS.Modules.Library.State
@@ -53,6 +53,7 @@ import FMS.Modules.Library.State
   , GetItemById(..)
   , RegisterItem(..)
   , RemovePaths(..)
+  , ReclassifyItem(..)
   , RekeyItem(..)
   , UpdateItemMeta(..)
   )
@@ -263,6 +264,26 @@ scanFoldersAndApply folders follow = do
               item <- liftIO (itemFromPath (folderOf Map.! p) p)
               _ <- withAcid (`update` RegisterItem p item)
               pure (a + 1, c)) (0, 0) changedOrNew
+    -- m46: re-classify EVERY scanned primary (classification also depends on
+    -- the directory's tvshow.nfo, not just size/mtime) and update the stored
+    -- type/series/season/episode when they differ (e.g. a scene episode file
+    -- previously scanned as Movie).
+    _ <- forM scanList $ \(p, _s, _t) -> do
+      mId <- withAcid (`query` GetIdByPath p)
+      case mId of
+        Nothing -> pure ()
+        Just i -> do
+          mItem <- withAcid (`query` GetItemById i)
+          case mItem of
+            Nothing -> pure ()
+            Just item -> do
+              nfo <- liftIO (hasTvShowNfo p)
+              let baseName = T.pack (takeBaseName p)
+                  (ty, sn, se, ep) = classifyItem nfo p baseName
+              when (itemType item /= ty || itemSeries item /= sn
+                    || itemSeason item /= se || itemEpisode item /= ep) $ do
+                _ <- withAcid (`update` ReclassifyItem p ty sn se ep)
+                pure ()
     -- refresh the version list of every surviving group whose primary is
     -- already registered (covers unchanged primaries whose membership
     -- changed)

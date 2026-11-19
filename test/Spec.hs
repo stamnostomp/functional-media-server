@@ -141,6 +141,7 @@ import FMS.Modules.Library.State
   , GetIdByPath(..)
   , GetItemById(..)
   , ListPaths(..)
+  , ReclassifyItem(..)
   , RegisterItem(..)
   , RemovePaths(..)
   , UpdateItemMeta(..)
@@ -598,6 +599,28 @@ main = do
   id4 <- update st2 (RegisterItem "/x.mp4" testItem)
   check "re-register after removal allocates a fresh id" True (id4 /= id1)
   closeAcidState st2
+  -- m46: ReclassifyItem flips a Movie to Episode, keeps id, no-op when absent
+  let acidDir46 = "/tmp/fms-test-acid-46"
+      epPath = "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv"
+      (ty46, sn46, se46, ep46) =
+        classifyItem False epPath "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+  check "m46 live filename classifies as Episode/Family Guy/25/0"
+    (ty46, sn46, se46, ep46) ("Episode", Just "Family Guy", Just 25, Just 0)
+  resetDir acidDir46
+  createDirectoryIfMissing True acidDir46
+  st46 <- openLocalStateFrom acidDir46 initialLibraryState
+  epId <- update st46 (RegisterItem epPath (testItem { itemPath = epPath, itemType = "Movie" }))
+  flipped <- update st46 (ReclassifyItem epPath ty46 sn46 se46 ep46)
+  check "m46 ReclassifyItem reports the flip" True flipped
+  mEp <- query st46 (GetItemById epId)
+  check "m46 ReclassifyItem updates type/series/season/episode, keeps id"
+    (fmap (\it -> (itemId it, itemType it, itemSeries it, itemSeason it, itemEpisode it)) mEp)
+    (Just (epId, "Episode", Just "Family Guy", Just 25, Just 0))
+  again <- update st46 (ReclassifyItem epPath ty46 sn46 se46 ep46)
+  check "m46 ReclassifyItem no-op when unchanged" False again
+  nope <- update st46 (ReclassifyItem "/nope.mkv" "Movie" Nothing Nothing Nothing)
+  check "m46 ReclassifyItem unknown path is a no-op" False nope
+  closeAcidState st46
   removeDirectoryRecursive acidDir
 
   -- FMS.Core.Process (milestone 6a encoding bugfix): subprocess pipes are

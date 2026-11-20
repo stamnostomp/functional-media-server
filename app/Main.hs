@@ -98,6 +98,8 @@ main = do
   mTmdbImgSize <- lookupEnv "FMS_TMDB_IMAGE_SIZE"
   mTmdbBdSize  <- lookupEnv "FMS_TMDB_BACKDROP_SIZE"
   mSeriesCacheTtl <- lookupEnv "FMS_SERIES_CACHE_TTL_SECONDS"
+  mAnnounceListUrl <- lookupEnv "FMS_ANNOUNCE_LIST_URL"
+  mAnnounceListSecs <- lookupEnv "FMS_ANNOUNCE_LIST_REFRESH_SECS"
   mJackettUrl <- lookupEnv "FMS_JACKETT_URL"
   mJackettKey <- lookupEnv "FMS_JACKETT_API_KEY"
   mDelugeUrl  <- lookupEnv "FMS_DELUGE_URL"
@@ -174,6 +176,10 @@ main = do
         , configSeriesCacheTtlSec = case mSeriesCacheTtl >>= readMaybe of
             Just n | n >= 0 -> n
             _               -> 86400  -- default 24h; 0 = always refetch (m56)
+        , configAnnounceListUrl = T.pack (fromMaybe "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt" mAnnounceListUrl)  -- m62
+        , configAnnounceListRefreshSecs = case mAnnounceListSecs >>= readMaybe of
+            Just n | n >= 0 -> n
+            _               -> 86400  -- default 24h; 0 = disabled (m62)
         , configScanWorkers = fromMaybe 4 (mScanW >>= readMaybe)  -- raw value; validateConfig rejects negatives (exit 2), 0 clamped to 1 below
         , configMaxBodyBytes = fromMaybe 10485760 (mMaxBody >>= readMaybe)  -- default 10 MiB; 0 = unlimited; negative rejected by validateConfig (exit 2)
         , configMemoryWarnMb = fromMaybe 1024 (mMemWarn >>= readMaybe)      -- default 1024 MB; negative rejected by validateConfig

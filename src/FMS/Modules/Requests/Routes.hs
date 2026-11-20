@@ -28,6 +28,7 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
+import FMS.Modules.AnnounceTrackers (currentAnnounceTrackers)
 import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
@@ -294,9 +295,11 @@ pushAndAdvance r = do
         Just (iid, rid) -> do
           ea <- runApp env (resolveReleaseBytes iid rid)
           pure (either (Left . show) (either Left (Right . snd)) ea)
+  -- m62: attach the refreshed public announce-tracker list to the Deluge add
+  trackers <- currentAnnounceTrackers
   eres <- liftIO (pushRequest (rsDelugeUrl s) (rsDelugePassword s)
                 (T.unpack (rsDownloadDir s)) (reqMagnet r) (reqDownloadUrl r) (reqTitle r)
-                resolveProxied)
+                trackers resolveProxied)
   case eres of
     Right () -> do
       m <- setRequestStatus (reqId r) Downloading Nothing

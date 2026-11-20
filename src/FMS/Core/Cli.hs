@@ -104,6 +104,8 @@ cliUsage = unlines
   , "  (env FMS_INDEXER_URL / FMS_INDEXER_API_KEY / FMS_INDEXER_NAME   direct Torznab/Newznab indexer to seed on first boot; m21)"
   , "  (env FMS_TMDB_BACKDROP_SIZE                 TMDB image size for backdrops/logos; default original, m49/m57)"
   , "  (env FMS_SERIES_CACHE_TTL_SECONDS           TMDB series cache TTL seconds; default 86400, 0 = always refetch; m56)"
+  , "  (env FMS_ANNOUNCE_LIST_URL                  announce-tracker list URL (default ngosang trackers_best.txt; m62)"
+  , "  (env FMS_ANNOUNCE_LIST_REFRESH_SECS         announce-tracker list refresh interval; default 86400 = 24h, 0 disables; m62)"
   , "  --help                  show this help and exit"
   , "  --version               show name and version and exit"
   , ""

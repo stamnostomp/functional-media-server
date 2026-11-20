@@ -44,6 +44,7 @@ import FMS.Modules.Auth (authModule)
 import FMS.Modules.Collections (collectionsModule)
 import FMS.Modules.Devices (devicesModule)
 import FMS.Modules.Plugins (pluginsModule)
+import FMS.Modules.AnnounceTrackers (announceTrackersModule, startAnnounceTrackerRefresher)
 import FMS.Modules.Indexers (indexersModule)
 import FMS.Modules.Requests (requestsModule)
 import FMS.Modules.Trackers (trackersModule)
@@ -91,6 +92,7 @@ modules =
   , requestsModule
   , trackersModule
   , indexersModule
+  , announceTrackersModule   -- m62: public announce-tracker list (24h refresh)
   , webhooksModule
   , webModule, apiDocsModule
   ]
@@ -132,6 +134,9 @@ runServer cfg = do
     -- Memory monitoring (todo section 15): fork the RSS sampler daemon
     -- (no-op when FMS_MEMORY_SAMPLE_SECS=0).
     startMemorySampler
+    -- m62: announce-tracker list refresher daemon (no-op when
+    -- FMS_ANNOUNCE_LIST_REFRESH_SECS=0).
+    startAnnounceTrackerRefresher
     -- Milestone 11b: the server log ring buffer (read by
     -- GET /System/Logs/Log under "system.logbuf"; also created lazily by
     -- the MonadLog instance).

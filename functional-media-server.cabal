@@ -129,6 +129,7 @@ library
                       FMS.Modules.Indexers.Persistence
                       FMS.Modules.Indexers.Monad
                       FMS.Modules.Indexers.Routes
+                      FMS.Modules.AnnounceTrackers
                       FMS.Modules.Webhooks
                       FMS.Modules.Webhooks.Types
                       FMS.Modules.Webhooks.Persistence

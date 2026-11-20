@@ -153,20 +153,28 @@ getFirstHostId b = do
       _ -> Nothing
     _ -> Nothing
 
+-- | Pure: the Deluge per-add options object: download_location plus
+-- @add_trackers@ (m62: the refreshed public announce-tracker list) when
+-- non-empty.
+delugeAddOptions :: FilePath -> [Text] -> Value
+delugeAddOptions downloadDir trackers =
+  object ([ "download_location" .= downloadDir ]
+          ++ [ "add_trackers" .= trackers | not (null trackers) ])
+
 -- | Pure: Deluge core.add_torrent_magnet body.
-delugeAddMagnetBody :: Text -> FilePath -> Int -> Value
-delugeAddMagnetBody magnet downloadDir rid =
+delugeAddMagnetBody :: Text -> FilePath -> [Text] -> Int -> Value
+delugeAddMagnetBody magnet downloadDir trackers rid =
   object [ "method" .= ("core.add_torrent_magnet" :: Text)
          , "params" .= [ Aeson.String magnet
-                       , object ["download_location" .= downloadDir] ]
+                       , delugeAddOptions downloadDir trackers ]
          , "id" .= rid ]
 
 -- | Pure: Deluge core.add_torrent_file body (base64 filedump).
-delugeAddFileBody :: Text -> Text -> FilePath -> Int -> Value
-delugeAddFileBody name b64 downloadDir rid =
+delugeAddFileBody :: Text -> Text -> FilePath -> [Text] -> Int -> Value
+delugeAddFileBody name b64 downloadDir trackers rid =
   object [ "method" .= ("core.add_torrent_file" :: Text)
          , "params" .= [ Aeson.String name, Aeson.String b64
-                       , object ["download_location" .= downloadDir] ]
+                       , delugeAddOptions downloadDir trackers ]
          , "id" .= rid ]
 
 -- | Extract the "result" field of a JSON-RPC response body.
@@ -282,9 +290,10 @@ pushRequest
   -> Maybe Text -- ^ magnet
   -> Maybe Text -- ^ download (torrent) url
   -> Text       -- ^ title (for the fallback slug)
+  -> [Text]     -- ^ announce trackers to attach (m62: add_trackers option)
   -> (Text -> IO (Either String BS.ByteString)) -- ^ in-process resolver for proxied /Indexers/ URLs
   -> IO (Either String ())
-pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title resolveProxied = do
+pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title trackers resolveProxied = do
   createDirectoryIfMissing True downloadDir
   case (mMagnet, mDownloadUrl) of
     (Nothing, Nothing) -> pure (Left "no magnet or download url on request")
@@ -317,7 +326,7 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title reso
               _ <- tryConnect manager cookie  -- best-effort: ignore the result
               case mMagnet of
                 Just mag -> do
-                  er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir 4)
+                  er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir trackers 4)
                   pure (rpcOk er)
                 Nothing -> case mDownloadUrl of
                   Just u -> do
@@ -326,7 +335,7 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title reso
                       Left err -> pure (Left err)
                       Right bytes -> do
                         er <- postJson manager delugeUrl cookie
-                          (delugeAddFileBody (T.pack (slug <.> "torrent")) (base64Encode bytes) downloadDir 4)
+                          (delugeAddFileBody (T.pack (slug <.> "torrent")) (base64Encode bytes) downloadDir trackers 4)
                         pure (rpcOk er)
                   Nothing -> pure (Left "no magnet")
             _ -> pure (Left "deluge auth.login failed")

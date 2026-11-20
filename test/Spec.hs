@@ -109,6 +109,7 @@ import FMS.Modules.Stats.Persistence (loadStats, saveStats)
 import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
+import FMS.Modules.AnnounceTrackers (parseTrackerList)
 import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import FMS.Modules.Requests.Routes (attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
@@ -319,7 +320,7 @@ m29MockTests = do
   createDirectoryIfMissing True m29dir
   writeFile mockPy mockDelugeSrc
   mPush <- withMock (8912 :: Int) logA "" $ do
-    res <- pushRequest "http://127.0.0.1:8912/json" "deluge" (m29dir </> "dl") (Just "magnet:?xt=urn:btih:m29") Nothing "Test Movie" (\_ -> pure (Left "no proxy"))
+    res <- pushRequest "http://127.0.0.1:8912/json" "deluge" (m29dir </> "dl") (Just "magnet:?xt=urn:btih:m29") Nothing "Test Movie" [] (\_ -> pure (Left "no proxy"))
     pure (Just (m29ok res))
   logATxt <- do e <- doesFileExist logA; if e then readFile logA else pure ""
   let logAMethods = map logMethod (lines logATxt)
@@ -342,7 +343,7 @@ m29MockTests = do
     pure (Just (m29ok res))
   check "m29 delugeLoginTest not-ok when web.connect fails (web.connected false)" [mTestNoConn] [Just False]
   mPushFb <- withMock (8913 :: Int) logB "noconnect" $ do
-    res <- pushRequest "http://127.0.0.1:8913/json" "deluge" (m29dir </> "dl-b") (Just "magnet:?xt=urn:btih:m29b") Nothing "Other Movie" (\_ -> pure (Left "no proxy"))
+    res <- pushRequest "http://127.0.0.1:8913/json" "deluge" (m29dir </> "dl-b") (Just "magnet:?xt=urn:btih:m29b") Nothing "Other Movie" [] (\_ -> pure (Left "no proxy"))
     pure (Just (m29ok res))
   fbB <- doesFileExist (m29dir </> "dl-b" </> "other-movie.magnet")
   check "m29 push falls back to the .magnet file when the daemon never connects" [mPushFb, Just fbB] [Just True, Just True]
@@ -3057,7 +3058,7 @@ main = do
       , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
       , configTlsCert = Nothing, configTlsKey = Nothing
       , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
+      , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400
       , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
       , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -3191,7 +3192,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
       , configJackettUrl = Nothing
@@ -4020,8 +4021,8 @@ main = do
     , base64Encode BS.empty ]
     [ "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy", "" ]
   let dlb = delugeLoginBody "pw" 1
-      dmb = delugeAddMagnetBody "magnet:?x" "/dl" 2
-      dfb = delugeAddFileBody "n.torrent" "QUJD" "/dl" 2
+      dmb = delugeAddMagnetBody "magnet:?x" "/dl" ["udp://t1:1337/announce"] 2
+      dfb = delugeAddFileBody "n.torrent" "QUJD" "/dl" ["udp://t1:1337/announce"] 2
       methodOf v = case v of
         Aeson.Object o -> KeyMap.lookup (Key.fromText "method") o
         _ -> Nothing
@@ -4036,8 +4037,16 @@ main = do
     [ LBSC.unpack (Aeson.encode (paramsOf dlb)), LBSC.unpack (Aeson.encode (paramsOf dmb))
     , LBSC.unpack (Aeson.encode (paramsOf dfb)) ]
     [ "[\"pw\"]"
-    , "[\"magnet:?x\",{\"download_location\":\"/dl\"}]"
-    , "[\"n.torrent\",\"QUJD\",{\"download_location\":\"/dl\"}]" ]
+    , "[\"magnet:?x\",{\"add_trackers\":[\"udp://t1:1337/announce\"],\"download_location\":\"/dl\"}]"
+    , "[\"n.torrent\",\"QUJD\",{\"add_trackers\":[\"udp://t1:1337/announce\"],\"download_location\":\"/dl\"}]" ]
+  check "m62: add bodies omit add_trackers when the list is empty"
+    [ LBSC.unpack (Aeson.encode (paramsOf (delugeAddMagnetBody "magnet:?x" "/dl" [] 2)))
+    , LBSC.unpack (Aeson.encode (paramsOf (delugeAddFileBody "n" "QQ==" "/dl" [] 2))) ]
+    [ "[\"magnet:?x\",{\"download_location\":\"/dl\"}]"
+    , "[\"n\",\"QQ==\",{\"download_location\":\"/dl\"}]" ]
+  check "m62: parseTrackerList drops blanks/comments, keeps schemes, dedupes"
+    (parseTrackerList "udp://a:1/announce\n\n# comment\nhttp://b/announce\nudp://a:1/announce\nnot a url\n")
+    ["udp://a:1/announce", "http://b/announce"]
   check "deluge RPC bodies: id"
     [ case dlb of Aeson.Object o -> KeyMap.lookup (Key.fromText "id") o; _ -> Nothing ]
     [ Just (Aeson.Number 1) ]
@@ -4072,7 +4081,7 @@ main = do
         , configWatch = False, configMaxTranscodes = 2, configFfmpegTimeoutSec = 30
         , configTlsCert = Nothing, configTlsKey = Nothing
         , configFetchImages = False, configScanWorkers = 4, configMaxBodyBytes = 10485760, configTmdbBaseUrl = "https://api.themoviedb.org/3"
-        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400
+        , configTmdbImageBaseUrl = "https://image.tmdb.org/t/p", configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400
         , configMemoryWarnMb = 1024, configMemorySampleSecs = 30
         , configUiDir = Nothing
         , configJackettUrl = Nothing
@@ -4276,7 +4285,7 @@ main = do
             , itemExtraType = Nothing, itemVersions = [] }
           cfg35m = cfg35 { configTmdbBaseUrl = "http://127.0.0.1:8930/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8930/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400 }
       bracket
         (createProcess (proc "python3" [m35mock ++ "/mock.py", "8930", m35log]))
         (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
@@ -4574,7 +4583,7 @@ main = do
           cfg45 = cfg27 { configStateDir = m45dir, configTmdbApiKey = "K"
                          , configTmdbBaseUrl = "http://127.0.0.1:8931/3"
                          , configTmdbImageBaseUrl = "http://127.0.0.1:8931/img"
-                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
+                         , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400 }
           m45mockSrc = unlines
             [ "import json, sys"
             , "from http.server import BaseHTTPRequestHandler, HTTPServer"
@@ -4853,7 +4862,7 @@ main = do
           cfg47 = cfg27 { configStateDir = m47mock, configTmdbApiKey = "ENVKEY47"
                         , configTmdbBaseUrl = "http://127.0.0.1:8947/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8947/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400 }
       resetDir m47mock
       createDirectoryIfMissing True m47mock
       writeFile (m47mock ++ "/mock.py") mockSrc
@@ -5099,7 +5108,7 @@ main = do
       let cfg53 = cfg27 { configStateDir = m53mock, configTmdbApiKey = "K53", configFetchImages = False
                         , configTmdbBaseUrl = "http://127.0.0.1:8949/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8949/img"
-                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400 }
+                        , configTmdbImageSize = "w500", configTmdbBackdropSize = "original", configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400 }
           m53item = MediaItem
             { itemId = "1", itemTitle = "Test Movie", itemPath = "/x.mp4"
             , itemSize = 1, itemMime = "video/mp4", itemAddedAt = reqT0, itemFolder = "1"
@@ -5245,7 +5254,7 @@ main = do
           cfg56 = cfg27 { configStateDir = m56mock, configTmdbApiKey = "ENVKEY56"
                         , configTmdbBaseUrl = "http://127.0.0.1:8956/3"
                         , configTmdbImageBaseUrl = "http://127.0.0.1:8956/img"
-                        , configSeriesCacheTtlSec = 86400 }
+                        , configSeriesCacheTtlSec = 86400, configAnnounceListUrl = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt", configAnnounceListRefreshSecs = 86400 }
           respBody56 :: Response -> BSC.ByteString
           respBody56 (ResponseBuilder _ _ b) = LBS.toStrict (toLazyByteString b)
           respBody56 _ = ""

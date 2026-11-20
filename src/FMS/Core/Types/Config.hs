@@ -39,6 +39,8 @@ data Config = Config
   , configTmdbImageSize :: !Text        -- ^ TMDB image size (env FMS_TMDB_IMAGE_SIZE, default w500)
   , configTmdbBackdropSize :: !Text      -- ^ TMDB image size for backdrops/logos (env FMS_TMDB_BACKDROP_SIZE, default original; m49/m57)
   , configSeriesCacheTtlSec :: !Int      -- ^ TTL for the TMDB series cache in seconds (env FMS_SERIES_CACHE_TTL_SECONDS, default 86400 = 24h; 0 = always refetch; m56)
+  , configAnnounceListUrl :: !Text        -- ^ announce-tracker list URL (env FMS_ANNOUNCE_LIST_URL, default ngosang trackers_best.txt; m62)
+  , configAnnounceListRefreshSecs :: !Int -- ^ announce-tracker list refresh interval seconds (env FMS_ANNOUNCE_LIST_REFRESH_SECS, default 86400 = 24h; 0 disables; m62)
   , configScanWorkers :: !Int            -- ^ parallel worker threads for the per-file stat phase of a library scan (env FMS_SCAN_WORKERS, default 4, min 1 = sequential)
   , configMaxBodyBytes :: !Int           -- ^ max request body size in bytes; larger bodies get 413 (env FMS_MAX_BODY_BYTES, default 10485760 = 10 MiB; 0 = unlimited)
   , configMemoryWarnMb :: !Int           -- ^ RSS warn threshold in MB (env FMS_MEMORY_WARN_MB, default 1024; memory monitoring)

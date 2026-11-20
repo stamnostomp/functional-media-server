@@ -191,7 +191,7 @@ import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, cacheGet, cachePut, emptySeriesCache, loadSeriesCache, loadSeriesCacheIntoState, saveSeriesCache, seriesCachePath)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (attachDownloadedLive, discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesNameOfPayload, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Routes (attachDownloadedLive, mergeLibraryEpisodes, discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesNameOfPayload, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, metadataStoredJSON, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
@@ -5014,6 +5014,50 @@ main = do
     , matchDownloaded "Family Guy" 25 0 [mv47]
     , matchDownloaded "Family Guy" 25 0 [] ]
     [ True, True, True, False, False, False, False, False ]
+
+  -- m72: library-only episodes merge into the Seasons payload so installed
+  -- episodes show even when TMDB lacks the season (S25) or episode (E00)
+  let countOcc pat str = go (0 :: Int) str
+        where
+          go n rest = case BSC.breakSubstring pat rest of
+            (_, b) | BSC.null b -> n
+                   | otherwise -> go (n + 1) (BSC.drop (BSC.length pat) b)
+      fgEp24e99 = fgEp47 { itemId = "ep2", itemSeason = Just 24, itemEpisode = Just 99
+                         , itemTitle = "Family.Guy.S24E99.test" }
+      simpsonsEp = fgEp47 { itemId = "ep3", itemSeries = Just "The Simpsons" }
+      seasons72 = [ object [ "SeasonNumber" .= (24 :: Int), "Name" .= ("Season 24" :: T.Text)
+                           , "Episodes" .= [ object [ "EpisodeNumber" .= (1 :: Int), "Downloaded" .= False ] ] ]
+                   , object [ "SeasonNumber" .= (0 :: Int), "Name" .= ("Specials" :: T.Text)
+                           , "Episodes" .= ([] :: [Aeson.Value]) ] ]
+      merged72 = BSC.unpack (LBS.toStrict (Aeson.encode (mergeLibraryEpisodes "Family Guy" [fgEp47, fgEp24e99, simpsonsEp, mv47] seasons72)))
+      posOf pat str = let (pr, r) = BSC.breakSubstring (BSC.pack pat) (BSC.pack str)
+                      in if BSC.null r then Nothing else Just (BSC.length pr)
+      i25 = posOf "\"SeasonNumber\":25" merged72
+      i0  = posOf "\"SeasonNumber\":0" merged72
+  check "m72 merge adds synthetic S25 E00 marked Downloaded with ItemId"
+    [True, True, True, True]
+    [ "\"SeasonNumber\":25" `isInfixOf` merged72
+    , "\"EpisodeNumber\":0" `isInfixOf` merged72
+    , "\"Downloaded\":true" `isInfixOf` merged72
+    , "\"ItemId\":\"ep1\"" `isInfixOf` merged72 ]
+  check "m72 merge appends S24E99 into the EXISTING season 24 exactly once"
+    [True, True]
+    [ "\"EpisodeNumber\":99" `isInfixOf` merged72, countOcc "\"EpisodeNumber\":99" (BSC.pack merged72) == 1 ]
+  check "m72 merge keeps existing S24E1 once and does not flag it"
+    [True, False] [ countOcc "\"EpisodeNumber\":1" (BSC.pack merged72) == 1
+               , "\"EpisodeNumber\":1,\"Downloaded\":true" `isInfixOf` merged72 ]
+  check "m72 merge ignores other series and movies"
+    [False, False]
+    [ "Simpsons" `isInfixOf` merged72, "\"ItemId\":\"m1\"" `isInfixOf` merged72 ]
+  check "m72 merge sorts synthetic season before specials (S0 last)"
+    True (case (i25, i0) of (Just a, Just b) -> a < b; _ -> False)
+  let payload72 = object [ "Id" .= ("1434" :: T.Text), "Name" .= ("Family Guy" :: T.Text), "Seasons" .= seasons72 ]
+      att72 = BSC.unpack (LBS.toStrict (Aeson.encode (attachDownloadedLive "Family Guy" payload72 [fgEp24e99, fgEp47])))
+  check "m72 attachDownloadedLive flags in-payload S24E99 and still merges S25E00"
+    [True, True, True]
+    [ countOcc "\"EpisodeNumber\":99" (BSC.pack att72) == 1
+    , "\"Downloaded\":true" `isInfixOf` att72
+    , "\"SeasonNumber\":25" `isInfixOf` att72 ]
   -- route order: the Series literals must win over the items captures
   check "m47 firstMatch: GET /Series/Search -> the literal route"
     [Just [Lit "Series", Lit "Search"]]

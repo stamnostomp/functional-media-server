@@ -27,6 +27,7 @@ module FMS.Modules.Metadata.Routes
   , seriesEpisodesHandler
   , seriesNameOfPayload
   , attachDownloadedLive
+  , mergeLibraryEpisodes
   , getMetadataSettingsHandler
   , postMetadataSettingsHandler
   , testMetadataSettingsHandler
@@ -42,8 +43,8 @@ import Data.HashMap.Strict (HashMap)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.HashMap.Strict as HM
-import Data.List (nub, sortOn)
-import Data.Maybe (fromMaybe)
+import Data.List (foldl', nub, sortOn)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Time.Clock (getCurrentTime)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -625,7 +626,8 @@ attachDownloadedLive :: Text -> Value -> [MediaItem] -> Value
 attachDownloadedLive seriesName payload items = case payload of
   Object o -> case KeyMap.lookup (Key.fromText "Seasons") o of
     Just (Array seasons) ->
-      Object (KeyMap.insert (Key.fromText "Seasons") (Array (V.fromList (map seasonV (V.toList seasons)))) o)
+      Object (KeyMap.insert (Key.fromText "Seasons")
+        (Array (V.fromList (mergeLibraryEpisodes seriesName items (map seasonV (V.toList seasons))))) o)
     _ -> payload
   _ -> payload
   where
@@ -644,3 +646,70 @@ attachDownloadedLive seriesName payload items = case payload of
           Object (KeyMap.insert (Key.fromText "Downloaded") (toJSON (matchDownloaded seriesName sn (round en) items)) eo)
         _ -> ev
       _ -> ev
+
+-- | m72 pure: merge library-only episodes into a flagged Seasons array.
+-- Any library Episode of this series (case-insensitive name match) whose
+-- (season, episode) is NOT present in the TMDB payload gets a synthetic
+-- entry with @Downloaded = True@ -- appended to the season when the season
+-- exists, or as a new season when TMDB doesn't know it yet (brand-new
+-- seasons like S25, or episode numbers TMDB lacks like E00). Without this,
+-- installed episodes are invisible in the series view. The result is
+-- re-sorted with specials (season 0) last, like the TMDB order. The
+-- synthetic episode carries @ItemId@ so API clients can play it directly;
+-- the Elm UI resolves playback via series+S/E lookup, extra keys are
+-- ignored by its decoders.
+mergeLibraryEpisodes :: Text -> [MediaItem] -> [Value] -> [Value]
+mergeLibraryEpisodes seriesName items seasons0 =
+  sortOn seasonSortKey (foldl' addEpisode seasons0 missingItems)
+  where
+    seasonSortKey v = case v of
+      Object o -> case KeyMap.lookup (Key.fromText "SeasonNumber") o of
+        Just (Number n) -> (round n == 0, round n)
+        _               -> (False, 0)
+      _ -> (False, 0)
+    libEps =
+      [ i | i <- items
+          , T.toLower (itemType i) == "episode"
+          , maybe False (\sn -> T.toLower sn == T.toLower seriesName) (itemSeries i)
+          , isJust (itemSeason i)
+          , isJust (itemEpisode i) ]
+    covered =
+      [ (round sn, round en)
+      | Object so <- seasons0
+      , Just (Number sn) <- [KeyMap.lookup (Key.fromText "SeasonNumber") so]
+      , Just (Array ea) <- [KeyMap.lookup (Key.fromText "Episodes") so]
+      , Object eo <- V.toList ea
+      , Just (Number en) <- [KeyMap.lookup (Key.fromText "EpisodeNumber") eo] ]
+    missingItems =
+      [ i | i <- libEps
+          , (fromMaybe 0 (itemSeason i), fromMaybe 0 (itemEpisode i)) `notElem` covered ]
+    addEpisode acc i =
+      let s  = fromMaybe 0 (itemSeason i)
+          e  = fromMaybe 0 (itemEpisode i)
+          epVal = object
+            [ "EpisodeNumber" .= e
+            , "Name"          .= itemTitle i
+            , "Overview"      .= (Nothing :: Maybe Text)
+            , "AirDate"       .= (Nothing :: Maybe Text)
+            , "StillUrl"      .= (Nothing :: Maybe Text)
+            , "Downloaded"    .= True
+            , "ItemId"        .= itemId i ]
+      in case break (isSeason s) acc of
+           (before, Object so : after)
+             | Just (Array ea) <- KeyMap.lookup (Key.fromText "Episodes") so ->
+                 let eps' = sortOn epNum (V.toList ea ++ [epVal])
+                     so'  = KeyMap.insert (Key.fromText "Episodes") (Array (V.fromList eps')) so
+                 in before ++ [Object so'] ++ after
+           (before, rest) ->
+             before ++ [ object
+               [ "SeasonNumber" .= s
+               , "Name"         .= ("Season " <> T.pack (show s))
+               , "Episodes"     .= [epVal] ] ] ++ rest
+    isSeason s v = case v of
+      Object o -> KeyMap.lookup (Key.fromText "SeasonNumber") o == Just (Number (fromIntegral s))
+      _ -> False
+    epNum v = case v of
+      Object o -> case KeyMap.lookup (Key.fromText "EpisodeNumber") o of
+        Just (Number n) -> round n
+        _ -> 0
+      _ -> 0

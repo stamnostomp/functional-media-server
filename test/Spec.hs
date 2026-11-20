@@ -144,7 +144,7 @@ import FMS.Modules.Indexers.Types
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
-import FMS.Modules.Hls (hlsArgs, hlsDirFor, rewritePlaylistSegments)
+import FMS.Modules.Hls (hlsArgs, hlsArgsFor, hlsModeLabel, hlsAudioNeedsAac, hlsVideoCodec, hlsDirFor, rewritePlaylistSegments)
 import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isUnderDir, isValidImageType, resizeArgs, selectBackdrop)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
@@ -694,7 +694,7 @@ main = do
       hargs  = hlsArgs hlsIn hlsOut
       containsPair x y = any (\(a, b) -> a == x && b == y) (zip hargs (drop 1 hargs))
   check "hlsArgs keeps all segments listed (progressive, no vod)" True (containsPair "-hls_list_size" "0")
-  check "hlsArgs has -c copy"               True (containsPair "-c" "copy")
+  check "hlsArgs has -c:v copy"             True (containsPair "-c:v" "copy")
   check "hlsArgs maps video+audio only, drops subs (-sn; mkv subs would break the HLS muxer)"
     [True, True, True]
     [ containsPair "-map" "0:v:0", containsPair "-map" "0:a?", containsPair "-sn" "-dn" ]
@@ -704,6 +704,28 @@ main = do
   check "hlsArgs has the seg%03d.ts pattern in the output dir"
     True ("/tmp/fms-test-hls-out/seg%03d.ts" `elem` hargs)
   check "hlsDirFor joins stateDir/hls/id" "/state/hls/42" (hlsDirFor "/state" "42")
+
+  -- m71: codec-aware packaging — HEVC sources must be re-encoded to H.264
+  -- because hls.js/Chromium cannot transmux HEVC in M2TS (readyState 0).
+  let mkStream i t c = MediaStream i t c Nothing Nothing Nothing Nothing Nothing Nothing False
+      h264File = [mkStream 0 "Video" "h264", mkStream 1 "Audio" "aac"]
+      hevcFile = [mkStream 0 "Video" "hevc", mkStream 1 "Audio" "aac"]
+      hevcOpus = [mkStream 0 "Video" "hevc", mkStream 1 "Audio" "opus"]
+      hargsFor st = hlsArgsFor st hlsIn hlsOut
+      pairFor st x y = any (\(a, b) -> a == x && b == y) (zip (hargsFor st) (drop 1 (hargsFor st)))
+  check "hlsVideoCodec finds first video codec" (Just "hevc") (hlsVideoCodec hevcFile)
+  check "hlsModeLabel h264/aac is v-copy/a-copy" "v-copy/a-copy" (hlsModeLabel h264File)
+  check "hlsModeLabel hevc/aac is v-x264/a-copy" "v-x264/a-copy" (hlsModeLabel hevcFile)
+  check "hlsModeLabel hevc/opus is v-x264/a-aac" "v-x264/a-aac" (hlsModeLabel hevcOpus)
+  check "hlsAudioNeedsAac opus" True (hlsAudioNeedsAac hevcOpus)
+  check "hlsAudioNeedsAac aac"  False (hlsAudioNeedsAac h264File)
+  check "hlsArgsFor h264 keeps -c:v copy"  True (pairFor h264File "-c:v" "copy")
+  check "hlsArgsFor hevc re-encodes libx264" True (pairFor hevcFile "-c:v" "libx264")
+  check "hlsArgsFor hevc forces yuv420p"   True (pairFor hevcFile "-pix_fmt" "yuv420p")
+  check "hlsArgsFor hevc keeps -c:a copy (aac source)" True (pairFor hevcFile "-c:a" "copy")
+  check "hlsArgsFor opus re-encodes aac"   True (pairFor hevcOpus "-c:a" "aac")
+  check "hlsArgsFor hevc still maps video+audio only" [True, True]
+    [ pairFor hevcFile "-map" "0:v:0", pairFor hevcFile "-map" "0:a?" ]
 
   -- IO test of the actual HLS packaging, guarded by ffmpeg availability:
   -- skip gracefully when ffmpeg is not on PATH.

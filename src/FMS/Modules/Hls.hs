@@ -1,6 +1,12 @@
 module FMS.Modules.Hls
   ( hlsModule
   , hlsArgs
+  , hlsArgsFor
+  , hlsModeLabel
+  , hlsVideoCodec
+  , hlsAudioNeedsAac
+  , hlsBrowserSafeVideo
+  , hlsBrowserSafeAudio
   , hlsDirFor
   , ensureHls
   , rewritePlaylistSegments
@@ -9,6 +15,7 @@ module FMS.Modules.Hls
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, try)
+import Control.Monad (unless)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
@@ -22,7 +29,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseLBS)
-import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, removeDirectory)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory, removeDirectory, removePathForcibly)
 import System.FilePath ((</>), dropFileName)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
@@ -31,6 +38,8 @@ import FMS.Core.Process (runProcessBSTimeout)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
+import FMS.Modules.Playback.Probe (probeFile)
+import FMS.Modules.Playback.Types (MediaStream(..))
 
 -- | The HLS module (docs/roadmap.org milestone 3c, docs/todo.org section 6):
 -- Jellyfin-style HLS packaging, @GET /videos/:id/main.m3u8@ plus the
@@ -55,24 +64,75 @@ hlsModule = Module
       ]
   }
 
+-- | Video codecs a stock browser can decode inside MPEG-TS through MSE:
+-- only H.264. Chromium/Firefox reject HEVC in M2TS outright (hls.js
+-- 'fragParsingError: Unsupported HEVC in M2TS', m71) and Safari plays HLS
+-- natively but also only h264 TS, so any other video codec must be
+-- re-encoded at packaging time.
+hlsBrowserSafeVideo :: [Text]
+hlsBrowserSafeVideo = ["h264"]
+
+-- | Audio codecs hls.js can transmux from MPEG-TS into fMP4 for MSE.
+hlsBrowserSafeAudio :: [Text]
+hlsBrowserSafeAudio = ["aac", "mp3", "ac3"]
+
+-- | The first video stream's codec name, lower-cased ('Nothing' when the
+-- file has no video stream). Pure so it is unit-testable.
+hlsVideoCodec :: [MediaStream] -> Maybe Text
+hlsVideoCodec streams =
+  case filter (\s -> T.toLower (msType s) == "video") streams of
+    (s:_) -> Just (T.toLower (msCodec s))
+    []    -> Nothing
+
+-- | 'True' when any audio stream uses a codec MSE cannot handle from TS
+-- (opus, dts, ...), so the packager must re-encode audio to AAC.
+hlsAudioNeedsAac :: [MediaStream] -> Bool
+hlsAudioNeedsAac streams =
+  any (\s -> T.toLower (msType s) == "audio"
+             && T.toLower (msCodec s) `notElem` hlsBrowserSafeAudio) streams
+
+-- | Short label for the packaging mode of a file, persisted in a @mode@
+-- file next to the cached playlist so a codec change (or an upgrade from
+-- the old always-copy packager, m71) invalidates the cache instead of
+-- serving unplayable segments. Pure so it is unit-testable.
+hlsModeLabel :: [MediaStream] -> Text
+hlsModeLabel streams =
+  (if maybe True (`elem` hlsBrowserSafeVideo) (hlsVideoCodec streams)
+     then "v-copy" else "v-x264")
+  <> "/" <>
+  (if hlsAudioNeedsAac streams then "a-aac" else "a-copy")
+
 -- | The ffmpeg argument list for progressive HLS packaging of @input@
--- into @outputM3u8@. Pure so it is unit-testable: stream-copy the codecs
--- (packaging is a remux, no re-encode), cut on ~4-second boundaries, and
--- keep every segment listed (@-hls_list_size 0@) so the playlist grows
--- segment-by-segment while ffmpeg runs and gets @#EXT-X-ENDLIST@ only at
--- the very end. That way playback can start after the first segment
--- instead of waiting for the whole file to be remuxed (m66d). Segments
--- land next to the playlist as @seg%03d.ts@.
+-- into @outputM3u8@ with stream copy (a pure remux). Pure so it is
+-- unit-testable. See 'hlsArgsWith' for the shared tail.
 hlsArgs :: FilePath -> FilePath -> [String]
-hlsArgs input outputM3u8 =
+hlsArgs = hlsArgsWith True True
+
+-- | Pick the packaging arguments for a probed file: stream-copy when the
+-- video codec is browser-safe for MPEG-TS and the audio is too (m71:
+-- HEVC rips such as Shrek/Spider-Man otherwise produce segments hls.js
+-- cannot transmux and playback never leaves readyState 0), otherwise
+-- re-encode video to H.264 (and audio to AAC when needed).
+hlsArgsFor :: [MediaStream] -> FilePath -> FilePath -> [String]
+hlsArgsFor streams =
+  hlsArgsWith (maybe True (`elem` hlsBrowserSafeVideo) (hlsVideoCodec streams))
+              (not (hlsAudioNeedsAac streams))
+
+-- | The shared ffmpeg argument builder. @copyVideo@\/@copyAudio@ select
+-- remux vs re-encode per stream class. Common shape: map only video+audio
+-- (an embedded subtitle stream would be auto-selected and the HLS muxer
+-- rejects anything but webvtt -> no segments at all, m66e), cut on
+-- ~4-second boundaries, keep every segment listed (@-hls_list_size 0@)
+-- so the playlist grows segment-by-segment while ffmpeg runs and gets
+-- @#EXT-X-ENDLIST@ only at the very end (m66d). Segments land next to the
+-- playlist as @seg%03d.ts@.
+hlsArgsWith :: Bool -> Bool -> FilePath -> FilePath -> [String]
+hlsArgsWith copyVideo copyAudio input outputM3u8 =
   [ "-v", "error"
   , "-i", input
-  -- map only video+audio: an embedded subtitle stream would be
-  -- auto-selected and the HLS muxer rejects anything but webvtt
-  -- ("Could not write header") -> no segments at all (m66e)
   , "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn"
-  , "-c", "copy"
-  , "-hls_time", "4"
+  ] <> videoArgs <> audioArgs <>
+  [ "-hls_time", "4"
   , "-hls_list_size", "0"
   , "-hls_flags", "independent_segments"
   , "-hls_segment_filename", segPattern
@@ -80,6 +140,19 @@ hlsArgs input outputM3u8 =
   ]
   where
     segPattern = dropFileName outputM3u8 </> "seg%03d.ts"
+    videoArgs
+      | copyVideo = ["-c:v", "copy"]
+      | otherwise =
+          -- re-encode to browser-safe H.264; yuv420p because 10-bit HEVC
+          -- would not decode in MSE either, and forced 4s keyframes so
+          -- -hls_time 4 can actually cut there
+          [ "-c:v", "libx264", "-preset", "veryfast", "-crf", "23"
+          , "-pix_fmt", "yuv420p"
+          , "-force_key_frames", "expr:gte(t,n_forced*4)"
+          , "-sc_threshold", "0" ]
+    audioArgs
+      | copyAudio = ["-c:a", "copy"]
+      | otherwise = ["-c:a", "aac", "-b:a", "160k"]
 
 -- | How long the detached packaging ffmpeg may run (a remux always
 -- terminates; this is just a safety net so a hung ffmpeg cannot hold an
@@ -111,21 +184,34 @@ ensureHls cfg item = do
   let dir  = hlsDirFor (configStateDir cfg) (itemId item)
       m3u8 = dir </> "main.m3u8"
       lock = dir </> ".starting"
+      modeFile = dir </> "mode"
+  -- probe the source once per packaging decision so the packager knows
+  -- whether a plain remux is browser-safe or the video must be re-encoded
+  -- to H.264 (m71: HEVC sources produced segments hls.js cannot transmux)
+  probed <- liftIO (probeFile (itemPath item))
+  let streams = either (const []) snd probed
+      mode    = hlsModeLabel streams
+  modeOk <- liftIO (readModeFile modeFile)
+  let modeMatches = modeOk == Just mode
   ready <- liftIO (playlistHasSegments m3u8)
-  if ready
+  if ready && modeMatches
     then pure m3u8
     else do
       liftIO (createDirectoryIfMissing True dir)
       r <- liftIO (try (createDirectory lock) :: IO (Either IOException ()))
       case r of
         Right () -> do
-          -- we won the race: package in the background, keep an ffmpeg
-          -- slot for the lifetime of the job
-          logInfo ("hls: packaging item " <> itemId item <> " into " <> T.pack dir)
+          -- we won the race: drop any stale cache written under a
+          -- different codec mode (m71), then package in the background,
+          -- keeping an ffmpeg slot for the lifetime of the job
+          liftIO (clearStaleCache dir lock)
+          liftIO (TIO.writeFile modeFile mode)
+          logInfo ("hls: packaging item " <> itemId item <> " (" <> mode
+                   <> ") into " <> T.pack dir)
           mRelease <- acquireFfmpegSlot
           liftIO $ forkIO $ do
             _ <- runProcessBSTimeout packagingTimeoutSec
-                   "ffmpeg" (hlsArgs (itemPath item) m3u8)
+                   "ffmpeg" (hlsArgsFor streams (itemPath item) m3u8)
             releaseFfmpegSlot mRelease
             _ <- try (removeDirectory lock) :: IO (Either IOException ())
             pure ()
@@ -145,6 +231,20 @@ ensureHls cfg item = do
                    ("ffmpeg HLS packaging produced no segments within "
                     <> T.pack (show firstSegmentWaitSec) <> "s for item "
                     <> itemId item))
+
+-- | Read the persisted packaging-mode label, if present.
+readModeFile :: FilePath -> IO (Maybe Text)
+readModeFile f = do
+  ok <- doesFileExist f
+  if ok then Just . T.strip <$> TIO.readFile f else pure Nothing
+
+-- | Remove everything in the HLS cache dir except the @.starting@ lock
+-- held by the current packager, so a mode change starts from clean.
+clearStaleCache :: FilePath -> FilePath -> IO ()
+clearStaleCache dir lock = do
+  entries <- listDirectory dir
+  mapM_ (\e -> unless (dir </> e == lock)
+                 (removePathForcibly (dir </> e))) entries
 
 -- | Does the playlist file exist and list at least one @.ts@ segment?
 playlistHasSegments :: FilePath -> IO Bool

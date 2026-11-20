@@ -16,7 +16,7 @@ module FMS.Modules.Hls
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, try)
 import Control.Monad (unless)
-import Control.Monad.Except (throwError)
+import Control.Monad.Except (throwError, tryError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 -- bracket_ is IO-level; the AppM result handling happens after it returns
@@ -207,25 +207,33 @@ ensureHls cfg item = do
         Right () -> do
           -- we won the race: drop any stale cache written under a
           -- different codec mode (m71), then package in the background,
-          -- keeping an ffmpeg slot for the lifetime of the job
-          liftIO (clearStaleCache dir lock)
-          liftIO (TIO.writeFile modeFile mode)
-          logInfo ("hls: packaging item " <> itemId item <> " (" <> mode
-                   <> ") into " <> T.pack dir)
-          mRelease <- acquireFfmpegSlot
-          liftIO $ forkIO $ do
-            _ <- runProcessBSTimeout packagingTimeoutSec
-                   "ffmpeg" (hlsArgsFor streams (itemPath item) m3u8)
-            releaseFfmpegSlot mRelease
-            _ <- try (removeDirectory lock) :: IO (Either IOException ())
-            pure ()
-          ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
-          if ok
-            then pure m3u8
-            else throwError (InternalError
-                   ("ffmpeg HLS packaging produced no segments within "
-                    <> T.pack (show firstSegmentWaitSec) <> "s for item "
-                    <> itemId item))
+          -- keeping an ffmpeg slot for the lifetime of the job. If the
+          -- slot acquisition throws (503, all transcoders busy), remove
+          -- the lock again so the next request can retry instead of
+          -- waiting forever on a leaked .starting (m71d)
+          slotR <- tryError acquireFfmpegSlot
+          case slotR of
+            Left e -> do
+              _ <- liftIO (try (removeDirectory lock) :: IO (Either IOException ()))
+              throwError e
+            Right mRelease -> do
+              liftIO (clearStaleCache dir lock)
+              liftIO (TIO.writeFile modeFile mode)
+              logInfo ("hls: packaging item " <> itemId item <> " (" <> mode
+                       <> ") into " <> T.pack dir)
+              liftIO $ forkIO $ do
+                _ <- runProcessBSTimeout packagingTimeoutSec
+                       "ffmpeg" (hlsArgsFor streams (itemPath item) m3u8)
+                releaseFfmpegSlot mRelease
+                _ <- try (removeDirectory lock) :: IO (Either IOException ())
+                pure ()
+              ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
+              if ok
+                then pure m3u8
+                else throwError (InternalError
+                       ("ffmpeg HLS packaging produced no segments within "
+                        <> T.pack (show firstSegmentWaitSec) <> "s for item "
+                        <> itemId item))
         Left _ -> do
           -- another request is already packaging this item: just wait
           ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)

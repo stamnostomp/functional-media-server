@@ -685,6 +685,9 @@ main = do
       containsPair x y = any (\(a, b) -> a == x && b == y) (zip hargs (drop 1 hargs))
   check "hlsArgs keeps all segments listed (progressive, no vod)" True (containsPair "-hls_list_size" "0")
   check "hlsArgs has -c copy"               True (containsPair "-c" "copy")
+  check "hlsArgs maps video+audio only, drops subs (-sn; mkv subs would break the HLS muxer)"
+    [True, True, True]
+    [ containsPair "-map" "0:v:0", containsPair "-map" "0:a?", containsPair "-sn" "-dn" ]
   check "hlsArgs has -hls_time 4"           True (containsPair "-hls_time" "4")
   check "hlsArgs ends with the output m3u8 path" hlsOut (last hargs)
   check "hlsArgs contains the input path"   True (hlsIn `elem` hargs)

@@ -67,6 +67,10 @@ hlsArgs :: FilePath -> FilePath -> [String]
 hlsArgs input outputM3u8 =
   [ "-v", "error"
   , "-i", input
+  -- map only video+audio: an embedded subtitle stream would be
+  -- auto-selected and the HLS muxer rejects anything but webvtt
+  -- ("Could not write header") -> no segments at all (m66e)
+  , "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn"
   , "-c", "copy"
   , "-hls_time", "4"
   , "-hls_list_size", "0"

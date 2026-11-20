@@ -6,6 +6,10 @@ module FMS.Modules.Indexers.Types
   , indexerSearchUrlExtra
   , torrentDaySearchUrl
   , parseTorrentDayJson
+  , ytsSearchUrl
+  , parseYtsJson
+  , torrentsCsvSearchUrl
+  , parseTorrentsCsvJson
   , categoriesParam
   , base64UrlEncode
   , base64UrlDecode
@@ -52,10 +56,12 @@ defaultSearchPath = "/api"
 validAuthType :: Text -> Bool
 validAuthType t = T.toLower t `elem` ["apikey", "cookie"]
 
--- | Valid 'indexerResponseFormat' values: @torznab@ (default XML) or
--- @torrentday-json@ (TorrentDay t.json JSON array, m23).
+-- | Valid 'indexerResponseFormat' values: @torznab@ (default XML),
+-- @torrentday-json@ (TorrentDay t.json JSON array, m23), @yts-json@
+-- (YTS public movies API, m68) or @torrentscsv-json@ (TorrentsCSV public
+-- JSON API, m68). The m68 formats are PUBLIC: no apikey/cookie needed.
 validResponseFormat :: Text -> Bool
-validResponseFormat t = T.toLower t `elem` ["torznab", "torrentday-json"]
+validResponseFormat t = T.toLower t `elem` ["torznab", "torrentday-json", "yts-json", "torrentscsv-json"]
 
 -- | One direct indexer (m21, extended m23 with cookie auth + t.json).
 -- ApiKey AND Cookie are SECRET: they are only ever sent to the indexer
@@ -273,6 +279,96 @@ parseTorrentDayJson baseUrl bs =
     asText _ = Nothing
     asInt (Aeson.Number n) = Just (round n :: Integer)
     asInt _ = Nothing
+
+-- | m68: YTS public movies API search URL:
+-- @<base>/api/v2/list_movies.json?query_term=<q>&limit=50@.
+ytsSearchUrl :: Indexer -> Text -> String
+ytsSearchUrl idx q =
+  T.unpack (T.dropWhileEnd (== '/') (indexerBaseUrl idx))
+    ++ "/api/v2/list_movies.json?query_term=" ++ T.unpack (urlEncodeText q) ++ "&limit=50"
+
+-- | m68: parse a YTS list_movies JSON response into releases -- one
+-- release per (movie x torrent quality). Each torrent row has
+-- @hash@ (btih), @quality@, @type@, @size_bytes@, @seeders@, @url@.
+-- Releases carry the .torrent @url@ as DownloadUrl AND a magnet built
+-- from the hash. Non-object/missing fields are tolerated; a body without
+-- @data.movies@ yields [].
+parseYtsJson :: LBS.ByteString -> [Release]
+parseYtsJson bs =
+  case Aeson.decode bs of
+    Just (Aeson.Object root) ->
+      case KeyMap.lookup (Key.fromText "data") root of
+        Just (Aeson.Object dat) ->
+          case KeyMap.lookup (Key.fromText "movies") dat of
+            Just (Aeson.Array movies) -> concatMap movieReleases movies
+            _ -> []
+        _ -> []
+    _ -> []
+  where
+    movieReleases (Aeson.Object m) =
+      case (KeyMap.lookup (Key.fromText "title_long") m >>= asText,
+            KeyMap.lookup (Key.fromText "torrents") m) of
+        (Just title, Just (Aeson.Array ts)) ->
+          [ r | Aeson.Object t <- foldr (:) [] ts, Just r <- [torrentRelease title t] ]
+        _ -> []
+    movieReleases _ = []
+    torrentRelease title t = do
+      hash <- KeyMap.lookup (Key.fromText "hash") t >>= asText
+      quality <- KeyMap.lookup (Key.fromText "quality") t >>= asText
+      ty <- KeyMap.lookup (Key.fromText "type") t >>= asText
+      let sizeB = KeyMap.lookup (Key.fromText "size_bytes") t >>= asInteger
+          seeders = fromIntegral <$> (KeyMap.lookup (Key.fromText "seeders") t >>= asInteger) :: Maybe Int
+          dl = KeyMap.lookup (Key.fromText "url") t >>= asText
+          magnet = "magnet:?xt=urn:btih:" <> hash <> "&dn=" <> urlEncodeText title
+      pure Release
+        { relTitle = title <> " " <> quality <> " " <> ty
+        , relSizeBytes = sizeB
+        , relSeeders = seeders
+        , relDownloadUrl = dl
+        , relMagnet = Just magnet
+        }
+    torrentRelease _ _ = Nothing
+    asText (Aeson.String s) = Just s
+    asText _ = Nothing
+    asInteger (Aeson.Number n) = Just (round n :: Integer)
+    asInteger _ = Nothing
+
+-- | m68: TorrentsCSV public search URL: @<base>/service/search?q=<q>&size=100@.
+torrentsCsvSearchUrl :: Indexer -> Text -> String
+torrentsCsvSearchUrl idx q =
+  T.unpack (T.dropWhileEnd (== '/') (indexerBaseUrl idx))
+    ++ "/service/search?q=" ++ T.unpack (urlEncodeText q) ++ "&size=100"
+
+-- | m68: parse a TorrentsCSV response (@{"torrents":[..]}@) into
+-- releases. Rows carry @infohash@, @name@, @size_bytes@, @seeders@;
+-- releases are magnet-only (built from the infohash). A body without a
+-- @torrents@ array yields [].
+parseTorrentsCsvJson :: LBS.ByteString -> [Release]
+parseTorrentsCsvJson bs =
+  case Aeson.decode bs of
+    Just (Aeson.Object root) ->
+      case KeyMap.lookup (Key.fromText "torrents") root of
+        Just (Aeson.Array rows) ->
+          [ r | Aeson.Object o <- foldr (:) [] rows, Just r <- [rowToRelease o] ]
+        _ -> []
+    _ -> []
+  where
+    rowToRelease o = do
+      name <- KeyMap.lookup (Key.fromText "name") o >>= asText
+      hash <- KeyMap.lookup (Key.fromText "infohash") o >>= asText
+      let sizeB = KeyMap.lookup (Key.fromText "size_bytes") o >>= asInteger
+          seeders = fromIntegral <$> (KeyMap.lookup (Key.fromText "seeders") o >>= asInteger) :: Maybe Int
+      pure Release
+        { relTitle = name
+        , relSizeBytes = sizeB
+        , relSeeders = seeders
+        , relDownloadUrl = Nothing
+        , relMagnet = Just ("magnet:?xt=urn:btih:" <> hash <> "&dn=" <> urlEncodeText name)
+        }
+    asText (Aeson.String s) = Just s
+    asText _ = Nothing
+    asInteger (Aeson.Number n) = Just (round n :: Integer)
+    asInteger _ = Nothing
 
 -- | The Cookie header value for cookie-auth indexers (m23), if any.
 indexerCookieHeader :: Indexer -> [(Text, Text)]

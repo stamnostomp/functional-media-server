@@ -53,6 +53,10 @@ import FMS.Modules.Indexers.Types
   , indexerSearchUrl
   , indexerSearchUrlExtra
   , parseTorrentDayJson
+  , ytsSearchUrl
+  , parseYtsJson
+  , torrentsCsvSearchUrl
+  , parseTorrentsCsvJson
   , torrentDaySearchUrl
   , validAuthType
   , validResponseFormat
@@ -156,7 +160,7 @@ createIndexerHandler _captures req = do
     (throwError (BadRequest "AuthType must be apikey or cookie"))
   let rf = T.toLower (ciResponseFormat ci)
   unless (validResponseFormat rf)
-    (throwError (BadRequest "ResponseFormat must be torznab or torrentday-json"))
+    (throwError (BadRequest "ResponseFormat must be torznab, torrentday-json, yts-json or torrentscsv-json"))
   when (at == "cookie" && T.null (T.strip (ciCookie ci)))
     (throwError (BadRequest "Cookie is required when AuthType is cookie"))
   iid <- liftIO newIndexerId
@@ -431,10 +435,12 @@ originalLanguageQueries base apiKey qs = do
 searchIndexer :: Indexer -> Maybe Text -> Text -> [(Text, Text)] -> IO (Either String [Release])
 searchIndexer idx mType q extras = do
   let headers = [ (hCookie, TE.encodeUtf8 c) | ("Cookie", c) <- indexerCookieHeader idx ]
-      isJson = indexerResponseFormat idx == "torrentday-json"
-      url = if isJson
-              then torrentDaySearchUrl idx q
-              else indexerSearchUrlExtra idx mType q extras
+      fmt = T.toLower (indexerResponseFormat idx)
+      url = case fmt of
+              "torrentday-json"  -> torrentDaySearchUrl idx q
+              "yts-json"         -> ytsSearchUrl idx q
+              "torrentscsv-json" -> torrentsCsvSearchUrl idx q
+              _                  -> indexerSearchUrlExtra idx mType q extras
   eres <- fetchUrl headers 10000000 url
   case eres of
     Left err -> pure (Left err)
@@ -443,5 +449,8 @@ searchIndexer idx mType q extras = do
           pure (Left (if indexerAuthType idx == "cookie"
                          then "not logged in (cookie missing/expired)"
                          else "indexer returned HTTP " ++ show code))
-      | isJson -> pure (Right (parseTorrentDayJson (indexerBaseUrl idx) body))
-      | otherwise -> pure (Right (parseTorznabResults body))
+      | otherwise -> pure (Right (case fmt of
+          "torrentday-json"  -> parseTorrentDayJson (indexerBaseUrl idx) body
+          "yts-json"         -> parseYtsJson body
+          "torrentscsv-json" -> parseTorrentsCsvJson body
+          _                  -> parseTorznabResults body))

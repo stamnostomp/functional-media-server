@@ -131,6 +131,10 @@ import FMS.Modules.Indexers.Types
   , indexerSearchUrl
   , indexerSearchUrlExtra
   , parseTorrentDayJson
+  , ytsSearchUrl
+  , parseYtsJson
+  , torrentsCsvSearchUrl
+  , parseTorrentsCsvJson
   , torrentDaySearchUrl
   , validAuthType
   , validResponseFormat
@@ -4827,6 +4831,54 @@ main = do
     [ parseTorrentDayJson "http://td/" (LBSC.pack "{\"a\":1}")
     , parseTorrentDayJson "http://td/" (LBSC.pack "nope") ]
     [ [], [] ]
+  -- m68: public JSON indexers (YTS movies, TorrentsCSV)
+  check "validResponseFormat accepts the m68 public formats"
+    (map validResponseFormat ["yts-json", "torrentscsv-json", "torznab", "torrentday-json", "bogus"])
+    [True, True, True, True, False]
+  check "ytsSearchUrl: query_term + limit"
+    (ytsSearchUrl idx "pan's labyrinth")
+    "http://127.0.0.1:9117/api/v2/list_movies.json?query_term=pan%27s%20labyrinth&limit=50"
+  check "torrentsCsvSearchUrl: q + size"
+    (torrentsCsvSearchUrl idx "shrek")
+    "http://127.0.0.1:9117/service/search?q=shrek&size=100"
+  let ytsSample = LBSC.pack (unwords
+        [ "{\"status\":\"ok\",\"data\":{\"movies\":[{\"title_long\":\"Shrek (2001)\",\"year\":2001,"
+        , "\"torrents\":[{\"hash\":\"abc123\",\"quality\":\"1080p\",\"type\":\"Blu-ray\",\"size_bytes\":1500000000,\"seeders\":42,\"url\":\"https://yts.am/torrent/download/abc123\"},"
+        , "{\"hash\":\"def456\",\"quality\":\"720p\",\"type\":\"WEB\",\"size_bytes\":800000000,\"seeders\":7,\"url\":\"https://yts.am/torrent/download/def456\"}]}]}}" ])
+      yts = parseYtsJson ytsSample
+  check "parseYtsJson: one release per movie x quality"
+    [ map relTitle yts ]
+    [ ["Shrek (2001) 1080p Blu-ray", "Shrek (2001) 720p WEB"] ]
+  check "parseYtsJson: sizes parsed"
+    [ map relSizeBytes yts ] [ [Just 1500000000, Just 800000000] ]
+  check "parseYtsJson: seeders parsed"
+    [ map relSeeders yts ] [ [Just 42, Just 7] ]
+  check "parseYtsJson: download url + magnet from hash"
+    [ map relDownloadUrl yts, map relMagnet yts ]
+    [ [ Just "https://yts.am/torrent/download/abc123", Just "https://yts.am/torrent/download/def456" ]
+    , [ Just "magnet:?xt=urn:btih:abc123&dn=Shrek%20%282001%29"
+      , Just "magnet:?xt=urn:btih:def456&dn=Shrek%20%282001%29" ] ]
+  check "parseYtsJson: garbage / no movies -> []"
+    [ parseYtsJson (LBSC.pack "nope"), parseYtsJson (LBSC.pack "{\"data\":{}}") ]
+    [ [], [] ]
+  let csvSample = LBSC.pack (unwords
+        [ "{\"torrents\":[{\"infohash\":\"7b973e55b2198eac530440dc7d9589dd708f5692\",\"name\":\"Shrek (2001) 1080p BrRip x264 - YIFY\",\"size_bytes\":1068287027,\"seeders\":536},"
+        , "{\"infohash\":\"bad\",\"name\":\"NoSize\"}]}" ])
+      csv = parseTorrentsCsvJson csvSample
+  check "parseTorrentsCsvJson: names parsed"
+    [ map relTitle csv ] [ ["Shrek (2001) 1080p BrRip x264 - YIFY", "NoSize"] ]
+  check "parseTorrentsCsvJson: magnet-only releases"
+    [ map relDownloadUrl csv ] [ [Nothing, Nothing] ]
+  check "parseTorrentsCsvJson: magnets built from infohash"
+    [ map relMagnet csv ]
+    [ [ Just "magnet:?xt=urn:btih:7b973e55b2198eac530440dc7d9589dd708f5692&dn=Shrek%20%282001%29%201080p%20BrRip%20x264%20-%20YIFY"
+      , Just "magnet:?xt=urn:btih:bad&dn=NoSize" ] ]
+  check "parseTorrentsCsvJson: sizes parsed, missing tolerated"
+    [ map relSizeBytes csv ] [ [Just 1068287027, Nothing] ]
+  check "parseTorrentsCsvJson: seeders parsed, missing tolerated"
+    [ map relSeeders csv ] [ [Just 536, Nothing] ]
+  check "parseTorrentsCsvJson: garbage -> []"
+    [ parseTorrentsCsvJson (LBSC.pack "nope") ] [ [] ]
   -- m67: TorrentDay emits the invalid JSON escape \' for apostrophes, which
   -- used to make Aeson.decode reject the whole array (Pan's Labyrinth -> 0
   -- results). The body is sanitized before decoding.

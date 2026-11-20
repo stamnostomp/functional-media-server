@@ -157,20 +157,27 @@ playbackInfoHandler captures req =
                 Nothing -> True
                 Just p  -> deviceProfileAllows p (container source0) (fromMaybe "" codecOf)
               method = decidePlayMethod (supportsDirectPlay source0 && dpAllowed) srcBitrate cap
-              tUrl =
-                if method == "Transcode"
-                  then Just (T.concat
-                    [ "/stream/", i, "/transcode?version=0"
-                    , maybe "" (\b -> "&maxBitrate=" <> T.pack (show b)) cap
-                    -- burn-in requested via PlaybackInfo -> ask the
-                    -- transcode endpoint to burn the selected subtitle in
-                    , if pirSubtitleDeliveryMethod pir == Just "BurnIn"
+              -- Burn-in needs the raw transcode endpoint (HLS cannot
+              -- burn subtitles in); every other transcode is served as
+              -- an HLS VOD playlist so clients get a real duration and
+              -- a working seek bar (a fragmented-mp4 transcode has a
+              -- meaningless mvhd duration and ends early in browsers).
+              burnIn = pirSubtitleDeliveryMethod pir == Just "BurnIn"
                         && isJust (pirSubtitleIndex pir)
                         && isJust mSub
-                      then "&burnIn=1&subtitleIndex=" <> T.pack (show (fromMaybe 0 (pirSubtitleIndex pir)))
-                      else ""
-                    ])
-                  else Nothing
+              tUrl =
+                if method /= "Transcode"
+                  then Nothing
+                  else if burnIn
+                    then Just (T.concat
+                      [ "/stream/", i, "/transcode?version=0"
+                      , maybe "" (\b -> "&maxBitrate=" <> T.pack (show b)) cap
+                      , "&burnIn=1&subtitleIndex=" <> T.pack (show (fromMaybe 0 (pirSubtitleIndex pir)))
+                      ])
+                    else Just (T.concat
+                      [ "/videos/", i, "/main.m3u8"
+                      , maybe "" (\b -> "?maxBitrate=" <> T.pack (show b)) cap
+                      ])
               -- milestone 6i: resolve the requested audio/subtitle
               -- stream indexes against the probed streams of the
               -- primary source, mark the chosen ones IsDefault, and

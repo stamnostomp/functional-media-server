@@ -135,7 +135,7 @@ import FMS.Modules.Indexers.Types
 import FMS.Modules.Webhooks.Persistence (loadWebhooks, saveWebhooks)
 import FMS.Modules.Webhooks.Types (Webhook (..), eventMatches)
 import FMS.Modules.UserData.Types (UserData (..), emptyUserData)
-import FMS.Modules.Hls (hlsArgs, hlsDirFor)
+import FMS.Modules.Hls (hlsArgs, hlsDirFor, rewritePlaylistSegments)
 import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isUnderDir, isValidImageType, resizeArgs, selectBackdrop)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
@@ -722,6 +722,16 @@ main = do
       check "all referenced .ts segments exist on disk" True (and segsExist)
       removeDirectoryRecursive outDir
       removeFile mp4
+  let plTxt = "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:7.8,\nseg000.ts\nseg001.ts\n#EXT-X-ENDLIST\n"
+      rw = rewritePlaylistSegments "tok123" plTxt
+  check "rewritePlaylistSegments appends api_key to segment lines only"
+    [True, True, True, True, True]
+    [ "seg000.ts?api_key=tok123" `T.isInfixOf` rw
+    , "seg001.ts?api_key=tok123" `T.isInfixOf` rw
+    , "#EXTM3U" `T.isInfixOf` rw
+    , "#EXT-X-ENDLIST" `T.isInfixOf` rw
+    , not ("#EXTM3U?api_key=" `T.isInfixOf` rw)
+    ]
 
   -- Subtitles module (milestone 3d): pure pickSubtitles / subtitleToVttArgs.
   check "subtitleExts" [".srt", ".vtt", ".ass", ".ssa", ".sub"] subtitleExts

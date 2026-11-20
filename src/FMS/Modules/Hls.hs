@@ -3,6 +3,7 @@ module FMS.Modules.Hls
   , hlsArgs
   , hlsDirFor
   , ensureHls
+  , rewritePlaylistSegments
   ) where
 
 import Control.Exception (bracket_)
@@ -16,8 +17,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
 import Network.HTTP.Types (status200)
-import Network.Wai (Request, Response, responseLBS)
+import Network.Wai (Request, Response, queryString, responseLBS)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), dropFileName)
@@ -116,7 +119,22 @@ playlistHandler captures req =
         Just item -> do
           cfg  <- asks envConfig
           m3u8 <- ensureHls cfg item
-          serveFile m3u8 "application/vnd.apple.mpegurl"
+          -- hls.js resolves relative segment URIs against the playlist
+          -- URL and drops its query string, so segments would be
+          -- requested without the api_key and get 401 under auth.
+          -- Rewrite each segment line to carry the same credential the
+          -- client used for the playlist itself.
+          let mKey = case lookup "api_key" (queryString req) of
+                Just (Just v) -> Just (TE.decodeUtf8 v)
+                _             -> Nothing
+          case mKey of
+            Nothing -> serveFile m3u8 "application/vnd.apple.mpegurl"
+            Just k  -> do
+              txt <- liftIO (TIO.readFile m3u8)
+              let out = rewritePlaylistSegments k txt
+              pure (responseLBS status200
+                [("Content-Type", "application/vnd.apple.mpegurl")]
+                (LBS.fromStrict (TE.encodeUtf8 out)))
 
 -- | @GET \/videos\/:id\/:seg@ — serve one cached MPEG-TS segment from
 -- @stateDir\/hls\/<id>\/<seg>@ as @video\/mp2t@. Unknown item or missing
@@ -142,6 +160,19 @@ segmentHandler captures req =
                 if ok
                   then serveFile segPath "video/mp2t"
                   else throwError (NotFound ("no segment " <> seg <> " for item " <> i))
+
+-- | Append @?api_key=<key>@ to every non-comment, non-empty playlist
+-- line (the segment URIs) so HLS clients that resolve relative URIs
+-- against the playlist URL still send the credential with each segment
+-- request. Comment (@#...@) and blank lines pass through unchanged.
+rewritePlaylistSegments :: Text -> Text -> Text
+rewritePlaylistSegments key txt =
+  T.unlines (map rewrite (T.lines txt))
+  where
+    rewrite line
+      | T.null line = line
+      | "#" `T.isPrefixOf` line = line
+      | otherwise = line <> "?api_key=" <> key
 
 -- | A segment name is safe to join onto the hls dir only if it is
 -- non-empty, consists solely of @[A-Za-z0-9._-]@, and contains no @..@ —

@@ -3845,6 +3845,12 @@ main = do
         , "/Users/AuthenticateByName", "/ScheduledTasks/", "/Plugins/"
         , "/library/rescan", "/Library/Refresh", "/api-docs", "localStorage"
         , "setInterval(refresh, 10000)" ]
+      dashMarkers63 =
+        [ "tabbtn-users", "id='tab-users'", "id='tabbar'", "OVERVIEW</button>", "USERS</button>"
+        , "function renderUsersTab()", "function createUser()", "function deleteUser("
+        , "api('/Users'", "method:'POST'" ]
+  check "dashboardPageHtml m63: button-carousel tabs + users tab markers"
+    (map (\m -> m `isInfixOf` dash) dashMarkers63) (replicate (length dashMarkers63) True)
   check "dashboardPageHtml: contains all required markers"
     (map (\m -> m `isInfixOf` dash) dashMarkers) (replicate (length dashMarkers) True)
   let stamnoTokens =

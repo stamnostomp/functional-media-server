@@ -683,7 +683,7 @@ main = do
       hlsOut = "/tmp/fms-test-hls-out/main.m3u8"
       hargs  = hlsArgs hlsIn hlsOut
       containsPair x y = any (\(a, b) -> a == x && b == y) (zip hargs (drop 1 hargs))
-  check "hlsArgs has -hls_playlist_type vod" True (containsPair "-hls_playlist_type" "vod")
+  check "hlsArgs keeps all segments listed (progressive, no vod)" True (containsPair "-hls_list_size" "0")
   check "hlsArgs has -c copy"               True (containsPair "-c" "copy")
   check "hlsArgs has -hls_time 4"           True (containsPair "-hls_time" "4")
   check "hlsArgs ends with the output m3u8 path" hlsOut (last hargs)

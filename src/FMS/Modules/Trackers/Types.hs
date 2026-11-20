@@ -3,13 +3,15 @@ module FMS.Modules.Trackers.Types
   , trackerPublicJson
   , Release (..)
   , sortReleasesBySeeders
+  , dedupeReleases
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
-import Data.List (sortBy)
+import Data.List (nubBy, sortBy)
 import Data.Ord (Down (..), comparing)
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | One Jackett-style indexer (m20b). The API key is SECRET: it is only
 -- ever sent to the tracker itself and is redacted from non-admin API
@@ -77,3 +79,12 @@ instance ToJSON Release where
 sortReleasesBySeeders :: [(a, Release)] -> [(a, Release)]
 sortReleasesBySeeders =
   sortBy (comparing (\( _, r) -> (Down (relSeeders r), Down (relSizeBytes r))))
+
+-- | m66: dedupe releases by LOWERCASED title, keeping the FIRST
+-- occurrence. Used when one /Indexers/Search runs several queries (the
+-- English title AND the original-language title, see the Discover flow
+-- in stamno-media): the same release can match more than one query and
+-- must appear only once. Call AFTER 'sortReleasesBySeeders' so the
+-- best-seeded copy of a duplicated release is the one kept.
+dedupeReleases :: [(a, Release)] -> [(a, Release)]
+dedupeReleases = nubBy (\(_, r1) (_, r2) -> T.toLower (relTitle r1) == T.toLower (relTitle r2))

@@ -16,7 +16,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (partition)
+import Data.List (nub, partition)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -53,7 +53,7 @@ import FMS.Modules.Indexers.Types
   )
 import FMS.Modules.Requests.Push (slugify)
 import FMS.Modules.Trackers.Torznab (fetchUrl, parseTorznabResults)
-import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders)
+import FMS.Modules.Trackers.Types (Release (..), dedupeReleases, sortReleasesBySeeders)
 
 jsonCT :: ResponseHeaders
 jsonCT = [("Content-Type", "application/json")]
@@ -202,12 +202,20 @@ setEnabledHandler enabled captures req = do
 -- parallel, tolerating per-indexer failures (recorded in "Errors").
 -- Results carry a PROXIED DownloadUrl (@/Indexers/<id>/Download?r=..@),
 -- never the raw indexer link (which embeds the apikey).
+-- m66: @q@ may be REPEATED — every non-blank @q@ is searched and the
+-- results are merged (deduped by title, still sorted by seeders). The
+-- stamno-media Discover flow passes the English display title AND the
+-- TMDB original title (OriginalName), so original-language releases
+-- (e.g. "El laberinto del fauno" for Pan's Labyrinth) show up too.
 searchHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 searchHandler _captures req = do
   let qparams = queryParams (queryString req)
-  q <- case lookup "q" qparams of
-    Just v | not (T.null (T.strip v)) -> pure v
-    _ -> throwError (BadRequest "missing q parameter")
+      -- m66: all q params, blanks dropped, exact duplicates removed
+      -- (order kept, so the English title stays the primary query)
+      qs = nub [ v | ("q", v) <- qparams, not (T.null (T.strip v)) ]
+  case qs of
+    [] -> throwError (BadRequest "missing q parameter")
+    _  -> pure ()
   let mType = lookup "type" qparams
       mIndexerId = lookup "indexerid" qparams
       -- m60: optional torznab season/ep params (episode / season-pack
@@ -224,16 +232,21 @@ searchHandler _captures req = do
           when (not (indexerEnabled i)) (throwError (BadRequest "indexer is disabled"))
           pure [i]
     Nothing -> pure (filter indexerEnabled allIndexers)
-  perIndexer <- liftIO (mapConcurrently
-    (\i -> do
+  -- m66: one (indexer, query) search per pair, all in parallel
+  perQuery <- liftIO (mapConcurrently
+    (\(i, q) -> do
       eres <- searchIndexer i mType q extras
       pure (i, eres))
-    selected)
-  let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perIndexer
+    [ (i, q) | i <- selected, q <- qs ])
+  let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perQuery
+      -- m66: flatten + dedupe (same release can match several queries),
+      -- then sort by seeders so the [RECOMMENDED] row is still the best
       results = [ releaseJson i r
                 | (i, r) <- sortReleasesBySeeders
-                    [ (i, r) | (i, Right rels) <- okPairs, r <- rels ] ]
-      errors = [ (indexerId i, T.pack msg) | (i, Left msg) <- errPairs ]
+                    (dedupeReleases [ (i, r) | (i, Right rels) <- okPairs, r <- rels ]) ]
+      -- one error per indexer (first failure wins) -- the object would
+      -- collapse duplicate keys anyway, but be explicit
+      errors = nub [ (indexerId i, T.pack msg) | (i, Left msg) <- errPairs ]
   pure (jsonResponse (object
     [ "Results" .= results
     , "Errors"  .= object [ (Key.fromText iid, Aeson.String msg) | (iid, msg) <- errors ]

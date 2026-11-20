@@ -115,7 +115,7 @@ import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoSt
 import FMS.Modules.Requests.Routes (attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
-import FMS.Modules.Trackers.Types (Release (..), sortReleasesBySeeders, Tracker (..), trackerPublicJson)
+import FMS.Modules.Trackers.Types (Release (..), dedupeReleases, sortReleasesBySeeders, Tracker (..), trackerPublicJson)
 import FMS.Modules.Indexers.Types
   ( Indexer (..)
   , base64UrlDecode
@@ -980,6 +980,16 @@ main = do
       [ ("a", rel (Just 5) (Just 10)), ("b", rel (Just 99) (Just 1))
       , ("c", rel (Just 5) (Just 50)), ("d", rel Nothing (Just 999)) ]))
 
+  -- dedupeReleases (m66): multi-query /Indexers/Search merge -- the same
+  -- release matching both the English and the original-language query
+  -- appears once (first occurrence wins, so sort first to keep the best)
+  check "dedupeReleases: same title different case kept once, first wins"
+    [("i1", "Pan's Labyrinth 2006 1080p"), ("i2", "El laberinto del fauno 2006")]
+    (map (\(i, r) -> (i, relTitle r)) (dedupeReleases
+      [ ("i1", Release "Pan's Labyrinth 2006 1080p" (Just 10) (Just 5) Nothing Nothing)
+      , ("i1", Release "pan's labyrinth 2006 1080p" (Just 10) (Just 9) Nothing Nothing)
+      , ("i2", Release "El laberinto del fauno 2006" (Just 20) (Just 3) Nothing Nothing) ]))
+
   -- parseProxiedPath (m21 fix: push resolves proxied indexer URLs in-process)
   check "parseProxiedPath parses /Indexers/:id/Download?r="
     (Just ("abc", "rid123")) (parseProxiedPath "/Indexers/abc/Download?r=rid123")
@@ -1475,21 +1485,27 @@ main = do
         , "]}"
         ]))
       tmdbExpected =
-        [ TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing
-        , TmdbResult 680 "Pulp Fiction" Nothing (Just 1994) (Just 8.5) Nothing
+        [ TmdbResult 550 "Fight Club" (Just "Fight Club") Nothing (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing
+        , TmdbResult 680 "Pulp Fiction" Nothing Nothing Nothing (Just 1994) (Just 8.5) Nothing
         ]
   check "parseTmdbResults parses a 2-result fixture (year extraction, missing overview -> Nothing)"
     (Right tmdbExpected) (parseTmdbResults tmdbFixture)
   check "parseTmdbResults on an empty results array is Right []"
     (Right []) (parseTmdbResults (LBS.fromStrict (BSC.pack "{\"results\":[]}")))
   check "parseTmdbResults: empty release_date -> year Nothing, vote_average 0 -> Just 0.0"
-    (Right [TmdbResult 7 "X" Nothing Nothing (Just 0.0) Nothing])
+    (Right [TmdbResult 7 "X" Nothing Nothing Nothing Nothing (Just 0.0) Nothing])
     (parseTmdbResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":7,\"title\":\"X\",\"release_date\":\"\",\"vote_average\":0}]}")))
   check "parseTmdbResults: malformed release_date -> year Nothing"
-    (Right [TmdbResult 8 "Y" Nothing Nothing (Just 7.0) Nothing])
+    (Right [TmdbResult 8 "Y" Nothing Nothing Nothing Nothing (Just 7.0) Nothing])
     (parseTmdbResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":8,\"title\":\"Y\",\"release_date\":\"soon\",\"vote_average\":7}]}")))
+  -- m66: original_title/original_language are parsed (original-language
+  -- torrent search in the Discover flow depends on them)
+  check "parseTmdbResults parses original_title + original_language (m66)"
+    (Right [TmdbResult 680 "Pan's Labyrinth" (Just "El laberinto del fauno") (Just "es") Nothing (Just 2006) (Just 8.3) Nothing])
+    (parseTmdbResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":680,\"title\":\"Pan's Labyrinth\",\"original_title\":\"El laberinto del fauno\",\"original_language\":\"es\",\"release_date\":\"2006-12-01\",\"vote_average\":8.3}]}")))
   let isLeftStr :: Either String a -> Bool
       isLeftStr (Left _)  = True
       isLeftStr (Right _) = False
@@ -1508,9 +1524,14 @@ main = do
         , "]}"
         ]))
   check "parseTmdbTvResults maps name/first_air_date onto TmdbResult"
-    (Right [ TmdbResult 1399 "Game of Thrones" (Just "Seven noble families fight.") (Just 2011) (Just 8.4) Nothing
-           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing Nothing ])
+    (Right [ TmdbResult 1399 "Game of Thrones" Nothing Nothing (Just "Seven noble families fight.") (Just 2011) (Just 8.4) Nothing
+           , TmdbResult 1402 "The Wire" Nothing Nothing Nothing (Just 2002) Nothing Nothing ])
     (parseTmdbTvResults tvFixture)
+  -- m66: tv payloads carry original_name/original_language
+  check "parseTmdbTvResults parses original_name + original_language (m66)"
+    (Right [TmdbResult 1399 "Dark" (Just "Dark") (Just "de") Nothing (Just 2017) Nothing Nothing])
+    (parseTmdbTvResults (LBS.fromStrict (BSC.pack
+      "{\"results\":[{\"id\":1399,\"name\":\"Dark\",\"original_name\":\"Dark\",\"original_language\":\"de\",\"first_air_date\":\"2017-12-01\"}]}")))
   check "parseTmdbTvResults on invalid JSON is Left"
     True (isLeftStr (parseTmdbTvResults (LBS.fromStrict (BSC.pack "nope"))))
   -- milestone 26: /Discover/Popular (TMDB popular movies+shows, poster_path)
@@ -1524,18 +1545,20 @@ main = do
     , "https://api.themoviedb.org/3/movie/popular?api_key=K&page=1"
     , "https://api.themoviedb.org/3/tv/popular?api_key=K&page=3" ]
   check "parseTmdbResults decodes poster_path (m26)"
-    (Right [TmdbResult 550 "Fight Club" Nothing (Just 1999) Nothing (Just "/p550.jpg")])
+    (Right [TmdbResult 550 "Fight Club" Nothing Nothing Nothing (Just 1999) Nothing (Just "/p550.jpg")])
     (parseTmdbResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":550,\"title\":\"Fight Club\",\"release_date\":\"1999-10-15\",\"poster_path\":\"/p550.jpg\"}]}")))
   check "parseTmdbTvResults decodes poster_path (m26), missing -> Nothing"
-    (Right [ TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing (Just "/got.jpg")
-           , TmdbResult 1402 "The Wire" Nothing (Just 2002) Nothing Nothing ])
+    (Right [ TmdbResult 1399 "Game of Thrones" Nothing Nothing Nothing (Just 2011) Nothing (Just "/got.jpg")
+           , TmdbResult 1402 "The Wire" Nothing Nothing Nothing (Just 2002) Nothing Nothing ])
     (parseTmdbTvResults (LBS.fromStrict (BSC.pack
       "{\"results\":[{\"id\":1399,\"name\":\"Game of Thrones\",\"first_air_date\":\"2011-04-17\",\"poster_path\":\"/got.jpg\"},{\"id\":1402,\"name\":\"The Wire\",\"first_air_date\":\"2002-06-02\"}]}")))
   let dEntry = discoverEntry "Movie" "https://image.tmdb.org/t/p" "w500"
-        (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.4) (Just "/p550.jpg"))
+        (TmdbResult 550 "Fight Club" Nothing Nothing (Just "An insomniac office worker.") (Just 1999) (Just 8.4) (Just "/p550.jpg"))
       dEntryRaw = LBS.toStrict (Aeson.encode dEntry)
-      dNoPoster = LBS.toStrict (Aeson.encode (discoverEntry "Movie" "https://image.tmdb.org/t/p" "w500" (TmdbResult 1 "X" Nothing Nothing Nothing Nothing)))
+      dNoPoster = LBS.toStrict (Aeson.encode (discoverEntry "Movie" "https://image.tmdb.org/t/p" "w500" (TmdbResult 1 "X" Nothing Nothing Nothing Nothing Nothing Nothing)))
+      dOrig = LBS.toStrict (Aeson.encode (discoverEntry "Movie" "b" "s"
+        (TmdbResult 680 "Pan's Labyrinth" (Just "El laberinto del fauno") (Just "es") Nothing (Just 2006) Nothing Nothing)))
   check "discoverEntry: PascalCase keys + full PosterUrl when poster present"
     [True, True, True, True, True]
     (map (`BSC.isInfixOf` dEntryRaw)
@@ -1543,11 +1566,15 @@ main = do
       , "\"ProductionYear\":1999", "\"PosterUrl\":\"https://image.tmdb.org/t/p/w500/p550.jpg\"" ])
   check "discoverEntry: no poster -> PosterUrl null"
     [True] [ "\"PosterUrl\":null" `BSC.isInfixOf` dNoPoster ]
+  check "discoverEntry: m66 carries OriginalName + OriginalLanguage"
+    [True, True]
+    (map (`BSC.isInfixOf` dOrig)
+      [ "\"OriginalName\":\"El laberinto del fauno\"", "\"OriginalLanguage\":\"es\"" ])
   check "discoverSection: Left -> [], Right capped at 20"
     [ length (discoverSection "Movie" "b" "s" (Left "boom"))
-    , length (discoverSection "Movie" "b" "s" (Right (map (\i -> TmdbResult i "t" Nothing Nothing Nothing Nothing) [1 .. 25 :: Int]))) ]
+    , length (discoverSection "Movie" "b" "s" (Right (map (\i -> TmdbResult i "t" Nothing Nothing Nothing Nothing Nothing Nothing) [1 .. 25 :: Int]))) ]
     [ 0, 20 ]
-  let hit = tmdbResultToSearchHit "Movie" (TmdbResult 550 "Fight Club" (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing)
+  let hit = tmdbResultToSearchHit "Movie" (TmdbResult 550 "Fight Club" Nothing Nothing (Just "An insomniac office worker.") (Just 1999) (Just 8.433) Nothing)
       hitRaw = LBS.toStrict (Aeson.encode hit)
   check "tmdbResultToSearchHit emits the Jellyfin RemoteSearchResult keys (PascalCase)"
     [True, True, True, True, True, True]
@@ -1556,7 +1583,7 @@ main = do
       , "\"ProductionYear\":1999", "\"ProviderIds\":{\"Tmdb\":550}", "\"Overview\":\"An insomniac" ])
   check "tmdbResultToSearchHit type=tv -> Series"
     True ("\"Type\":\"Series\"" `BSC.isInfixOf`
-            LBS.toStrict (Aeson.encode (tmdbResultToSearchHit "Series" (TmdbResult 1399 "Game of Thrones" Nothing (Just 2011) Nothing Nothing))))
+            LBS.toStrict (Aeson.encode (tmdbResultToSearchHit "Series" (TmdbResult 1399 "Game of Thrones" Nothing Nothing Nothing (Just 2011) Nothing Nothing))))
   let mkU i = MediaItem
         { itemId = i, itemTitle = "t" <> i, itemPath = "/" ++ T.unpack i ++ ".mp4"
         , itemSize = 1, itemMime = "video/mp4", itemAddedAt = t4m, itemFolder = "1"
@@ -4370,6 +4397,7 @@ main = do
     , cleanTitleForProvider "Movie 1850 Tag" ]
     [ ("Fight Club", Nothing), ("Movie Tag", Nothing) ]
   let mkRes i y = TmdbResult { tmdbId = i, tmdbTitle = "T" <> T.pack (show i)
+                             , tmdbOriginalTitle = Nothing, tmdbOriginalLanguage = Nothing
                              , tmdbOverview = Nothing, tmdbReleaseYear = y
                              , tmdbVoteAverage = Nothing, tmdbPoster = Nothing }
       rs36 = [mkRes 1 (Just 2000), mkRes 2 (Just 1999), mkRes 3 Nothing]

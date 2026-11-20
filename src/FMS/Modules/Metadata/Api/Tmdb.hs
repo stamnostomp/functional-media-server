@@ -153,6 +153,8 @@ tmdbSearchTvUrl apiKey query = tmdbSearchTvUrlAt (T.pack tmdbApiBase) apiKey que
 data TmdbTvItem = TmdbTvItem
   { tvId           :: Int
   , tvName         :: Text
+  , tvOriginalName :: Maybe Text   -- ^ "original_name" (m66)
+  , tvOriginalLanguage :: Maybe Text -- ^ "original_language" (m66)
   , tvOverview     :: Maybe Text
   , tvFirstAirDate :: Maybe Text
   , tvVoteAverage  :: Maybe Double
@@ -164,6 +166,8 @@ instance FromJSON TmdbTvItem where
     TmdbTvItem
       <$> o .:  "id"
       <*> o .:  "name"
+      <*> o .:? "original_name"
+      <*> o .:? "original_language"
       <*> o .:? "overview"
       <*> o .:? "first_air_date"
       <*> o .:? "vote_average"
@@ -187,6 +191,8 @@ parseTmdbTvResults body = do
     [ TmdbResult
         { tmdbId          = tvId i
         , tmdbTitle       = tvName i
+        , tmdbOriginalTitle    = tvOriginalName i
+        , tmdbOriginalLanguage = tvOriginalLanguage i
         , tmdbOverview    = tvOverview i
         , tmdbReleaseYear = tvFirstAirDate i >>= releaseYear
         , tmdbVoteAverage = tvVoteAverage i

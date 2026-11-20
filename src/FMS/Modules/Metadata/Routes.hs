@@ -402,11 +402,17 @@ discoverSection typeName imgBase imgSize eres =
 
 -- | Pure (m26): map one TMDB hit to the Discover entry JSON
 -- (PascalCase): Id/Name/Type/ProductionYear/Overview/VoteAverage/PosterUrl
--- (full image URL when a poster_path is present, else null).
+-- (full image URL when a poster_path is present, else null). m66 also
+-- carries OriginalName/OriginalLanguage (TMDB original_title/original_name)
+-- so the client can search indexers in the ORIGINAL language too, not
+-- only the English display title (e.g. Pan's Labyrinth -> El laberinto
+-- del fauno).
 discoverEntry :: Text -> Text -> Text -> TmdbResult -> Value
 discoverEntry typeName imgBase imgSize r = object
   [ "Id"             .= T.pack (show (tmdbId r))
   , "Name"           .= tmdbTitle r
+  , "OriginalName"   .= tmdbOriginalTitle r
+  , "OriginalLanguage" .= tmdbOriginalLanguage r
   , "Type"           .= typeName
   , "ProductionYear" .= tmdbReleaseYear r
   , "Overview"       .= tmdbOverview r

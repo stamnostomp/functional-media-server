@@ -5,6 +5,7 @@ module FMS.Modules.Metadata.Api.Types
   , pickTmdbResult
   ) where
 
+import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
 import Data.Char (isDigit)
 import Data.Maybe (isJust)
@@ -20,6 +21,8 @@ import Text.Read (readMaybe)
 data TmdbResult = TmdbResult
   { tmdbId          :: Int          -- ^ TMDB's own movie id ("id")
   , tmdbTitle       :: Text         -- ^ "title" (movies) / "name" (tv, mapped)
+  , tmdbOriginalTitle    :: Maybe Text -- ^ "original_title" (movies) / "original_name" (tv): the title in the ORIGINAL language (m66; used to also search indexers in the original language)
+  , tmdbOriginalLanguage :: Maybe Text -- ^ "original_language" ("en", "es", ...; m66)
   , tmdbOverview    :: Maybe Text   -- ^ "overview" (often present, but optional)
   , tmdbReleaseYear :: Maybe Int    -- ^ year of "release_date"/"first_air_date" ("YYYY-MM-DD")
   , tmdbVoteAverage :: Maybe Double -- ^ "vote_average" (community rating 0-10)
@@ -30,6 +33,10 @@ instance FromJSON TmdbResult where
   parseJSON = withObject "TmdbResult" $ \o -> do
     rid      <- o .:  "id"
     title    <- o .:  "title"
+    -- m66: original_title (movies); tv payloads mapped onto this type
+    -- carry "original_name" instead -- accept either
+    orig     <- o .:? "original_title" <|> o .:? "original_name"
+    origLang <- o .:? "original_language"
     overview <- o .:? "overview"
     mDate    <- o .:? "release_date"
     vote     <- o .:? "vote_average"
@@ -37,6 +44,8 @@ instance FromJSON TmdbResult where
     pure TmdbResult
       { tmdbId          = rid
       , tmdbTitle       = title
+      , tmdbOriginalTitle    = orig
+      , tmdbOriginalLanguage = origLang
       , tmdbOverview    = overview
       , tmdbReleaseYear = mDate >>= releaseYear
       , tmdbVoteAverage = vote

@@ -19,6 +19,7 @@ module FMS.Modules.Metadata.Routes
   , unmatchedItems
   , tmdbResultToSearchHit
   , discoverPopularHandler
+  , discoverSearchHandler
   , discoverEntry
   , discoverSection
   , matchDownloaded
@@ -352,6 +353,37 @@ discoverPopularHandler _captures _req = do
       es <- liftIO (tmdbPopularTvAt base apiKey 1)
       forM_ (lefts' em) (\e -> logErr ("metadata: tmdb /movie/popular failed: " <> T.pack e))
       forM_ (lefts' es) (\e -> logErr ("metadata: tmdb /tv/popular failed: " <> T.pack e))
+      pure (jsonResponse (object
+        [ "Movies" .= discoverSection "Movie" imgBase imgSize em
+        , "Shows"  .= discoverSection "Series" imgBase imgSize es
+        ]))
+  where
+    lefts' (Left e) = [e]
+    lefts' (Right _) = []
+
+-- | @GET \/Discover\/Search?q=...@ — m59: TMDB movie + TV search for the
+-- Discover tab (type a query -> TMDB cards; click a card -> the UI searches
+-- the indexers for that title). Same response shape as /Discover/Popular:
+-- @{\"Movies\":[...],\"Shows\":[...]}@, at most 20 entries per section. No
+-- API key or empty query -> 200 with empty arrays; per-section failure ->
+-- empty array for that section only.
+discoverSearchHandler :: [(Text, Text)] -> Request -> AppM Response
+discoverSearchHandler _captures req = do
+  cfg <- asks envConfig
+  ms <- getMetadataSettings       -- m35: effective (saved) key
+  let apiKey  = msTmdbApiKey ms
+      base    = configTmdbBaseUrl cfg
+      imgBase = configTmdbImageBaseUrl cfg
+      imgSize = configTmdbImageSize cfg
+      qp      = queryParams (queryString req)
+      q       = fromMaybe "" (lookup "q" qp <|> lookup "query" qp)
+  if T.null apiKey || T.null q
+    then pure (jsonResponse (object ["Movies" .= ([] :: [Value]), "Shows" .= ([] :: [Value])]))
+    else do
+      em <- liftIO (tmdbSearchMovieAt base apiKey q)
+      es <- liftIO (tmdbSearchTvAt base apiKey q)
+      forM_ (lefts' em) (\e -> logErr ("metadata: tmdb search/movie failed: " <> T.pack e))
+      forM_ (lefts' es) (\e -> logErr ("metadata: tmdb search/tv failed: " <> T.pack e))
       pure (jsonResponse (object
         [ "Movies" .= discoverSection "Movie" imgBase imgSize em
         , "Shows"  .= discoverSection "Series" imgBase imgSize es

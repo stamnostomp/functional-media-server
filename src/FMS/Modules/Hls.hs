@@ -14,7 +14,7 @@ module FMS.Modules.Hls
   ) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (unless)
 import Control.Monad.Except (throwError, tryError)
 import Control.Monad.IO.Class (liftIO)
@@ -221,12 +221,17 @@ ensureHls cfg item = do
               liftIO (TIO.writeFile modeFile mode)
               logInfo ("hls: packaging item " <> itemId item <> " (" <> mode
                        <> ") into " <> T.pack dir)
-              liftIO $ forkIO $ do
-                _ <- runProcessBSTimeout packagingTimeoutSec
-                       "ffmpeg" (hlsArgsFor streams (itemPath item) m3u8)
-                releaseFfmpegSlot mRelease
-                _ <- try (removeDirectory lock) :: IO (Either IOException ())
-                pure ()
+              liftIO $ forkIO $
+                -- finally: even if the runner throws, the slot is freed
+                -- and the .starting lock removed so the next request can
+                -- retry instead of waiting forever (m71d)
+                (do _ <- runProcessBSTimeout packagingTimeoutSec
+                            "ffmpeg" (hlsArgsFor streams (itemPath item) m3u8)
+                    pure ())
+                `finally` do
+                  releaseFfmpegSlot mRelease
+                  _ <- try (removeDirectory lock) :: IO (Either IOException ())
+                  pure ()
               ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
               if ok
                 then pure m3u8

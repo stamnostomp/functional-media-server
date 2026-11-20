@@ -724,6 +724,8 @@ main = do
   check "hlsArgsFor hevc forces yuv420p"   True (pairFor hevcFile "-pix_fmt" "yuv420p")
   check "hlsArgsFor hevc keeps -c:a copy (aac source)" True (pairFor hevcFile "-c:a" "copy")
   check "hlsArgsFor opus re-encodes aac"   True (pairFor hevcOpus "-c:a" "aac")
+  check "hlsArgsFor re-encoded audio is stereo downmix (eac3->aac 5.1 is MSE-unsafe, m71)"
+    [True, True] [ pairFor hevcOpus "-ac" "2", pairFor hevcOpus "-ar" "48000" ]
   check "hlsArgsFor hevc still maps video+audio only" [True, True]
     [ pairFor hevcFile "-map" "0:v:0", pairFor hevcFile "-map" "0:a?" ]
 

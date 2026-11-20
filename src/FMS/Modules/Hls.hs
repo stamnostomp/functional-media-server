@@ -152,7 +152,11 @@ hlsArgsWith copyVideo copyAudio input outputM3u8 =
           , "-sc_threshold", "0" ]
     audioArgs
       | copyAudio = ["-c:a", "copy"]
-      | otherwise = ["-c:a", "aac", "-b:a", "160k"]
+      -- re-encode to stereo AAC-LC: MSE-safe in every browser. Keeping
+      -- 5.1 is not safe here -- ffmpeg's eac3->aac 5.1 re-encode emits a
+      -- broken ~10kbps stream that Chromium's SourceBuffer rejects
+      -- (bufferAppendError, readyState stuck at 0; verified m71)
+      | otherwise = ["-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "160k"]
 
 -- | How long the detached packaging ffmpeg may run (a remux always
 -- terminates; this is just a safety net so a hung ffmpeg cannot hold an

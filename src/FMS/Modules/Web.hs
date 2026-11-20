@@ -433,7 +433,7 @@ dashboardPageHtml = LBSC.pack (unlines
   , "function renderUsersTab(){"
   , "  api('/Users').then(function(us){"
   , "    el('users').innerHTML = '<table><tr><th>Id</th><th>Name</th><th>Admin</th><th>Enabled</th><th>Has password</th><th></th></tr>'"
-  , "      + (us||[]).map(function(u){ return '<tr><td>'+esc(u.Id)+'</td><td>'+esc(u.Name)+'</td><td>'+(u.IsAdministrator?'yes':'no')+'</td><td>'+(u.Enabled?'yes':'no')+'</td><td>'+(u.HasPassword?'yes':'no')+'</td><td><button class=&quot;btn btn-ghost&quot; data-uid=&quot;'+esc(u.Id)+'&quot; onclick=&quot;deleteUser(this.getAttribute('data-uid'))&quot;&gt;Delete</button></td></tr>'; }).join('')"
+  , "      + (us||[]).map(function(u){ return '<tr><td>'+esc(u.Id)+'</td><td>'+esc(u.Name)+'</td><td>'+(u.IsAdministrator?'yes':'no')+'</td><td>'+(u.Enabled?'yes':'no')+'</td><td>'+(u.HasPassword?'yes':'no')+'</td><td><button class=&quot;btn btn-ghost&quot; data-uid=&quot;'+esc(u.Id)+'&quot; onclick=&quot;deleteUser(this.dataset.uid)&quot;&gt;Delete</button></td></tr>'; }).join('')"
   , "      + '</table>';"
   , "  }).catch(showErr);"
   , "}"

@@ -8,6 +8,7 @@ module FMS.Modules.Requests.Routes
 
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
+import Data.List (isPrefixOf)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, asks)
@@ -24,9 +25,15 @@ import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
 import FMS.Core.Monad (AppError (..), AppM, MonadLog (..), envConfig, runApp)
 import FMS.Modules.Indexers (resolveReleaseBytes)
 import FMS.Core.Query (queryParams)
+import FMS.Core.Types.Config (Config (..))
+import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
+import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (scanDirectory)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, tmdbResultToMetadata)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), msTmdbApiKey)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
 import FMS.Modules.AnnounceTrackers (currentAnnounceTrackers)
 import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
@@ -58,6 +65,7 @@ requestsRoutes =
 data CreateRequest = CreateRequest
   { crTitle    :: Text
   , crYear     :: Maybe Int
+  , crTmdbId   :: Maybe Int      -- ^ m68: TMDB id from the Discover card
   , crType     :: Text
   , crQuery    :: Maybe Text
   , crSizeBytes :: Maybe Integer
@@ -74,6 +82,7 @@ instance FromJSON CreateRequest where
     CreateRequest
       <$> o .:  "Title"
       <*> o .:? "Year"
+      <*> o .:? "TmdbId"
       <*> o .:? "Type" .!= "movie"
       <*> o .:? "Query"
       <*> o .:? "SizeBytes"
@@ -104,7 +113,49 @@ markImported statuses reqs = do
   where
     markOne r = do
       _ <- setRequestStatus (reqId r) Imported Nothing
+      applyRequestTmdb r   -- m68: resolve metadata from the request's TMDB id when present
       pure ()
+
+-- | m68: when a request carries a TMDB id (Discover card), the content is
+-- known exactly -- set the imported library item's metadata straight from
+-- @\/movie\/<id>@, no name sanitizing/searching. When there is no id (or
+-- the fetch fails) nothing happens here and the normal scan-time
+-- name-based TMDB refresh remains as the fallback.
+applyRequestTmdb :: Request -> AppM ()
+applyRequestTmdb r =
+  case reqTmdbId r of
+    Nothing -> pure ()
+    Just tid
+      | T.toLower (reqMediaType r) == "tv" -> pure ()  -- episode/season requests keep the name-based path
+      | otherwise -> do
+          cfg <- asks envConfig
+          ms <- getMetadataSettings
+          if T.null (msTmdbApiKey ms)
+            then pure ()
+            else do
+              s <- getRequestSettings
+              let dir = T.unpack (rsDownloadDir s)
+              items <- listItems
+              let cands = [ i | i <- items
+                      , not (null dir)
+                      , dir `isPrefixOf` itemPath i
+                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [itemPath i] ]
+              case cands of
+                [] -> pure ()
+                (i : _) -> do
+                  eres <- liftIO (tmdbMovieByIdAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+                  case eres of
+                    Left err ->
+                      logWarn ("requests: tmdb /movie/" <> T.pack (show tid)
+                               <> " failed: " <> T.pack err)
+                    Right top -> do
+                      dres <- liftIO (tmdbMovieDetailsAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+                      let (gs, kws) = either (const ([], [])) id dres
+                          fresh = (tmdbResultToMetadata top)
+                            { metaGenres = gs, metaKeywords = kws }
+                      setMetadata (itemId i) fresh
+                      logInfo ("requests: import metadata for \"" <> itemTitle i
+                               <> "\" set from TMDB id " <> T.pack (show tid))
 
 -- | m38: fetch live Deluge torrent statuses ONCE per read (shared by
 -- 'markImported' and 'attachLiveProgress'); graceful [] on any failure.
@@ -213,6 +264,7 @@ createRequestHandler _captures req = do
             , reqUserName = uname
             , reqTitle = crTitle cr
             , reqYear = crYear cr
+            , reqTmdbId = crTmdbId cr   -- m68
             , reqMediaType = crType cr
             , reqQuery = maybe (crTitle cr) id (crQuery cr)
             , reqStatus = if autoAppr then Approved else Pending

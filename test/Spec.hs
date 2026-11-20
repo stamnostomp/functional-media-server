@@ -112,7 +112,9 @@ import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.AnnounceTrackers (parseTrackerList)
 import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
-import FMS.Modules.Requests.Routes (attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
+import Data.Aeson.Types (parseEither)
+import FMS.Modules.Requests.Persistence (requestFromPersist, requestToPersist)
+import FMS.Modules.Requests.Routes (CreateRequest (..), attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
 import FMS.Modules.Trackers.Torznab (decompressBody, jackettSearchUrl, parseTorznabResults)
 import qualified Codec.Compression.GZip as GZip
@@ -178,6 +180,7 @@ import FMS.Modules.Metadata.Api.Tmdb
   , tmdbSearchUrl
   , tmdbSeasonUrlAt
   , tmdbTvDetailsUrlAt
+  , tmdbMovieByIdUrlAt
   , tmdbMovieDetailsUrlAt
   , tmdbTvDetailsKwUrlAt
   , parseTmdbGenresKeywords
@@ -3963,7 +3966,7 @@ main = do
     [True, True, True, False, False, False]
   let mkReq t st = Request
         { reqId = "r1", reqUserId = "u1", reqUserName = "bob", reqTitle = t
-        , reqYear = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
+        , reqYear = Nothing, reqTmdbId = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
         , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
         , reqSourceUrl = Nothing, reqMagnet = Nothing, reqDownloadUrl = Nothing
         , reqCreatedAt = reqT0, reqUpdatedAt = reqT0
@@ -3984,10 +3987,28 @@ main = do
     reqKeys
     [ "ApprovedBy", "CreatedAt", "DownloadDir", "DownloadUrl", "Error", "Id", "Magnet"
     , "MediaType", "Progress", "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
-    , "Status", "Title", "TorrentState", "UpdatedAt", "UserId", "UserName", "Year" ]
+    , "Status", "Title", "TmdbId", "TorrentState", "UpdatedAt", "UserId", "UserName", "Year" ]
   check "Request JSON roundtrip (PascalCase)"
     [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
     [True]
+  -- m68: requests carry the TMDB id from the Discover card so metadata can
+  -- be resolved by id (no name sanitizing); name search stays the fallback
+  let r68 = (mkReq "Pan's Labyrinth" Pending) { reqTmdbId = Just 680 }
+      fromPersist v = either (const Nothing) reqTmdbId (parseEither requestFromPersist v)
+  check "m68: Request API JSON roundtrip keeps TmdbId, absent -> Nothing"
+    [ reqTmdbId <$> (Aeson.decode (Aeson.encode r68) :: Maybe Request)
+    , reqTmdbId <$> (Aeson.decode (Aeson.encode (mkReq "X" Pending)) :: Maybe Request) ]
+    [ Just (Just 680), Just Nothing ]
+  check "m68: persist roundtrip keeps tmdbId (lowercase key), old files without it load as Nothing"
+    [ fromPersist (requestToPersist r68), fromPersist (requestToPersist (mkReq "Y" Pending)) ]
+    [ Just 680, Nothing ]
+  check "m68: CreateRequest parses optional TmdbId"
+    [ (crTmdbId <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"Pan's Labyrinth\",\"TmdbId\":680}") :: Either String CreateRequest))
+    , (crTmdbId <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"X\"}") :: Either String CreateRequest)) ]
+    [ Right (Just 680), Right Nothing ]
+  check "m68: tmdbMovieByIdUrlAt builds plain /movie/<id> (no keywords append)"
+    (tmdbMovieByIdUrlAt "http://127.0.0.1:8949/3/" "K" 680)
+    "http://127.0.0.1:8949/3/movie/680?api_key=K"
   check "Request Status serializes as the constructor name string"
     [ case reqJson of
         Aeson.Object o -> KeyMap.lookup (Key.fromText "Status") o

@@ -10,6 +10,7 @@ module FMS.Modules.Metadata.Monad
   , getMetadataSettings
   , updateMetadataSettings
   , refreshFromTmdb
+  , tmdbResultToMetadata
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)

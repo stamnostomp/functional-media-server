@@ -55,6 +55,7 @@ requestToPersist r = object
   , "userName"      .= reqUserName r
   , "title"         .= reqTitle r
   , "year"          .= reqYear r
+  , "tmdbId"        .= reqTmdbId r   -- m68
   , "mediaType"     .= reqMediaType r
   , "query"         .= reqQuery r
   , "status"        .= reqStatus r
@@ -79,6 +80,7 @@ requestFromPersist = withObject "request" $ \o ->
     <*> o .:  "userName"
     <*> o .:  "title"
     <*> o .:? "year"
+    <*> o .:? "tmdbId"        -- m68; old files without it load fine
     <*> o .:? "mediaType"     .!= "movie"
     <*> o .:? "query"         .!= ""
     <*> o .:  "status"

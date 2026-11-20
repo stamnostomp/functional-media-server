@@ -31,6 +31,8 @@ module FMS.Modules.Metadata.Api.Tmdb
   , parseTmdbGenresKeywords
   , tmdbMovieDetailsAt
   , tmdbTvDetailsKwAt
+  , tmdbMovieByIdUrlAt
+  , tmdbMovieByIdAt
   ) where
 
 import Control.Exception (SomeException, try)
@@ -366,6 +368,22 @@ tmdbSeasonAt base apiKey tid n = do
 
 -- Milestone 53a: detail endpoints with genres + keywords
 -- (@append_to_response=keywords@).
+
+-- | m68: @\/movie\/<id>?api_key=<key>@ URL (pure) — the plain detail
+-- endpoint, used to resolve a KNOWN TMDB id (e.g. carried on a request
+-- from the Discover card) without any name-based search.
+tmdbMovieByIdUrlAt :: Text -> Text -> Int -> String
+tmdbMovieByIdUrlAt base apiKey mid =
+  T.unpack (T.dropWhileEnd (== '/') base) ++ "/movie/" ++ show mid
+    ++ "?api_key=" ++ T.unpack apiKey
+
+-- | m68: fetch @\/movie\/<id>@ and parse it as one 'TmdbResult' (the movie
+-- detail payload has the same fields the search parser reads). Never
+-- throws; transport/non-200/parse errors are 'Left'.
+tmdbMovieByIdAt :: Text -> Text -> Int -> IO (Either String TmdbResult)
+tmdbMovieByIdAt base apiKey mid = do
+  eres <- tmdbFetch (tmdbMovieByIdUrlAt base apiKey mid)
+  pure (Aeson.eitherDecode =<< eres)
 
 -- | @\/movie\/<id>?api_key=<key>&append_to_response=keywords@ URL (pure).
 tmdbMovieDetailsUrlAt :: Text -> Text -> Int -> String

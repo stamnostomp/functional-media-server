@@ -70,6 +70,7 @@ data Request = Request
   , reqUserName     :: !Text
   , reqTitle        :: !Text
   , reqYear         :: !(Maybe Int)
+  , reqTmdbId       :: !(Maybe Int)     -- ^ m68: TMDB id from the Discover card, so the content is known WITHOUT name-sanitizing; metadata is resolved from this id first, name-search is the fallback
   , reqMediaType    :: !Text            -- ^ "movie" or "tv"
   , reqQuery        :: !Text
   , reqStatus       :: !RequestStatus
@@ -96,6 +97,7 @@ instance ToJSON Request where
     , "UserName"     .= reqUserName r
     , "Title"        .= reqTitle r
     , "Year"         .= reqYear r
+    , "TmdbId"       .= reqTmdbId r
     , "MediaType"    .= reqMediaType r
     , "Query"        .= reqQuery r
     , "Status"       .= reqStatus r
@@ -122,6 +124,7 @@ instance FromJSON Request where
       <*> o .:  "UserName"
       <*> o .:  "Title"
       <*> o .:? "Year"
+      <*> o .:? "TmdbId"
       <*> o .:? "MediaType"    .!= "movie"
       <*> o .:? "Query"        .!= ""
       <*> o .:  "Status"

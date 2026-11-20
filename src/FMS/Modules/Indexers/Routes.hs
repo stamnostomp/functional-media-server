@@ -22,7 +22,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
 import qualified Data.Text.Encoding as TE
-import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseStatus, responseTimeoutMicro)
+import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseHeaders, responseStatus, responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (HeaderName, ResponseHeaders, hCookie, status200, status201, status204, statusCode)
@@ -58,7 +58,7 @@ import FMS.Modules.Indexers.Types
   , validResponseFormat
   )
 import FMS.Modules.Requests.Push (slugify)
-import FMS.Modules.Trackers.Torznab (fetchUrl, parseTorznabResults)
+import FMS.Modules.Trackers.Torznab (decompressBody, fetchUrl, parseTorznabResults)
 import FMS.Modules.Trackers.Types (Release (..), dedupeReleases, sortReleasesBySeeders)
 
 jsonCT :: ResponseHeaders
@@ -394,7 +394,8 @@ fetchUrlBytes extraHeaders micros url = do
       pure (Left ("fetch failed: " ++ show e))
     Right resp
       | statusCode (responseStatus resp) == 200 ->
-          pure (Right (LBS.toStrict (responseBody resp)))
+          -- m67: decode gzip/deflate when the indexer sent it compressed
+          pure (Right (LBS.toStrict (decompressBody (responseHeaders resp) (responseBody resp))))
       | otherwise ->
           pure (Left ("fetch returned HTTP " ++ show (statusCode (responseStatus resp))))
 

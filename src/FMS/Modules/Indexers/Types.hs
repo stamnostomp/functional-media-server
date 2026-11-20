@@ -28,6 +28,7 @@ import Data.Char (toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBSC
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -226,15 +227,30 @@ torrentDaySearchUrl idx q =
   where
     cats = indexerCategories idx
 
+-- | m67: TorrentDay emits the INVALID JSON escape @\\'@ for apostrophes in
+-- names (e.g. @Pan\\'s Labyrinth@), which makes Aeson.decode reject the
+-- WHOLE array -- every search whose results contain an apostrophe silently
+-- yields []. Rewrite @\\'@ to @'@ before decoding (strictly invalid JSON
+-- anyway, so this only ever repairs).
+sanitizeTorrentDayJson :: LBS.ByteString -> LBS.ByteString
+sanitizeTorrentDayJson = LBS.fromStrict . go . LBS.toStrict
+  where
+    pat = BSC.pack "\\'"  -- the 2-byte sequence backslash + quote
+    go bs = case BS.breakSubstring pat bs of
+      (pre, rest)
+        | BS.null rest -> pre
+        | otherwise    -> pre <> BSC.pack "'" <> go (BS.drop (BS.length pat) rest)
+
 -- | Pure: parse a TorrentDay t.json response (a JSON array of rows) into
 -- releases. Each row looks like
--- @{"name":"...","t":7,"size":2000000000,"seeders":9,"c":1,"ctime":...}@;
+-- @{\"name\":\"...\",\"t\":7,\"size\":2000000000,\"seeders\":9,\"c\":1,\"ctime\":...}@;
 -- the .torrent download URL is derived as
 -- @<base>/download.php/<t>/<t>.torrent@. Missing/unknown fields are
--- tolerated; a non-array body yields [].
+-- tolerated; a non-array body yields []. m67: the body is sanitized
+-- first ('sanitizeTorrentDayJson').
 parseTorrentDayJson :: Text -> LBS.ByteString -> [Release]
 parseTorrentDayJson baseUrl bs =
-  case Aeson.decode bs of
+  case Aeson.decode (sanitizeTorrentDayJson bs) of
     Just (Aeson.Array rows) -> mapMaybeRow rows
     _                       -> []
   where

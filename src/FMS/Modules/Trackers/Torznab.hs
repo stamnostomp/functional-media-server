@@ -3,10 +3,13 @@ module FMS.Modules.Trackers.Torznab
   , parseTorznabResults
   , jackettSearch
   , fetchUrl
+  , decompressBody
   ) where
 
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
+import qualified Codec.Compression.GZip as GZip
+import qualified Codec.Compression.Zlib as Zlib
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (listToMaybe, mapMaybe)
@@ -14,10 +17,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Read (decimal)
-import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseStatus, responseTimeoutMicro)
+import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseHeaders, responseStatus, responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Types (Header, statusCode, urlEncode)
+import Network.HTTP.Types (Header, ResponseHeaders, hContentEncoding, statusCode, urlEncode)
 import Text.XML (parseLBS)
 import qualified Text.XML as XML
 import Text.XML.Cursor (Cursor, attribute, child, content, descendant, fromDocument, laxElement)
@@ -95,12 +98,35 @@ itemToRelease c =
       Right (n, rest) | T.null rest -> Just (fromIntegral (n :: Integer))
       _ -> Nothing
 
+-- | m67: decode the response body when it is STILL compressed. Note
+-- http-client already auto-decompresses gzip when it advertised it (but
+-- leaves the stale @Content-Encoding@ header in place), so the header
+-- alone is not enough -- check the magic bytes too: a body starting
+-- @\\x1f\\x8b@ is gzip, @\\x78@ is zlib/deflate; anything else is passed
+-- through raw. Without this, indexers that always gzip (TorrentDay behind
+-- lighttpd) when the client did NOT ask for gzip silently parse to @[]@.
+-- Pure, exported for tests.
+decompressBody :: ResponseHeaders -> LBS.ByteString -> LBS.ByteString
+decompressBody hs body =
+  case lookup hContentEncoding hs of
+    Just enc
+      | enc == BSC.pack "gzip",    isGzip  body -> GZip.decompress body
+      | enc == BSC.pack "deflate", isZlib  body -> Zlib.decompress body
+      | otherwise                                -> body
+    Nothing -> body
+  where
+    isGzip b = LBS.take 2 b == LBS.pack [0x1f, 0x8b]
+    isZlib b = case LBS.uncons b of
+      Just (0x78, _) -> True
+      _              -> False
+
 -- | IO: GET a URL with extra request headers (e.g. a Cookie for cookie-auth
 -- indexers, m23) and a timeout in microseconds. Returns the HTTP status
--- code and body; 'Left' only on transport errors. Redirects are followed
--- by http-client, so a cookie-less indexer that redirects to login.php
--- still ends at a non-200 or a login page -- callers treat non-200 as
--- "not logged in".
+-- code and body (m67: transparently decompressed when the server sent a
+-- gzip/deflate Content-Encoding); 'Left' only on transport errors.
+-- Redirects are followed by http-client, so a cookie-less indexer that
+-- redirects to login.php still ends at a non-200 or a login page --
+-- callers treat non-200 as "not logged in".
 fetchUrl :: [Header] -> Int -> String -> IO (Either String (Int, LBS.ByteString))
 fetchUrl extraHeaders micros url = do
   manager <- newManager settings
@@ -111,7 +137,8 @@ fetchUrl extraHeaders micros url = do
     Left (e :: SomeException) ->
       pure (Left ("request failed: " ++ show e))
     Right resp ->
-      pure (Right (statusCode (responseStatus resp), responseBody resp))
+      pure (Right (statusCode (responseStatus resp)
+                  , decompressBody (responseHeaders resp) (responseBody resp)))
   where
     settings = tlsManagerSettings
       { managerResponseTimeout = responseTimeoutMicro micros

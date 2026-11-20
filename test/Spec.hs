@@ -114,7 +114,10 @@ import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBo
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import FMS.Modules.Requests.Routes (attachLiveProgress, fetchTorrentStatuses, markImported, requestsRoutes)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, emptySettingsPatch, isActiveStatus, mergeSettings, normalizeTitle, settingsFromConfig, settingsPublicJson)
-import FMS.Modules.Trackers.Torznab (jackettSearchUrl, parseTorznabResults)
+import FMS.Modules.Trackers.Torznab (decompressBody, jackettSearchUrl, parseTorznabResults)
+import qualified Codec.Compression.GZip as GZip
+import qualified Codec.Compression.Zlib as Zlib
+import Network.HTTP.Types (hContentEncoding)
 import FMS.Modules.Trackers.Types (Release (..), dedupeReleases, sortReleasesBySeeders, Tracker (..), trackerPublicJson)
 import FMS.Modules.Indexers.Types
   ( Indexer (..)
@@ -4012,6 +4015,25 @@ main = do
   check "parseTorznabResults: item download urls"
     [ [Just "http://tracker/dl/1.torrent", Nothing] ] [ relDownloadUrl <$> parsed ]
   check "parseTorznabResults: non-XML -> []" [parseTorznabResults (LBSC.pack "not xml")] [[]]
+  -- m67: decompressBody -- indexers that always gzip (TorrentDay/lighttpd)
+  -- must not silently parse to []; gzip/deflate decoded, else raw
+  let gzBody = GZip.compress (LBSC.pack "[{\"name\":\"X\"}]")
+      dfBody = Zlib.compress (LBSC.pack "[{\"name\":\"X\"}]")
+      rawBody = LBSC.pack "[{\"name\":\"X\"}]"
+      gzHdrs = [(hContentEncoding, BSC.pack "gzip")]
+      dfHdrs = [(hContentEncoding, BSC.pack "deflate")]
+  check "m67 decompressBody: gzip header -> gunzipped"
+    (LBSC.unpack rawBody) (LBSC.unpack (decompressBody gzHdrs gzBody))
+  check "m67 decompressBody: deflate header -> inflated"
+    (LBSC.unpack rawBody) (LBSC.unpack (decompressBody dfHdrs dfBody))
+  check "m67 decompressBody: no/unknown header -> raw passthrough"
+    [ LBSC.unpack rawBody, LBSC.unpack rawBody ]
+    [ LBSC.unpack (decompressBody [] rawBody)
+    , LBSC.unpack (decompressBody [(hContentEncoding, BSC.pack "br")] rawBody) ]
+  -- http-client auto-decompresses but leaves a stale gzip header: the body
+  -- no longer has the magic bytes, so it must pass through UNtouched
+  check "m67 decompressBody: stale gzip header + plain body -> passthrough (no double-decompress)"
+    (LBSC.unpack rawBody) (LBSC.unpack (decompressBody gzHdrs rawBody))
   check "jackettSearchUrl: movie/tv cat + encoding"
     [ jackettSearchUrl "http://j:9117/" "jackett" "KEY" "the matrix" (Just "movie")
     , jackettSearchUrl "http://j:9117" "jackett" "KEY" "the matrix" (Just "tv")
@@ -4805,6 +4827,19 @@ main = do
     [ parseTorrentDayJson "http://td/" (LBSC.pack "{\"a\":1}")
     , parseTorrentDayJson "http://td/" (LBSC.pack "nope") ]
     [ [], [] ]
+  -- m67: TorrentDay emits the invalid JSON escape \' for apostrophes, which
+  -- used to make Aeson.decode reject the whole array (Pan's Labyrinth -> 0
+  -- results). The body is sanitized before decoding.
+  let tdApos = LBSC.pack "[{\"name\":\"El laberinto del fauno AKA Pan\\'s Labyrinth 2006 2160p\",\"t\":9568843,\"size\":54803193486,\"seeders\":8}]"
+      tdAposParsed = parseTorrentDayJson "http://td/" tdApos
+  check "m67 parseTorrentDayJson: invalid \\' escape repaired, row still parsed"
+    [ ["El laberinto del fauno AKA Pan's Labyrinth 2006 2160p"] ]
+    [ map relTitle tdAposParsed ]
+  check "m67 parseTorrentDayJson: sanitized body still yields seeders"
+    [ map relSeeders tdAposParsed ] [ [Just 8] ]
+  check "m67 parseTorrentDayJson: sanitized body still yields download url"
+    [ map relDownloadUrl tdAposParsed ]
+    [ [Just "http://td/download.php/9568843/9568843.torrent"] ]
   check "validAuthType / validResponseFormat matrices"
     [ validAuthType "apikey", validAuthType "cookie", validAuthType "COOKIE", validAuthType "x"
     , validResponseFormat "torznab", validResponseFormat "torrentday-json", validResponseFormat "xml" ]

@@ -46,6 +46,7 @@ import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client
   ( managerResponseTimeout
   , responseBody
+  , responseHeaders
   , responseStatus
   , responseTimeoutMicro
   )
@@ -54,6 +55,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (statusCode, urlEncode)
 
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
+import FMS.Modules.Trackers.Torznab (decompressBody)
 
 -- | Base of the TMDB v3 API.
 tmdbApiBase :: String
@@ -134,7 +136,8 @@ tmdbFetch url = do
           pure (Left ("tmdb returned HTTP " ++ show (statusCode (responseStatus resp))
                       ++ " for " ++ url))
       | otherwise ->
-          pure (Right (responseBody resp))
+          -- m67: decode gzip/deflate when TMDB sent it compressed
+          pure (Right (decompressBody (responseHeaders resp) (responseBody resp)))
   where
     settings = tlsManagerSettings
       { managerResponseTimeout = responseTimeoutMicro tmdbTimeoutMicros

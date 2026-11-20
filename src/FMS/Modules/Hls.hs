@@ -100,7 +100,7 @@ hlsModeLabel streams =
   (if maybe True (`elem` hlsBrowserSafeVideo) (hlsVideoCodec streams)
      then "v-copy" else "v-x264")
   <> "/" <>
-  (if hlsAudioNeedsAac streams then "a-aac" else "a-copy")
+  (if hlsAudioNeedsAac streams then "a-aac-stereo" else "a-copy")
 
 -- | The ffmpeg argument list for progressive HLS packaging of @input@
 -- into @outputM3u8@ with stream copy (a pure remux). Pure so it is

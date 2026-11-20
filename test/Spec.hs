@@ -716,7 +716,7 @@ main = do
   check "hlsVideoCodec finds first video codec" (Just "hevc") (hlsVideoCodec hevcFile)
   check "hlsModeLabel h264/aac is v-copy/a-copy" "v-copy/a-copy" (hlsModeLabel h264File)
   check "hlsModeLabel hevc/aac is v-x264/a-copy" "v-x264/a-copy" (hlsModeLabel hevcFile)
-  check "hlsModeLabel hevc/opus is v-x264/a-aac" "v-x264/a-aac" (hlsModeLabel hevcOpus)
+  check "hlsModeLabel hevc/opus is v-x264/a-aac" "v-x264/a-aac-stereo" (hlsModeLabel hevcOpus)
   check "hlsAudioNeedsAac opus" True (hlsAudioNeedsAac hevcOpus)
   check "hlsAudioNeedsAac aac"  False (hlsAudioNeedsAac h264File)
   check "hlsArgsFor h264 keeps -c:v copy"  True (pairFor h264File "-c:v" "copy")

@@ -4343,6 +4343,11 @@ main = do
     , cleanTitleForProvider "Movie (Extended Edition) 2010"
     , cleanTitleForProvider "Amelie" ]
     [ ("The Movie Returns", Just 2001), ("a b c", Nothing), ("Movie", Just 2010), ("Amelie", Nothing) ]
+  check "m64 cleanTitleForProvider: trailing lowercase scene group dropped when a year is present"
+    [ cleanTitleForProvider "godzilla.minus.zero.2026.1080p.cam.x264-cinemacity"
+    , cleanTitleForProvider "some.movie.2020.1080p.web.h264-lama"
+    , cleanTitleForProvider "godzilla-minus-zero" ]  -- no year: conservative, kept
+    [ ("godzilla minus zero", Just 2026), ("some movie", Just 2020), ("godzilla minus zero", Nothing) ]
   check "m36 cleanTitleForProvider: already-clean title unchanged, out-of-range year token dropped as pure digit (m39)"
     [ cleanTitleForProvider "Fight Club"
     , cleanTitleForProvider "Movie 1850 Tag" ]

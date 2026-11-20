@@ -7,6 +7,7 @@ module FMS.Modules.Metadata.Api.Types
 
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
 import Data.Char (isDigit)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -129,9 +130,19 @@ cleanTitleForProvider raw =
         in length letters >= 2
            && (all (\c -> not (c >= 'a' && c <= 'z')) letters
                || any (\c -> c >= 'A' && c <= 'Z') (drop 1 letters))
+      -- m64: a trailing all-lowercase alphabetic token of 4-12 chars is a
+      -- scene group (cinemacity, lama, ...) when a year was found -- real
+      -- titles ending in such a word after the year are rare, and the
+      -- group otherwise poisons the provider query ("godzilla minus zero
+      -- cinemacity" -> no TMDB hit). Without a year we stay conservative.
+      isLowerGroup t =
+        let ls = T.unpack t
+        in length ls >= 4 && length ls <= 12 && all (\c -> c >= 'a' && c <= 'z') ls
       dropTrailing ts = case reverse ts of
         (t : rest)
-          | isGroupTok t || maybe False (== t) dashGroup -> reverse rest
+          | isGroupTok t
+            || (isJust mYear && isLowerGroup t)
+            || maybe False (== t) dashGroup -> reverse rest
         _ -> ts
       toks3 = dropTrailing toks2d
       clean = T.unwords toks3

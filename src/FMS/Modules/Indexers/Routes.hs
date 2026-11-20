@@ -19,6 +19,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.List (partition)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Text.Read (readMaybe)
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (managerResponseTimeout, requestHeaders, responseBody, responseStatus, responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
@@ -44,6 +45,7 @@ import FMS.Modules.Indexers.Types
   , indexerFullJson
   , indexerPublicJson
   , indexerSearchUrl
+  , indexerSearchUrlExtra
   , parseTorrentDayJson
   , torrentDaySearchUrl
   , validAuthType
@@ -193,8 +195,10 @@ setEnabledHandler enabled captures req = do
         Just i  -> pure (jsonResponse (indexerFullJson i))
         Nothing -> throwError (NotFound ("no indexer with id " <> iid))
 
--- | @GET /Indexers/Search?q=&type=movie|tv&indexerId=@ — any authenticated
--- user. Queries all enabled indexers (or just @indexerId@ when given) in
+-- | @GET /Indexers/Search?q=&type=movie|tv&indexerId=&season=&ep=@ — any
+-- authenticated user. @season@/@ep@ (m60) are forwarded to torznab
+-- indexers for episode / season-pack searches. Queries all enabled
+-- indexers (or just @indexerId@ when given) in
 -- parallel, tolerating per-indexer failures (recorded in "Errors").
 -- Results carry a PROXIED DownloadUrl (@/Indexers/<id>/Download?r=..@),
 -- never the raw indexer link (which embeds the apikey).
@@ -206,6 +210,11 @@ searchHandler _captures req = do
     _ -> throwError (BadRequest "missing q parameter")
   let mType = lookup "type" qparams
       mIndexerId = lookup "indexerid" qparams
+      -- m60: optional torznab season/ep params (episode / season-pack
+      -- searches from the Discover tab); only well-formed ints pass through
+      extras =
+        [ (k, v) | k <- ["season", "ep"], Just v <- [lookup k qparams]
+                 , maybe False (const True) (readMaybe (T.unpack v) :: Maybe Int) ]
   allIndexers <- listIndexers
   selected <- case mIndexerId of
     Just iid ->
@@ -217,7 +226,7 @@ searchHandler _captures req = do
     Nothing -> pure (filter indexerEnabled allIndexers)
   perIndexer <- liftIO (mapConcurrently
     (\i -> do
-      eres <- searchIndexer i mType q
+      eres <- searchIndexer i mType q extras
       pure (i, eres))
     selected)
   let (okPairs, errPairs) = partition (\(_, e) -> either (const False) (const True) e) perIndexer
@@ -312,7 +321,7 @@ testIndexerHandler captures req = do
   case m of
     Nothing -> throwError (NotFound ("no indexer with id " <> iid))
     Just idx -> do
-      eres <- liftIO (searchIndexer idx (Just "movie") "test")
+      eres <- liftIO (searchIndexer idx (Just "movie") "test" [])
       let (ok, mErr) = case eres of
             Right _   -> (True, Nothing)
             Left msg  -> (False, Just (T.pack msg))
@@ -369,13 +378,13 @@ cookieHeaders idx =
 -- t.json goes to @/t.json?<cats>;q=...@ and is parsed as JSON. Cookie
 -- auth sends the Cookie header (and omits the apikey param). A non-200
 -- response on a cookie indexer is reported as "not logged in".
-searchIndexer :: Indexer -> Maybe Text -> Text -> IO (Either String [Release])
-searchIndexer idx mType q = do
+searchIndexer :: Indexer -> Maybe Text -> Text -> [(Text, Text)] -> IO (Either String [Release])
+searchIndexer idx mType q extras = do
   let headers = [ (hCookie, TE.encodeUtf8 c) | ("Cookie", c) <- indexerCookieHeader idx ]
       isJson = indexerResponseFormat idx == "torrentday-json"
       url = if isJson
               then torrentDaySearchUrl idx q
-              else indexerSearchUrl idx mType q
+              else indexerSearchUrlExtra idx mType q extras
   eres <- fetchUrl headers 10000000 url
   case eres of
     Left err -> pure (Left err)

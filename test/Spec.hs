@@ -125,6 +125,7 @@ import FMS.Modules.Indexers.Types
   , indexerCookieHeader
   , indexerPublicJson
   , indexerSearchUrl
+  , indexerSearchUrlExtra
   , parseTorrentDayJson
   , torrentDaySearchUrl
   , validAuthType
@@ -4692,6 +4693,9 @@ main = do
     , indexerSearchUrl (idx { indexerSearchPath = "/torznab" }) Nothing "x" ]
     [ "http://127.0.0.1:9117/api?t=search&q=the%20matrix&cat=2000,5000"
     , "http://127.0.0.1:9117/torznab?t=search&q=x&apikey=SECRET&cat=2000,5000" ]
+  check "m60: indexerSearchUrlExtra appends encoded season/ep params"
+    (indexerSearchUrlExtra idx (Just "tv") "family guy s01e01" [("season", "1"), ("ep", "1")])
+    (indexerSearchUrl idx (Just "tv") "family guy s01e01" ++ "&season=1&ep=1")
   check "torrentDaySearchUrl: semicolon cats + encoded q, empty cats"
     [ torrentDaySearchUrl idx "loop movie", torrentDaySearchUrl (idx { indexerCategories = [] }) "a b" ]
     [ "http://127.0.0.1:9117/t.json?2000;5000;q=loop%20movie", "http://127.0.0.1:9117/t.json?q=a%20b" ]

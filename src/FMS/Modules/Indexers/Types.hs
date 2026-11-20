@@ -3,6 +3,7 @@ module FMS.Modules.Indexers.Types
   , indexerFullJson
   , indexerPublicJson
   , indexerSearchUrl
+  , indexerSearchUrlExtra
   , torrentDaySearchUrl
   , parseTorrentDayJson
   , categoriesParam
@@ -192,11 +193,19 @@ categoriesParam cats mType =
 -- 'indexerCookieHeader'). @cat@ is dropped for newznab.
 indexerSearchUrl :: Indexer -> Maybe Text -> Text -> String
 indexerSearchUrl idx mType q =
+  indexerSearchUrlExtra idx mType q []
+
+-- | m60: like 'indexerSearchUrl' but appends extra torznab params
+-- (@season@, @ep@) when present — used for episode / season-pack
+-- searches from the Discover tab. Keys/values are percent-encoded.
+indexerSearchUrlExtra :: Indexer -> Maybe Text -> Text -> [(Text, Text)] -> String
+indexerSearchUrlExtra idx mType q extras =
   T.unpack (T.dropWhileEnd (== '/') (indexerBaseUrl idx))
     ++ T.unpack (indexerSearchPath idx)
     ++ "?t=search&q=" ++ T.unpack (urlEncodeText q)
     ++ keyPart
     ++ catPart
+    ++ concatMap (\(k, v) -> "&" ++ T.unpack k ++ "=" ++ T.unpack (urlEncodeText v)) extras
   where
     keyPart
       | indexerAuthType idx == "cookie" = ""

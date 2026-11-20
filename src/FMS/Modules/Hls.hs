@@ -4,10 +4,11 @@ module FMS.Modules.Hls
   , hlsDirFor
   , ensureHls
   , rewritePlaylistSegments
+  , playlistHasSegments
   ) where
 
-import Control.Exception (bracket_)
-import Control.Monad (unless)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (IOException, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
@@ -21,13 +22,12 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseLBS)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.Exit (ExitCode(..))
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, removeDirectory)
 import System.FilePath ((</>), dropFileName)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), acquireFfmpegSlot, envConfig, releaseFfmpegSlot)
-import FMS.Core.Process (runProcessBSTimeout, showBS)
+import FMS.Core.Process (runProcessBSTimeout)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Auth.Monad (getItemWithAccess)
@@ -55,55 +55,113 @@ hlsModule = Module
       ]
   }
 
--- | The ffmpeg argument list for HLS VOD packaging of @input@ into
--- @outputM3u8@. Pure so it is unit-testable: stream-copy the codecs
--- (packaging is a remux, no re-encode), cut on 4-second boundaries, write
--- a VOD playlist (complete, with @#EXT-X-ENDLIST@), and place the
--- MPEG-TS segments next to the playlist as @seg%03d.ts@.
+-- | The ffmpeg argument list for progressive HLS packaging of @input@
+-- into @outputM3u8@. Pure so it is unit-testable: stream-copy the codecs
+-- (packaging is a remux, no re-encode), cut on ~4-second boundaries, and
+-- keep every segment listed (@-hls_list_size 0@) so the playlist grows
+-- segment-by-segment while ffmpeg runs and gets @#EXT-X-ENDLIST@ only at
+-- the very end. That way playback can start after the first segment
+-- instead of waiting for the whole file to be remuxed (m66d). Segments
+-- land next to the playlist as @seg%03d.ts@.
 hlsArgs :: FilePath -> FilePath -> [String]
 hlsArgs input outputM3u8 =
   [ "-v", "error"
   , "-i", input
   , "-c", "copy"
   , "-hls_time", "4"
-  , "-hls_playlist_type", "vod"
+  , "-hls_list_size", "0"
+  , "-hls_flags", "independent_segments"
   , "-hls_segment_filename", segPattern
   , outputM3u8
   ]
   where
     segPattern = dropFileName outputM3u8 </> "seg%03d.ts"
 
+-- | How long the detached packaging ffmpeg may run (a remux always
+-- terminates; this is just a safety net so a hung ffmpeg cannot hold an
+-- ffmpeg slot forever). Generous because big files take a while even
+-- stream-copied.
+packagingTimeoutSec :: Int
+packagingTimeoutSec = 3600
+
+-- | How long a playlist request waits for the FIRST segment to appear
+-- before giving up with a 500.
+firstSegmentWaitSec :: Int
+firstSegmentWaitSec = 60
+
 -- | The per-item HLS cache directory: @stateDir \/ \"hls\" \/ \<id\>@.
 hlsDirFor :: FilePath -> Text -> FilePath
 hlsDirFor stateDir i = stateDir </> "hls" </> T.unpack i
 
 -- | Make sure the HLS assets for @item@ exist under the state dir and
--- return the path of the m3u8 playlist. If @<dir>\/main.m3u8@ is already
--- there the cached copy is reused (no re-packaging); otherwise ffmpeg runs
--- synchronously and a non-zero exit becomes an 'InternalError' (500).
--- Presence is the staleness check for now (docs/roadmap.org milestone 3c).
+-- return the path of the m3u8 playlist. If @<dir>\/main.m3u8@ already
+-- lists at least one segment, the cached/partial copy is served as-is
+-- (no re-packaging). Otherwise ffmpeg is spawned DETACHED (m66d) under a
+-- per-item @.starting@ lock so the first request returns as soon as the
+-- first segment is listed -- the playlist keeps growing while ffmpeg
+-- runs and hls.js treats it as a live playlist that ends with
+-- @#EXT-X-ENDLIST@. A non-zero exit or no first segment within
+-- 'firstSegmentWaitSec' becomes an 'InternalError' (500).
 ensureHls :: Config -> MediaItem -> AppM FilePath
 ensureHls cfg item = do
   let dir  = hlsDirFor (configStateDir cfg) (itemId item)
       m3u8 = dir </> "main.m3u8"
-  exists <- liftIO (doesFileExist m3u8)
-  unless exists $ do
-    liftIO (createDirectoryIfMissing True dir)
-    logInfo ("hls: packaging item " <> itemId item <> " into " <> T.pack dir)
-    -- milestone 15: run packaging under the ffmpeg slot semaphore (503 on
-    -- exhaustion) with the wall-clock killer timeout; the slot is released
-    -- when the job ends either way
-    mRelease <- acquireFfmpegSlot
-    r <- liftIO $ bracket_ (pure ()) (releaseFfmpegSlot mRelease)
-           (runProcessBSTimeout (configFfmpegTimeoutSec cfg)
-              "ffmpeg" (hlsArgs (itemPath item) m3u8))
-    case r of
-      (ExitSuccess, _out, _err) -> pure ()
-      (ExitFailure n, _out, err) ->
-        throwError (InternalError
-          ("ffmpeg HLS packaging failed (exit " <> T.pack (show n) <> "): "
-           <> T.pack (take 2000 (showBS (LBS.toStrict err)))))
-  pure m3u8
+      lock = dir </> ".starting"
+  ready <- liftIO (playlistHasSegments m3u8)
+  if ready
+    then pure m3u8
+    else do
+      liftIO (createDirectoryIfMissing True dir)
+      r <- liftIO (try (createDirectory lock) :: IO (Either IOException ()))
+      case r of
+        Right () -> do
+          -- we won the race: package in the background, keep an ffmpeg
+          -- slot for the lifetime of the job
+          logInfo ("hls: packaging item " <> itemId item <> " into " <> T.pack dir)
+          mRelease <- acquireFfmpegSlot
+          liftIO $ forkIO $ do
+            _ <- runProcessBSTimeout packagingTimeoutSec
+                   "ffmpeg" (hlsArgs (itemPath item) m3u8)
+            releaseFfmpegSlot mRelease
+            _ <- try (removeDirectory lock) :: IO (Either IOException ())
+            pure ()
+          ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
+          if ok
+            then pure m3u8
+            else throwError (InternalError
+                   ("ffmpeg HLS packaging produced no segments within "
+                    <> T.pack (show firstSegmentWaitSec) <> "s for item "
+                    <> itemId item))
+        Left _ -> do
+          -- another request is already packaging this item: just wait
+          ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
+          if ok
+            then pure m3u8
+            else throwError (InternalError
+                   ("ffmpeg HLS packaging produced no segments within "
+                    <> T.pack (show firstSegmentWaitSec) <> "s for item "
+                    <> itemId item))
+
+-- | Does the playlist file exist and list at least one @.ts@ segment?
+playlistHasSegments :: FilePath -> IO Bool
+playlistHasSegments m3u8 = do
+  ok <- doesFileExist m3u8
+  if not ok
+    then pure False
+    else do
+      txt <- TIO.readFile m3u8
+      pure (any (".ts" `T.isSuffixOf`) (T.lines txt))
+
+-- | Poll until the playlist lists its first segment, at most @secs@.
+waitForFirstSegment :: Int -> FilePath -> IO Bool
+waitForFirstSegment secs m3u8 = go (secs * 5) -- 200ms steps
+  where
+    go 0 = pure False
+    go n = do
+      ready <- playlistHasSegments m3u8
+      if ready then pure True else do
+        threadDelay 200000
+        go (n - 1)
 
 -- | @GET \/videos\/:id\/main.m3u8@ — 404 for an unknown item, otherwise
 -- ensure the HLS assets exist and serve the playlist file as

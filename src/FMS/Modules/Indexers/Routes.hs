@@ -10,6 +10,7 @@ import Control.Exception (SomeException, try)
 import Control.Monad (unless, when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (asks)
 import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -29,11 +30,16 @@ import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
 import qualified Network.Wai as Wai
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
-import FMS.Core.Monad (AppError (..), AppM)
+import FMS.Core.Monad (AppError (..), AppM, envConfig)
 import FMS.Core.Query (queryParams)
+import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Indexers.Monad (MonadIndexers (..), newIndexerId)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbSearchMovieAt, tmdbSearchTvAt)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), originalTitlesOf)
+import FMS.Modules.Metadata.Monad (getMetadataSettings)
+import FMS.Modules.Metadata.Types (msTmdbApiKey)
 import FMS.Modules.Indexers.Types
   ( Indexer (..)
   , base64UrlDecode
@@ -207,15 +213,27 @@ setEnabledHandler enabled captures req = do
 -- stamno-media Discover flow passes the English display title AND the
 -- TMDB original title (OriginalName), so original-language releases
 -- (e.g. "El laberinto del fauno" for Pan's Labyrinth) show up too.
+-- Additionally, when a TMDB API key is configured, each query is expanded
+-- SERVER-SIDE with the top TMDB hit's original title ('originalTitlesOf'),
+-- so even a single-@q@ client (the /dashboard search box, the legacy
+-- /Trackers/:id/Search callers) gets original-language results.
 searchHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 searchHandler _captures req = do
   let qparams = queryParams (queryString req)
       -- m66: all q params, blanks dropped, exact duplicates removed
       -- (order kept, so the English title stays the primary query)
-      qs = nub [ v | ("q", v) <- qparams, not (T.null (T.strip v)) ]
-  case qs of
+      qs0 = nub [ v | ("q", v) <- qparams, not (T.null (T.strip v)) ]
+  case qs0 of
     [] -> throwError (BadRequest "missing q parameter")
     _  -> pure ()
+  -- m66: server-side original-language expansion via TMDB (graceful: no
+  -- key or TMDB failure -> just the client-supplied queries)
+  cfg <- asks envConfig
+  ms <- getMetadataSettings
+  extraQs <- if T.null (msTmdbApiKey ms)
+    then pure []
+    else liftIO (originalLanguageQueries (configTmdbBaseUrl cfg) (msTmdbApiKey ms) qs0)
+  let qs = nub (qs0 ++ extraQs)
   let mType = lookup "type" qparams
       mIndexerId = lookup "indexerid" qparams
       -- m60: optional torznab season/ep params (episode / season-pack
@@ -385,6 +403,24 @@ fetchUrlBytes extraHeaders micros url = do
 cookieHeaders :: Indexer -> [(HeaderName, BS.ByteString)]
 cookieHeaders idx =
   [ (hCookie, TE.encodeUtf8 c) | ("Cookie", c) <- indexerCookieHeader idx ]
+
+-- | m66: for each query, ask TMDB (top movie hit + top tv hit) and
+-- collect original titles that are not already among the queries, so a
+-- single English query also matches original-language releases (Pan's
+-- Labyrinth -> "El laberinto del fauno"). Never throws: TMDB transport /
+-- parse failures yield no extra queries.
+originalLanguageQueries :: Text -> Text -> [Text] -> IO [Text]
+originalLanguageQueries base apiKey qs = do
+  perQ <- mapConcurrently
+    (\q -> do
+      em <- tmdbSearchMovieAt base apiKey q
+      es <- tmdbSearchTvAt base apiKey q
+      let top r = case either (const []) id r of
+            (x : _) -> [x]
+            []      -> []
+      pure (top em ++ top es))
+    qs
+  pure (originalTitlesOf qs (concat perQ))
 
 -- | Search one indexer (m23: format- and auth-aware). Torznab/Newznab
 -- goes to @<searchPath>?t=search...@ and is parsed as XML; TorrentDay

@@ -175,7 +175,7 @@ import FMS.Modules.Metadata.Api.Tmdb
   , tmdbTvDetailsKwUrlAt
   , parseTmdbGenresKeywords
   )
-import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, originalTitlesOf, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, cacheGet, cachePut, emptySeriesCache, loadSeriesCache, loadSeriesCacheIntoState, saveSeriesCache, seriesCachePath)
@@ -4409,6 +4409,28 @@ main = do
     (fmap tmdbId (pickTmdbResult Nothing rs36)) (Just 1)
   check "m36 pickTmdbResult: empty list -> Nothing"
     (pickTmdbResult (Just 1999) []) Nothing
+  -- m66: originalTitlesOf expands a query with TMDB original titles
+  let mkOrig i title orig lang = TmdbResult { tmdbId = i, tmdbTitle = title
+        , tmdbOriginalTitle = orig, tmdbOriginalLanguage = lang
+        , tmdbOverview = Nothing, tmdbReleaseYear = Nothing
+        , tmdbVoteAverage = Nothing, tmdbPoster = Nothing }
+  check "m66 originalTitlesOf: original title added when not already queried"
+    ["El laberinto del fauno"]
+    (originalTitlesOf ["Pan's Labyrinth"]
+      [mkOrig 680 "Pan's Labyrinth" (Just "El laberinto del fauno") (Just "es")])
+  check "m66 originalTitlesOf: skips titles already in the query list (case-insensitive), blanks, Nothings"
+    ["Other Title"]
+    (originalTitlesOf ["pan's labyrinth", "El laberinto del fauno"]
+      [ mkOrig 680 "Pan's Labyrinth" (Just "Pan's Labyrinth") (Just "en")
+      , mkOrig 1 "X" (Just " el laberinto del fauno ") Nothing
+      , mkOrig 2 "Y" (Just "  ") Nothing
+      , mkOrig 3 "Z" Nothing Nothing
+      , mkOrig 4 "W" (Just "Other Title") Nothing ])
+  check "m66 originalTitlesOf: keeps distinct original titles in order"
+    ["El laberinto del fauno", "Le Fabuleux Destin d'Amélie Poulain"]
+    (originalTitlesOf ["Pan's Labyrinth"]
+      [ mkOrig 680 "Pan's Labyrinth" (Just "El laberinto del fauno") (Just "es")
+      , mkOrig 1 "Amélie" (Just "Le Fabuleux Destin d'Amélie Poulain") (Just "fr") ])
 
   -- milestone 37: live deluge progress on requests
   let sts37 = [ ("Shrek.2001.1080p.BluRay.x265-LAMA", "Downloading", 42.5, 1024.0)

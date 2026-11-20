@@ -3,11 +3,13 @@ module FMS.Modules.Metadata.Api.Types
   , releaseYear
   , cleanTitleForProvider
   , pickTmdbResult
+  , originalTitlesOf
   ) where
 
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
 import Data.Char (isDigit)
+import Data.List (nub)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -169,3 +171,14 @@ pickTmdbResult mYear rs@(r0 : _) =
     Just y  -> case [ r | r <- rs, tmdbReleaseYear r == Just y ] of
       (r : _) -> Just r
       []      -> Just r0
+
+-- | m66: collect the ORIGINAL titles ('tmdbOriginalTitle') of TMDB hits
+-- that are not already among the queries (case-insensitive comparison),
+-- order preserved, duplicates removed. Used to expand an indexer search
+-- beyond the English display title (Pan's Labyrinth -> also search
+-- "El laberinto del fauno").
+originalTitlesOf :: [Text] -> [TmdbResult] -> [Text]
+originalTitlesOf qs rs =
+  nub [ t | r <- rs, Just t0 <- [tmdbOriginalTitle r]
+       , let t = T.strip t0, not (T.null t)
+       , not (any (\q -> T.toLower (T.strip q) == T.toLower t) qs) ]

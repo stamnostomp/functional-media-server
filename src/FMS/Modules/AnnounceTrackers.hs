@@ -80,28 +80,37 @@ parseTrackerList body =
 -- | Load the persisted list (if any) into the state TVar.
 loadAnnounceTrackersIntoState :: AppM ()
 loadAnnounceTrackersIntoState = do
-  cfg <- asks envConfig
-  let path = announceTrackersFilePath cfg
-  exists <- liftIO (doesFileExist path)
-  stored <- if not exists
-    then pure (Nothing, [] :: [Text])
-    else do
-      raw <- liftIO (LBS.readFile path)
-      pure (case Aeson.decode raw >>= parseMaybe announceTrackersParser of
-        Just st -> st
-        Nothing -> (Nothing, []))
-  tv <- liftIO (newTVarIO stored)
-  putState announceTrackersKey tv
+  _ <- ensureAnnounceTrackersTVar
+  pure ()
+
+-- | The state TVar, created lazily when missing (the refresher daemon can
+-- run before moduleInit, so never assume it exists).
+ensureAnnounceTrackersTVar :: AppM (TVar AnnounceTrackers)
+ensureAnnounceTrackersTVar = do
+  mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
+  case mTv of
+    Just tv -> pure tv
+    Nothing -> do
+      cfg <- asks envConfig
+      let path = announceTrackersFilePath cfg
+      exists <- liftIO (doesFileExist path)
+      stored <- if not exists
+        then pure (Nothing, [] :: [Text])
+        else do
+          raw <- liftIO (LBS.readFile path)
+          pure (case Aeson.decode raw >>= parseMaybe announceTrackersParser of
+            Just st -> st
+            Nothing -> (Nothing, []))
+      tv <- liftIO (newTVarIO stored)
+      putState announceTrackersKey tv
+      pure tv
 
 -- | The current announce tracker URLs (empty list when never fetched).
 currentAnnounceTrackers :: AppM [Text]
 currentAnnounceTrackers = do
-  mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
-  case mTv of
-    Nothing -> pure []
-    Just tv -> do
-      (_, urls) <- liftIO (readTVarIO tv)
-      pure urls
+  tv <- ensureAnnounceTrackersTVar
+  (_, urls) <- liftIO (readTVarIO tv)
+  pure urls
 
 persistAnnounceTrackers :: Config -> AnnounceTrackers -> IO ()
 persistAnnounceTrackers cfg st =
@@ -126,10 +135,8 @@ refreshAnnounceTrackersNow = do
           let urls = parseTrackerList (TE.decodeUtf8With TEE.lenientDecode (LBS.toStrict body))
           now0 <- liftIO getCurrentTime
           let st' = (Just now0, urls)
-          mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
-          case mTv of
-            Nothing -> pure False
-            Just tv -> do
+          tv <- ensureAnnounceTrackersTVar
+          do
               liftIO (atomically (writeTVar tv st'))
               liftIO (persistAnnounceTrackers cfg st')
               logInfo ("announce-trackers: refreshed " <> T.pack (show (length urls)) <> " trackers from " <> T.pack url)
@@ -156,10 +163,8 @@ refresherLoop env secs = forever $ do
 refreshIfStale :: AppM ()
 refreshIfStale = do
   cfg <- asks envConfig
-  mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
-  case mTv of
-    Nothing -> pure ()
-    Just tv -> do
+  tv <- ensureAnnounceTrackersTVar
+  do
       (mt, _) <- liftIO (readTVarIO tv)
       now <- liftIO getCurrentTime
       let stale = case mt of
@@ -173,10 +178,8 @@ refreshIfStale = do
 
 listAnnounceTrackersHandler :: [(Text, Text)] -> Request -> AppM Response
 listAnnounceTrackersHandler _captures _req = do
-  mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
-  st <- case mTv of
-    Nothing -> pure (Nothing, [])
-    Just tv -> liftIO (readTVarIO tv)
+  tv <- ensureAnnounceTrackersTVar
+  st <- liftIO (readTVarIO tv)
   pure (jsonResponse (object
     [ "FetchedAt" .= fst st
     , "Count" .= length (snd st)
@@ -187,10 +190,8 @@ refreshAnnounceTrackersHandler :: [(Text, Text)] -> Request -> AppM Response
 refreshAnnounceTrackersHandler _captures req = do
   _ <- requireAdmin req
   ok <- refreshAnnounceTrackersNow
-  mTv <- getState announceTrackersKey :: AppM (Maybe (TVar AnnounceTrackers))
-  st <- case mTv of
-    Nothing -> pure (Nothing, [])
-    Just tv -> liftIO (readTVarIO tv)
+  tv <- ensureAnnounceTrackersTVar
+  st <- liftIO (readTVarIO tv)
   pure (jsonResponse (object
     [ "Ok" .= ok
     , "FetchedAt" .= fst st

@@ -129,9 +129,16 @@ Dashboard (/dashboard, admin) -> TORRENTS tab -> DOWNLOAD CLIENT:
   =FMS_DOWNLOAD_DIR=/media/downloads=.
 - Deluge: =linuxserver/deluge= container, =-p 8112:8112=,
   =~/services/deluge/config:/config=, =/media/downloads:/downloads=.
-- Firewall: =networking.firewall.allowedTCPPorts = [ 8096 8112 ];= added to
-  /etc/nixos/configuration.nix and activated (runtime iptables rules in
-  nixos-fw also present). Rebuild with
+- Firewall: =networking.firewall.allowedTCPPorts = [ 8096 8112 6881..6891 ]=
+  and =allowedUDPPorts = [ 6881..6891 ]= (deluge peer listen ports, m79)
+  added to
+  /etc/nixos/configuration.nix; on this VM the rebuild's bootloader step
+  aborts the switch, so the rules were also inserted at runtime
+  (=iptables -I nixos-fw 1 -p tcp --dport 6881:6891 -j ACCEPT=, same for
+  udp, plus 8096/8112). NOTE: m79 - FMS now calls core.set_torrent_trackers
+  after every push because add_torrent_magnet's add_trackers option is
+  ignored by the linuxserver/deluge 2.x web stack (magnets arrived with 0
+  trackers -> stuck at 0%). Rebuild with
   =sudo env NIX_PATH="nixpkgs=$(readlink -f /nix/var/nix/profiles/per-user/root/channels/nixos):nixos-config=/etc/nixos/configuration.nix" nixos-rebuild switch=
   (bootloader install fails on this VM — harmless; run switch-to-configuration
   with =NIXOS_INSTALL_BOOTLOADER== if needed).

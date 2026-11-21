@@ -1,0 +1,112 @@
+#+TITLE: Deploying functional-media-server to a server (192.168.1.180)
+
+* Layout on the server
+
+Clone BOTH repos as siblings under ~/services — scripts/serve-ui.sh builds
+the UI from "$REPO_ROOT/../stamno-media", so the UI clone MUST be named
+=stamno-media=:
+
+#+begin_src sh
+ssh 192.168.1.180
+mkdir -p ~/services && cd ~/services
+git clone <git-url-of-functonal-media-server> functional-media-server
+git clone <git-url-of-stamno-media> stamno-media
+#+end_src
+
+* Option A — plain nix run (simplest, no docker)
+
+=serve-ui.sh= builds the backend (=nix build .#default=) AND the Elm UI
+(=nix build ../stamno-media=) and runs the server serving that UI
+same-origin. Plain =nix run .#default= alone starts ONLY the backend with
+the small built-in page — for the full UI use serve-ui.sh (or set FMS_UI_DIR
+to a built stamno-media output dir).
+
+#+begin_src sh
+cd ~/services/functional-media-server
+FMS_REQUIRE_AUTH=true \
+FMS_ADMIN_PASSWORD=<choose-a-strong-password> \
+FMS_STATE_DIR=$PWD/var \
+MEDIA_LIBRARY_PATH=/srv/media \
+MEDIA_SERVER_PORT=8080 \
+MEDIA_TMDB_API_KEY=<your-tmdb-v3-key> \
+FMS_WATCH=true \
+bash scripts/serve-ui.sh /srv/media 8080
+#+end_src
+
+Env vars (CLI flags of the same names win over env, config.json in the state
+dir is the lowest): MEDIA_SERVER_PORT, MEDIA_LIBRARY_PATH, FMS_STATE_DIR,
+FMS_REQUIRE_AUTH, FMS_ADMIN_PASSWORD (bootstraps the admin user),
+FMS_SERVER_NAME, MEDIA_TMDB_API_KEY, FMS_WATCH, FMS_UI_DIR, FMS_LOG_LEVEL,
+FMS_MAX_TRANSCODES, FMS_TLS_CERT/FMS_TLS_KEY (HTTPS), plus the requests env:
+FMS_DELUGE_URL (default http://127.0.0.1:8112/json), FMS_DELUGE_PASSWORD,
+FMS_DOWNLOAD_DIR, FMS_REQUEST_AUTO_APPROVE_GB.
+
+Persist with a systemd unit (Type=simple, ExecStart=... serve-ui.sh ...,
+Restart=always) or run under tmux/screen.
+
+First =nix build= on the server fetches nixpkgs + the Haskell package set —
+slow once; alternatively =nix copy= the store closure from a machine that
+already built it.
+
+Open port 8080 in the server firewall. Then browse to
+http://192.168.1.180:8080/ and sign in as admin.
+
+* Option B — docker (image from the flake)
+
+#+begin_src sh
+cd ~/services/functional-media-server
+nix build .#docker          # produces ./result
+docker load < result        # image: functional-media-server:latest
+#+end_src
+
+docker-compose.yml maps 8096->8096, ./media:/media:ro, ./var:/var/lib/fms
+(FMS_STATE_DIR inside the image). The stock image serves the built-in page;
+to get the Elm UI inside the container, build the UI and mount it, setting
+FMS_UI_DIR:
+
+#+begin_src sh
+UI_OUT=$(nix build ../stamno-media --no-link --print-out-paths)
+# compose: volumes add "$UI_OUT:/ui:ro"; environment add FMS_UI_DIR=/ui
+# env FMS_ADMIN_PASSWORD, MEDIA_SERVER_PORT=8096, MEDIA_LIBRARY_PATH=/media
+docker compose up -d
+#+end_src
+
+* Deluge in a container
+
+#+begin_src sh
+docker run -d --name deluge \
+  -p 8112:8112 \
+  -e PUID=$(id -u) -e PGID=$(id -g) \
+  -v /srv/deluge/config:/config \
+  -v /srv/downloads:/downloads \
+  --restart unless-stopped \
+  linuxserver/deluge:latest
+#+end_src
+
+Web UI at http://192.168.1.180:8112 (default password =deluge=).
+
+* Wiring FMS -> Deluge (dashboard)
+
+Dashboard (/dashboard, admin) -> TORRENTS tab -> DOWNLOAD CLIENT:
+- Deluge URL: =http://127.0.0.1:8112/json= when FMS runs on the host
+  (Option A); =http://192.168.1.180:8112/json= when FMS itself is in a
+  container (Option B) — the published host port.
+- Password: =deluge= (linuxserver default) or the one set in /config.
+- Download dir: the path as seen by BOTH deluge and FMS. Mount the same
+  host dir at the SAME path in both (e.g. /srv/downloads -> /downloads in
+  the deluge container and -> /downloads in the FMS container, or on the
+  host directly), set Download dir =/downloads=, and add that same path as
+  a library folder (FMS registers the download dir as the "Downloads"
+  folder at boot) so finished torrents auto-import and get classified.
+- Save, then TEST. Set TMDB key in the METADATA section; add trackers in
+  the TRACKERS section; GENERATE SKIP INTRO button in OVERVIEW scans all
+  items once.
+
+* Checklist after first boot
+
+1. Sign in (admin + FMS_ADMIN_PASSWORD) at http://192.168.1.180:8080/
+2. Dashboard: add library folder(s) (MEDIA_LIBRARY_PATH is scanned at boot),
+   set Deluge URL/password/dir + Test, set TMDB key, add indexers/trackers
+3. Rescan library; GENERATE SKIP INTRO
+4. Requests tab: search -> request -> auto-approve (<= autoApproveGb) ->
+   pushed to Deluge -> Imported when complete -> appears in library

@@ -10,6 +10,7 @@ import System.Directory (createDirectoryIfMissing)
 import FMS.Core.Module (Module (..))
 import FMS.Core.Types.MediaFolder (MediaFolder (..))
 import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Requests.Janitor (startRequestsJanitor)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, loadRequestSettingsIntoState, loadRequestsIntoState)
 import FMS.Modules.Requests.Routes (requestsRoutes)
 import FMS.Modules.Requests.Types (rsDownloadDir)
@@ -36,5 +37,6 @@ requestsModule = Module
         else do
           _ <- addFolder "Downloads" dir "mixed"
           pure ()
+      startRequestsJanitor   -- m82: re-add stalled (0% / 0-seed) torrents every 60s
   , moduleRoutes = requestsRoutes
   }

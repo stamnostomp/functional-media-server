@@ -118,6 +118,7 @@ library
                       FMS.Modules.Requests.Monad
                       FMS.Modules.Requests.Routes
                       FMS.Modules.Requests.Push
+                      FMS.Modules.Requests.Janitor
                       FMS.Modules.Trackers
                       FMS.Modules.Trackers.Types
                       FMS.Modules.Trackers.Persistence

@@ -112,7 +112,7 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.AnnounceTrackers (parseTrackerList)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetConfigBody, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentName, matchTorrentProgress, matchesDownload, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, btihFromMagnet, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetConfigBody, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentName, matchTorrentProgress, matchesDownload, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, parseTorrentStatusesRich, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import Data.Aeson.Types (parseEither)
 import FMS.Modules.Requests.Persistence (requestFromPersist, requestToPersist)
@@ -4613,6 +4613,20 @@ main = do
   check "m80b matchesDownload: torrent name with media extension matches extension-stripped file"
     (matchesDownload "Some Movie 2025 1080p.mkv" ["/media/downloads/Some Movie 2025 1080p.mkv"])
     True
+  -- milestone 82: janitor helpers
+  check "m82 btihFromMagnet: extracts 40-hex hash"
+    (btihFromMagnet "magnet:?xt=urn:btih:2770FE270845674966E184BE60ED1BE0FE494F3A&dn=x&tr=udp://a")
+    (Just "2770fe270845674966e184be60ed1be0fe494f3a")
+  check "m82 btihFromMagnet: no xt -> Nothing"
+    (btihFromMagnet "magnet:?dn=x") Nothing
+  check "m82 btihFromMagnet: non-hex -> Nothing"
+    (btihFromMagnet "magnet:?xt=urn:btih:ZZZZnothexzzzz") Nothing
+  check "m82 parseTorrentStatusesRich: name/state/progress/rate/seeds/peers"
+    (parseTorrentStatusesRich (case Aeson.decode (LBSC.pack "{\"abc\":{\"name\":\"Shrek\",\"state\":\"Downloading\",\"progress\":42.5,\"download_payload_rate\":1024,\"num_seeds\":3,\"num_peers\":7}}") of Just v -> v; Nothing -> Aeson.Null))
+    [("Shrek", "Downloading", 42.5, 1024.0, 3, 7)]
+  check "m82 parseTorrentStatusesRich: missing keys skipped, defaults 0"
+    (parseTorrentStatusesRich (case Aeson.decode (LBSC.pack "{\"abc\":{\"name\":\"X\",\"state\":\"Seeding\",\"progress\":100}}") of Just v -> v; Nothing -> Aeson.Null))
+    [("X", "Seeding", 100.0, 0.0, 0, 0)]
   check "m80 delugeSetConfigBody: core.set_config with utp + unlimited queue"
     (let enc = TE.decodeUtf8 (LBS.toStrict (Aeson.encode (delugeSetConfigBody 5)))
      in ( T.isInfixOf "\"method\":\"core.set_config\"" enc

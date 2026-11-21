@@ -16,6 +16,11 @@ module FMS.Modules.Requests.Push
   , matchTorrentName
   , matchesDownloadAny
   , importComplete
+  , delugeTorrentsStatusRichBody
+  , parseTorrentStatusesRich
+  , delugeTorrentStatusesRich
+  , btihFromMagnet
+  , delugeReaddTorrent
   , getFirstHostId
   , delugeAddMagnetBody
   , delugeSetTrackersBody
@@ -544,6 +549,137 @@ matchTorrentName' title mRelease torrents =
 -- request title / release name do not match the downloaded file name.
 matchesDownloadAny :: [Text] -> [FilePath] -> Bool
 matchesDownloadAny cands files = any (\c -> matchesDownload c files) cands
+
+-- | m82: like 'delugeTorrentsStatusBody' but also asks num_seeds/num_peers
+-- (the requests janitor needs them to detect stalled torrents).
+delugeTorrentsStatusRichBody :: Int -> Value
+delugeTorrentsStatusRichBody rid =
+  object [ "method" .= ("core.get_torrents_status" :: Text)
+         , "params" .= [ object []
+                       , Aeson.toJSON (["name", "state", "progress", "download_payload_rate", "num_seeds", "num_peers"] :: [Text]) ]
+         , "id" .= rid ]
+
+-- | m82: parse the rich status object into
+-- @(name, state, progress 0-100, rate, num_seeds, num_peers)@.
+parseTorrentStatusesRich :: Aeson.Value -> [(Text, Text, Double, Double, Int, Int)]
+parseTorrentStatusesRich (Aeson.Object o) =
+  [ (name, state, prog, rate, seeds, peers)
+  | Aeson.Object to <- KeyMap.elems o
+  , Just (Aeson.String name)  <- [KeyMap.lookup (Key.fromText "name") to]
+  , Just (Aeson.String state) <- [KeyMap.lookup (Key.fromText "state") to]
+  , Just prog <- [numField "progress" to]
+  , let rate  = fromMaybe0 (numField "download_payload_rate" to)
+        seeds = fromMaybeI0 (intField "num_seeds" to)
+        peers = fromMaybeI0 (intField "num_peers" to)
+  ]
+  where
+    numField k m = case KeyMap.lookup (Key.fromText k) m of
+      Just (Aeson.Number n) -> Just (realToFrac n)
+      _ -> Nothing
+    intField k m = case KeyMap.lookup (Key.fromText k) m of
+      Just (Aeson.Number n) -> Just (round n)
+      _ -> Nothing
+    fromMaybe0 (Just x) = x
+    fromMaybe0 Nothing  = 0
+    fromMaybeI0 (Just x) = x
+    fromMaybeI0 Nothing  = 0
+parseTorrentStatusesRich _ = []
+
+-- | m82: like 'delugeTorrentStatuses' but returns the rich 6-tuple.
+delugeTorrentStatusesRich :: Text -> Text -> IO (Either String [(Text, Text, Double, Double, Int, Int)])
+delugeTorrentStatusesRich delugeUrl delugePassword = do
+  eres <- try $ do
+    manager <- newManager (tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro 10000000 })
+    eLogin <- postJson manager delugeUrl Nothing (delugeLoginBody delugePassword 1)
+    case eLogin of
+      Left err -> pure (Left err)
+      Right (body, cookie) ->
+        case rpcResult body of
+          Just res | rpcResultOk (Just res) -> do
+            eHosts <- postJson manager delugeUrl cookie (delugeGetHostsBody 2)
+            case eHosts of
+              Left _ -> pure ()
+              Right (hbody, _) ->
+                case getFirstHostId hbody of
+                  Nothing -> pure ()
+                  Just hid -> do
+                    _ <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+                    _ <- postJson manager delugeUrl cookie (delugeSetConfigBody 5)
+                    pure ()
+            eSt <- postJson manager delugeUrl cookie (delugeTorrentsStatusRichBody 4)
+            case eSt of
+              Left err -> pure (Left err)
+              Right (sbody, _) ->
+                case rpcResult sbody of
+                  Just v -> pure (Right (parseTorrentStatusesRich v))
+                  Nothing -> pure (Left "deluge get_torrents_status returned no result")
+          _ -> pure (Left "deluge auth.login failed")
+  case eres of
+    Left (e :: SomeException) -> pure (Left ("http failed: " ++ show e))
+    Right r                   -> pure r
+
+-- | m82: extract the info hash from @magnet:?xt=urn:btih:<hash>&...@.
+btihFromMagnet :: Text -> Maybe Text
+btihFromMagnet mag =
+  case T.splitOn "urn:btih:" (T.toLower mag) of
+    _ : rest : _ ->
+      let h = T.take 40 rest
+          hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+      in if T.length h == 40 && T.all hex h then Just (T.toLower h) else Nothing
+    _ -> Nothing
+
+-- | m82: remove + re-add a stalled torrent (fresh peer state). Login,
+-- connect, re-assert client config, remove (keep data), re-add the magnet,
+-- attach the announce trackers, reannounce, resume. The janitor calls this
+-- for Downloading requests whose live torrent has ~0 progress and 0 seeds.
+delugeReaddTorrent
+  :: Text       -- ^ deluge JSON-RPC url
+  -> Text       -- ^ deluge password
+  -> FilePath   -- ^ download dir
+  -> Text       -- ^ magnet
+  -> Text       -- ^ info hash (btih)
+  -> [Text]     -- ^ announce trackers
+  -> IO (Either String ())
+delugeReaddTorrent delugeUrl delugePassword downloadDir magnet hash trackers = do
+  eres <- try $ do
+    manager <- newManager (tlsManagerSettings
+      { managerResponseTimeout = responseTimeoutMicro 10000000 })
+    eLogin <- postJson manager delugeUrl Nothing (delugeLoginBody delugePassword 1)
+    case eLogin of
+      Left err -> pure (Left err)
+      Right (body, cookie) ->
+        case rpcResult body of
+          Just res | rpcResultOk (Just res) -> do
+            eHosts <- postJson manager delugeUrl cookie (delugeGetHostsBody 2)
+            case eHosts of
+              Left _ -> pure ()
+              Right (hbody, _) ->
+                case getFirstHostId hbody of
+                  Nothing -> pure ()
+                  Just hid -> do
+                    _ <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+                    _ <- postJson manager delugeUrl cookie (delugeSetConfigBody 4)
+                    pure ()
+            _ <- postJson manager delugeUrl cookie
+                   (object [ "method" .= ("core.remove_torrent" :: Text)
+                           , "params" .= [Aeson.toJSON hash, Aeson.toJSON False]
+                           , "id" .= (5 :: Int) ])
+            _ <- postJson manager delugeUrl cookie (delugeAddMagnetBody magnet downloadDir trackers 6)
+            _ <- postJson manager delugeUrl cookie (delugeSetTrackersBody hash trackers 7)
+            _ <- postJson manager delugeUrl cookie
+                   (object [ "method" .= ("core.force_reannounce" :: Text)
+                           , "params" .= [[hash]]
+                           , "id" .= (8 :: Int) ])
+            _ <- postJson manager delugeUrl cookie
+                   (object [ "method" .= ("core.resume_torrent" :: Text)
+                           , "params" .= [[hash]]
+                           , "id" .= (9 :: Int) ])
+            pure (Right ())
+          _ -> pure (Left "deluge auth.login failed")
+  case eres of
+    Left (e :: SomeException) -> pure (Left ("http failed: " ++ show e))
+    Right r                   -> pure r
 
 -- | m38: should a Downloading request be marked Imported? When a live
 -- Deluge torrent matches (by title/release name), only when it is complete

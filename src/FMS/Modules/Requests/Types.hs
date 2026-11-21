@@ -71,6 +71,8 @@ data Request = Request
   , reqTitle        :: !Text
   , reqYear         :: !(Maybe Int)
   , reqTmdbId       :: !(Maybe Int)     -- ^ m68: TMDB id from the Discover card, so the content is known WITHOUT name-sanitizing; metadata is resolved from this id first, name-search is the fallback
+  , reqSeason       :: !(Maybe Int)     -- ^ m76: season of a tv episode/season request (stored BEFORE download; used to write the .nfo at import)
+  , reqEpisode      :: !(Maybe Int)     -- ^ m76: episode number (Nothing for a whole-season request)
   , reqMediaType    :: !Text            -- ^ "movie" or "tv"
   , reqQuery        :: !Text
   , reqStatus       :: !RequestStatus
@@ -98,6 +100,8 @@ instance ToJSON Request where
     , "Title"        .= reqTitle r
     , "Year"         .= reqYear r
     , "TmdbId"       .= reqTmdbId r
+    , "Season"       .= reqSeason r   -- m76
+    , "Episode"      .= reqEpisode r  -- m76
     , "MediaType"    .= reqMediaType r
     , "Query"        .= reqQuery r
     , "Status"       .= reqStatus r
@@ -125,6 +129,8 @@ instance FromJSON Request where
       <*> o .:  "Title"
       <*> o .:? "Year"
       <*> o .:? "TmdbId"
+      <*> o .:? "Season"       -- m76
+      <*> o .:? "Episode"      -- m76
       <*> o .:? "MediaType"    .!= "movie"
       <*> o .:? "Query"        .!= ""
       <*> o .:  "Status"

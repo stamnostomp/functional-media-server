@@ -56,6 +56,8 @@ requestToPersist r = object
   , "title"         .= reqTitle r
   , "year"          .= reqYear r
   , "tmdbId"        .= reqTmdbId r   -- m68
+  , "season"        .= reqSeason r   -- m76
+  , "episode"       .= reqEpisode r  -- m76
   , "mediaType"     .= reqMediaType r
   , "query"         .= reqQuery r
   , "status"        .= reqStatus r
@@ -81,6 +83,8 @@ requestFromPersist = withObject "request" $ \o ->
     <*> o .:  "title"
     <*> o .:? "year"
     <*> o .:? "tmdbId"        -- m68; old files without it load fine
+    <*> o .:? "season"        -- m76; old files without it load fine
+    <*> o .:? "episode"       -- m76
     <*> o .:? "mediaType"     .!= "movie"
     <*> o .:? "query"         .!= ""
     <*> o .:  "status"

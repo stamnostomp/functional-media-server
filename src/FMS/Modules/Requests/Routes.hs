@@ -15,6 +15,9 @@ import Control.Monad.Reader (ask, asks)
 import Data.Aeson (FromJSON (..), eitherDecode, encode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+import qualified Data.HashMap.Strict as HM
+import System.FilePath ((</>), replaceExtension, takeBaseName, takeDirectory)
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types (ResponseHeaders, status201, status204)
 import Network.Wai (Response, queryString, responseLBS, strictRequestBody)
@@ -31,9 +34,11 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (scanDirectory)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt)
+import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, TmdbTvDetails(..))
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, tmdbResultToMetadata)
-import FMS.Modules.Metadata.Types (MediaMetadata (..), msTmdbApiKey)
+import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), msTmdbApiKey)
+import FMS.Modules.Metadata.Nfo (episodeNfoXml, movieNfoXml, tvShowNfoXml)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
 import FMS.Modules.AnnounceTrackers (currentAnnounceTrackers)
 import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
@@ -66,6 +71,8 @@ data CreateRequest = CreateRequest
   { crTitle    :: Text
   , crYear     :: Maybe Int
   , crTmdbId   :: Maybe Int      -- ^ m68: TMDB id from the Discover card
+  , crSeason   :: Maybe Int      -- ^ m76: season of a tv request (episode or season pack)
+  , crEpisode  :: Maybe Int      -- ^ m76: episode number when the request is a single episode
   , crType     :: Text
   , crQuery    :: Maybe Text
   , crSizeBytes :: Maybe Integer
@@ -83,6 +90,8 @@ instance FromJSON CreateRequest where
       <$> o .:  "Title"
       <*> o .:? "Year"
       <*> o .:? "TmdbId"
+      <*> o .:? "Season"      -- m76
+      <*> o .:? "Episode"     -- m76
       <*> o .:? "Type" .!= "movie"
       <*> o .:? "Query"
       <*> o .:? "SizeBytes"
@@ -116,46 +125,126 @@ markImported statuses reqs = do
       applyRequestTmdb r   -- m68: resolve metadata from the request's TMDB id when present
       pure ()
 
--- | m68: when a request carries a TMDB id (Discover card), the content is
--- known exactly -- set the imported library item's metadata straight from
--- @\/movie\/<id>@, no name sanitizing/searching. When there is no id (or
--- the fetch fails) nothing happens here and the normal scan-time
--- name-based TMDB refresh remains as the fallback.
+-- | m68/m76: when a request carries a TMDB id (Discover card), the content
+-- is known exactly -- at import time write the Kodi NFO sidecar(s) IN PLACE
+-- next to the downloaded media (movie: @<file>.nfo@; tv: @tvshow.nfo@ in
+-- the folder plus a per-episode @<file>.nfo@ with season/episode when the
+-- request was a single episode), so the next library scan classifies the
+-- file exactly (right show, Episode + S/E) even when the release file name
+-- is garbage, and the TMDB tag is stored persistently in the NFO. Also set
+-- the scanned item's metadata straight from the TMDB id (no name search).
 applyRequestTmdb :: Request -> AppM ()
 applyRequestTmdb r =
   case reqTmdbId r of
     Nothing -> pure ()
-    Just tid
-      | T.toLower (reqMediaType r) == "tv" -> pure ()  -- episode/season requests keep the name-based path
-      | otherwise -> do
-          cfg <- asks envConfig
-          ms <- getMetadataSettings
-          if T.null (msTmdbApiKey ms)
-            then pure ()
-            else do
-              s <- getRequestSettings
-              let dir = T.unpack (rsDownloadDir s)
-              items <- listItems
-              let cands = [ i | i <- items
+    Just tid -> do
+      cfg <- asks envConfig
+      ms <- getMetadataSettings
+      if T.null (msTmdbApiKey ms)
+        then pure ()
+        else do
+          s <- getRequestSettings
+          let dir = T.unpack (rsDownloadDir s)
+          efiles <- liftIO (try (scanDirectory False dir) :: IO (Either SomeException [FilePath]))
+          let files = either (const []) id efiles
+              cands = [ f | f <- files
                       , not (null dir)
-                      , dir `isPrefixOf` itemPath i
-                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [itemPath i] ]
-              case cands of
-                [] -> pure ()
-                (i : _) -> do
-                  eres <- liftIO (tmdbMovieByIdAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
-                  case eres of
-                    Left err ->
-                      logWarn ("requests: tmdb /movie/" <> T.pack (show tid)
-                               <> " failed: " <> T.pack err)
-                    Right top -> do
-                      dres <- liftIO (tmdbMovieDetailsAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
-                      let (gs, kws) = either (const ([], [])) id dres
-                          fresh = (tmdbResultToMetadata top)
-                            { metaGenres = gs, metaKeywords = kws }
-                      setMetadata (itemId i) fresh
-                      logInfo ("requests: import metadata for \"" <> itemTitle i
-                               <> "\" set from TMDB id " <> T.pack (show tid))
+                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [f] ]
+          case cands of
+            [] -> pure ()
+            (f : _) -> do
+              let isTv = T.toLower (reqMediaType r) == "tv"
+              if isTv
+                then applyTvRequestTmdb cfg ms tid r f
+                else applyMovieRequestTmdb cfg ms tid r f
+              items <- listItems
+              let icands = [ i | i <- items
+                          , not (null dir)
+                          , dir `isPrefixOf` itemPath i
+                          , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [itemPath i] ]
+              mapM_ (setItemMetadataFromTmdb cfg ms tid isTv) icands
+
+-- | m76: tv request — write @tvshow.nfo@ (series title + tmdb id) into the
+-- download folder and, for a single-episode request, a per-episode
+-- @<file>.nfo@ carrying season/episode/tmdb id.
+applyTvRequestTmdb :: Config -> MetadataSettings -> Int -> Request -> FilePath -> AppM ()
+applyTvRequestTmdb cfg ms tid r f = do
+  dres <- liftIO (tmdbTvDetailsAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+  case dres of
+    Left err ->
+      logWarn ("requests: tmdb /tv/" <> T.pack (show tid) <> " failed: " <> T.pack err)
+    Right d -> do
+      let title = fromMaybe' (reqTitle r) (tdName d)
+      liftIO (TIO.writeFile (takeDirectory f </> "tvshow.nfo") (tvShowNfoXml title tid))
+      logInfo ("requests: wrote tvshow.nfo (\"" <> title <> "\", tmdb " <> T.pack (show tid)
+               <> ") next to " <> T.pack f)
+      case (reqSeason r, reqEpisode r) of
+        (Just sn, Just ep) -> do
+          liftIO (TIO.writeFile (replaceExtension f ".nfo")
+                     (episodeNfoXml (T.pack (takeBaseName f)) sn ep tid))
+          logInfo ("requests: wrote episode nfo S" <> T.pack (show sn) <> "E" <> T.pack (show ep)
+                   <> " (tmdb " <> T.pack (show tid) <> ") for " <> T.pack f)
+        _ -> pure ()
+
+-- | m76: movie request — write @<file>.nfo@ (title + tmdb id) next to the
+-- downloaded media.
+applyMovieRequestTmdb :: Config -> MetadataSettings -> Int -> Request -> FilePath -> AppM ()
+applyMovieRequestTmdb cfg ms tid r f = do
+  eres <- liftIO (tmdbMovieByIdAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+  case eres of
+    Left err ->
+      logWarn ("requests: tmdb /movie/" <> T.pack (show tid) <> " failed: " <> T.pack err)
+    Right top -> do
+      let title = tmdbTitle top
+          year = tmdbReleaseYear top
+      liftIO (TIO.writeFile (replaceExtension f ".nfo") (movieNfoXml title tid year))
+      logInfo ("requests: wrote movie nfo (\"" <> title <> "\", tmdb " <> T.pack (show tid)
+               <> ") next to " <> T.pack f)
+
+-- | Set the metadata of an already-scanned item from the request's TMDB id
+-- (movie via /movie/:id, tv via /tv/:id), no name searching.
+setItemMetadataFromTmdb :: Config -> MetadataSettings -> Int -> Bool -> MediaItem -> AppM ()
+setItemMetadataFromTmdb cfg ms tid isTv i
+  | isTv = do
+      dres <- liftIO (tmdbTvDetailsAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+      kres <- liftIO (tmdbTvDetailsKwAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+      let (gs, kws) = either (const ([], [])) id kres
+      case dres of
+        Left _ -> pure ()
+        Right d ->
+          setMetadata (itemId i) MediaMetadata
+            { metaTitle          = tdName d
+            , metaOverview       = tdOverview d
+            , metaGenres         = gs
+            , metaStudios        = []
+            , metaPersons        = []
+            , metaTags           = []
+            , metaYear           = tdFirstAirDate d >>= releaseYear
+            , metaRating         = Nothing
+            , metaOfficialRating = Nothing
+            , metaRuntimeMinutes = Nothing
+            , metaProviderIds    = HM.singleton "tmdb" (T.pack (show tid))
+            , metaSource         = "tmdb"
+            , metaKeywords       = kws
+            , metaLockedFields   = []
+            }
+  | otherwise = do
+      eres <- liftIO (tmdbMovieByIdAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+      case eres of
+        Left err ->
+          logWarn ("requests: tmdb /movie/" <> T.pack (show tid) <> " failed: " <> T.pack err)
+        Right top -> do
+          dres <- liftIO (tmdbMovieDetailsAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
+          let (gs, kws) = either (const ([], [])) id dres
+              fresh = (tmdbResultToMetadata top) { metaGenres = gs, metaKeywords = kws }
+          setMetadata (itemId i) fresh
+          logInfo ("requests: import metadata for \"" <> itemTitle i
+                   <> "\" set from TMDB id " <> T.pack (show tid))
+
+-- | 'fromMaybe' for Text (local helper to avoid an extra import clash).
+fromMaybe' :: Text -> Maybe Text -> Text
+fromMaybe' d Nothing  = d
+fromMaybe' _ (Just x) = x
 
 -- | m38: fetch live Deluge torrent statuses ONCE per read (shared by
 -- 'markImported' and 'attachLiveProgress'); graceful [] on any failure.
@@ -265,6 +354,8 @@ createRequestHandler _captures req = do
             , reqTitle = crTitle cr
             , reqYear = crYear cr
             , reqTmdbId = crTmdbId cr   -- m68
+            , reqSeason = crSeason cr   -- m76
+            , reqEpisode = crEpisode cr -- m76
             , reqMediaType = crType cr
             , reqQuery = maybe (crTitle cr) id (crQuery cr)
             , reqStatus = if autoAppr then Approved else Pending

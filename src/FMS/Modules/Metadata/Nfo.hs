@@ -1,6 +1,12 @@
 module FMS.Modules.Metadata.Nfo
   ( parseMovieNfo
   , parseTvShowNfo
+  , parseEpisodeNfo
+  , EpisodeNfo(..)
+  , episodeNfoXml
+  , tvShowNfoXml
+  , movieNfoXml
+  , xmlEscape
   , nfoPathFor
   ) where
 
@@ -153,3 +159,78 @@ tvShowFromCursor c =
 -- | Year from <premiered>2022-01-01</premiered> (first 4 chars).
 premieredYear :: Cursor -> Maybe Int
 premieredYear c = firstText "premiered" c >>= \t -> readMaybe (take 4 (T.unpack (T.strip t)))
+
+
+-- | m76: the parsed content of a Kodi per-episode @<episodedetails>..@
+-- sidecar (@<file>.nfo@ next to an episode media file).
+data EpisodeNfo = EpisodeNfo
+  { enTitle   :: Maybe Text
+  , enSeason  :: Maybe Int
+  , enEpisode :: Maybe Int
+  , enTmdbId  :: Maybe Text   -- ^ <tmdbid> (series id) or <uniqueid type="tmdb">
+  } deriving (Eq, Show)
+
+-- | Parse a per-episode @<episodedetails>@ NFO. Malformed XML or a
+-- different root is a 'Left'.
+parseEpisodeNfo :: BS.ByteString -> Either String EpisodeNfo
+parseEpisodeNfo bytes =
+  case parseLBS def (LBS.fromStrict bytes) of
+    Left err -> Left ("malformed XML: " ++ show err)
+    Right doc
+      | T.toCaseFold (nameLocalName (elementName (documentRoot doc))) == "episodedetails" ->
+          Right (episodeFromCursor (fromDocument doc))
+      | otherwise -> Left "no <episodedetails> root element"
+
+episodeFromCursor :: Cursor -> EpisodeNfo
+episodeFromCursor c =
+  EpisodeNfo
+    { enTitle   = firstText "title" c
+    , enSeason  = readIntField "season" c
+    , enEpisode = readIntField "episode" c
+    , enTmdbId  = firstText "tmdbid" c <|> firstText "uniqueid" c
+    }
+
+-- | Escape the five XML special characters (for NFO text fields).
+xmlEscape :: Text -> Text
+xmlEscape = T.concatMap esc
+  where
+    esc '&' = "&amp;"
+    esc '<' = "&lt;"
+    esc '>' = "&gt;"
+    esc '"' = "&quot;"
+    esc '\'' = "&apos;"
+    esc c   = T.singleton c
+
+-- | m76: a Kodi per-episode NFO body: title, season, episode and the
+-- TMDB series id (both <tmdbid> and <uniqueid type="tmdb">). Pure.
+episodeNfoXml :: Text -> Int -> Int -> Int -> Text
+episodeNfoXml title season episode tmdbId =
+  T.concat
+    [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<episodedetails>\n"
+    , "  <title>", xmlEscape title, "</title>\n"
+    , "  <season>", T.pack (show season), "</season>\n"
+    , "  <episode>", T.pack (show episode), "</episode>\n"
+    , "  <tmdbid>", T.pack (show tmdbId), "</tmdbid>\n"
+    , "  <uniqueid type=\"tmdb\" default=\"true\">", T.pack (show tmdbId), "</uniqueid>\n"
+    , "</episodedetails>\n" ]
+
+-- | m76: a series-level @tvshow.nfo@ body (title + TMDB id). Pure.
+tvShowNfoXml :: Text -> Int -> Text
+tvShowNfoXml title tmdbId =
+  T.concat
+    [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tvshow>\n"
+    , "  <title>", xmlEscape title, "</title>\n"
+    , "  <tmdbid>", T.pack (show tmdbId), "</tmdbid>\n"
+    , "  <uniqueid type=\"tmdb\" default=\"true\">", T.pack (show tmdbId), "</uniqueid>\n"
+    , "</tvshow>\n" ]
+
+-- | m76: a movie NFO body (title + TMDB id + optional year). Pure.
+movieNfoXml :: Text -> Int -> Maybe Int -> Text
+movieNfoXml title tmdbId mYear =
+  T.concat
+    [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<movie>\n"
+    , "  <title>", xmlEscape title, "</title>\n"
+    , maybe "" (\y -> "  <year>" <> T.pack (show y) <> "</year>\n") mYear
+    , "  <tmdbid>", T.pack (show tmdbId), "</tmdbid>\n"
+    , "  <uniqueid type=\"tmdb\" default=\"true\">", T.pack (show tmdbId), "</uniqueid>\n"
+    , "</movie>\n" ]

@@ -7,6 +7,7 @@ module FMS.Modules.Library.Scan
   , planRescan
   , itemFromPath
   , classifyItem
+  , episodeNfoSidecar
   , parseEpisodeFilename
   , parseEpisodeTagPos
   , episodeTitleFromName
@@ -30,11 +31,13 @@ module FMS.Modules.Library.Scan
   ) where
 
 import Control.Applicative ((<|>))
+import Control.Exception (SomeException, try)
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (foldM, forM)
 import Data.Char (isAlpha, isDigit, isUpper, toLower)
 import Data.Either (partitionEithers)
 import Data.List (nub, sort, sortBy, sortOn)
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Set (Set)
@@ -55,7 +58,7 @@ import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirec
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
 import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider, releaseTagTokens)
-import FMS.Modules.Metadata.Nfo (nfoPathFor)
+import FMS.Modules.Metadata.Nfo (nfoPathFor, parseEpisodeNfo, EpisodeNfo(..))
 
 -- | Extensions recognised as media files (lowercase, with dot).
 -- Milestone 2e: photos (image/*) and books (epub/mobi/pdf/cbz/cbr) are
@@ -265,11 +268,21 @@ parentDirNames p = go (takeDirectory p)
 -- series name cleaned from the file name; in all other cases the type
 -- comes from the mime and the episode fields are 'Nothing'.
 classifyItem
-  :: Bool      -- ^ hasTvShowNfo (parent dir contains tvshow.nfo)
-  -> FilePath  -- ^ the file path
-  -> Text      -- ^ the file base name
+  :: Bool            -- ^ hasTvShowNfo (parent dir contains tvshow.nfo)
+  -> Maybe (Int, Int) -- ^ m76: (season, episode) from a per-file <base>.nfo
+                     --   <episodedetails> sidecar -- wins over the file name
+  -> FilePath        -- ^ the file path
+  -> Text            -- ^ the file base name
   -> (Text, Maybe Text, Maybe Int, Maybe Int)
-classifyItem hasNfo path baseName
+classifyItem hasNfo mEpNfo path baseName
+  | Just (s, e) <- mEpNfo =
+      -- m76: the request-time NFO knows the exact episode (written from the
+      -- TMDB id the user picked) even when the release file name has no
+      -- usable SxxEyy tag
+      let series = if hasNfo
+                     then T.pack (takeFileName (takeDirectory path))
+                     else seriesFromEpisodeName baseName
+      in ("Episode", Just series, Just s, Just e)
   | hasNfo =
       let series = T.pack (takeFileName (takeDirectory path))
           (season, episode) = case parseEpisodeFilename baseName of
@@ -282,6 +295,24 @@ classifyItem hasNfo path baseName
       let series = seriesFromEpisodeName baseName
       in ("Episode", Just series, Just s, Just e)
   | otherwise = (itemTypeFromMime (mimeFor path), Nothing, Nothing, Nothing)
+
+-- | m76: IO: the (season, episode) from a per-file @<base>.nfo@
+-- @<episodedetails>@ sidecar next to @path@, when present and parseable.
+episodeNfoSidecar :: FilePath -> IO (Maybe (Int, Int))
+episodeNfoSidecar p = do
+  let f = replaceExtension p ".nfo"
+  ok <- doesFileExist f
+  if not ok
+    then pure Nothing
+    else do
+      r <- try (BS.readFile f) :: IO (Either SomeException BS.ByteString)
+      pure $ case r of
+        Left _ -> Nothing
+        Right b -> case parseEpisodeNfo b of
+          Right en -> case (enSeason en, enEpisode en) of
+            (Just s, Just e) -> Just (s, e)
+            _                -> Nothing
+          Left _ -> Nothing
 
 -- | Milestone 4j quality/codec tokens stripped by 'normalizeVersionTitle'
 -- (lowercase; matched as whole dot/underscore/space-separated words).
@@ -372,9 +403,10 @@ itemFromPath folder p = do
   size  <- getFileSize p
   mtime <- getModificationTime p
   nfo   <- hasTvShowNfo p
+  epNfo <- episodeNfoSidecar p
   let base  = T.pack (takeBaseName p)
       mime  = mimeFor p
-      (itype, series, season, episode) = classifyItem nfo p base
+      (itype, series, season, episode) = classifyItem nfo epNfo p base
       (finalType, extra, finalSeries, finalSeason, finalEpisode) =
         case extraTypeFor p base of
           Just et | "video" `T.isPrefixOf` mime -> ("Extra", Just et, Nothing, Nothing, Nothing)

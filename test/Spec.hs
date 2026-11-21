@@ -187,7 +187,7 @@ import FMS.Modules.Metadata.Api.Tmdb
   , parseTmdbGenresKeywords
   )
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, originalTitlesOf, pickTmdbResult)
-import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
+import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo, parseEpisodeNfo, EpisodeNfo(..), episodeNfoXml, tvShowNfoXml, movieNfoXml)
 import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, cacheGet, cachePut, emptySeriesCache, loadSeriesCache, loadSeriesCacheIntoState, saveSeriesCache, seriesCachePath)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
@@ -632,7 +632,7 @@ main = do
   let acidDir46 = "/tmp/fms-test-acid-46"
       epPath = "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv"
       (ty46, sn46, se46, ep46) =
-        classifyItem False epPath "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+        classifyItem False Nothing epPath "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
   check "m46 live filename classifies as Episode/Family Guy/25/0"
     (ty46, sn46, se46, ep46) ("Episode", Just "Family Guy", Just 25, Just 0)
   resetDir acidDir46
@@ -2270,15 +2270,15 @@ main = do
     (Just (2, 5)) (parseEpisodeFilename "My Show S02E05")
   check "classifyItem with tvshow.nfo -> Episode of the dir name"
     ("Episode", Just "MyShow", Just 1, Just 2)
-    (classifyItem True "/lib/MyShow/S01E02.mp4" "S01E02")
+    (classifyItem True Nothing "/lib/MyShow/S01E02.mp4" "S01E02")
   check "classifyItem without nfo -> Movie from mime"
     ("Movie", Nothing, Nothing, Nothing)
-    (classifyItem False "/lib/movie.mp4" "movie")
+    (classifyItem False Nothing "/lib/movie.mp4" "movie")
   check "m43 classifyItem: scene SxxEyy file without nfo -> Episode with cleaned series"
-    (classifyItem False "/dl/Family.Guy.S25E00.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.1080p.HEVC.x265-MeGusta")
+    (classifyItem False Nothing "/dl/Family.Guy.S25E00.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.1080p.HEVC.x265-MeGusta")
     ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m44 classifyItem: exact live filename -> series cut at the SxxEyy tag"
-    (classifyItem False "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
+    (classifyItem False Nothing "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
     ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m44 parseEpisodeTagPos returns the tag start offset"
     (parseEpisodeTagPos "Family.Guy.S25E00.1080p.x265-MeGusta")
@@ -2293,11 +2293,11 @@ main = do
     (seriesFromEpisodeName "Family.Guy.1080p.x265-MeGusta")
     "Family Guy"
   check "m43 classifyItem with tvshow.nfo still wins (unchanged)"
-    (classifyItem True "/lib/MyShow/S01E02.mkv" "S01E02.mkv")
+    (classifyItem True Nothing "/lib/MyShow/S01E02.mkv" "S01E02.mkv")
     ("Episode", Just "MyShow", Just 1, Just 2)
   check "classifyItem without nfo, audio -> Audio"
     ("Audio", Nothing, Nothing, Nothing)
-    (classifyItem False "/lib/song.mp3" "song")
+    (classifyItem False Nothing "/lib/song.mp3" "song")
   let tvNfo = BSC.pack (unlines
         [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         , "<tvshow>"
@@ -4022,7 +4022,7 @@ main = do
     [True, True, True, False, False, False]
   let mkReq t st = Request
         { reqId = "r1", reqUserId = "u1", reqUserName = "bob", reqTitle = t
-        , reqYear = Nothing, reqTmdbId = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
+        , reqYear = Nothing, reqTmdbId = Nothing, reqSeason = Nothing, reqEpisode = Nothing, reqMediaType = "movie", reqQuery = t, reqStatus = st
         , reqSizeBytes = Nothing, reqSourceIndexer = Nothing, reqSourceRelease = Nothing
         , reqSourceUrl = Nothing, reqMagnet = Nothing, reqDownloadUrl = Nothing
         , reqCreatedAt = reqT0, reqUpdatedAt = reqT0
@@ -4041,8 +4041,8 @@ main = do
         _ -> []
   check "Request ToJSON: PascalCase API keys"
     reqKeys
-    [ "ApprovedBy", "CreatedAt", "DownloadDir", "DownloadUrl", "Error", "Id", "Magnet"
-    , "MediaType", "Progress", "Query", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
+    [ "ApprovedBy", "CreatedAt", "DownloadDir", "DownloadUrl", "Episode", "Error", "Id", "Magnet"
+    , "MediaType", "Progress", "Query", "Season", "SizeBytes", "SourceIndexer", "SourceRelease", "SourceUrl"
     , "Status", "Title", "TmdbId", "TorrentState", "UpdatedAt", "UserId", "UserName", "Year" ]
   check "Request JSON roundtrip (PascalCase)"
     [ Aeson.decode (Aeson.encode (mkReq "Dune" Downloading)) == Just (mkReq "Dune" Downloading) ]
@@ -4062,6 +4062,42 @@ main = do
     [ (crTmdbId <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"Pan's Labyrinth\",\"TmdbId\":680}") :: Either String CreateRequest))
     , (crTmdbId <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"X\"}") :: Either String CreateRequest)) ]
     [ Right (Just 680), Right Nothing ]
+  -- m76: requests store season/episode + the exact TMDB id BEFORE download,
+  -- so the import step can write Kodi .nfo files in place and the scanner
+  -- can classify the file as an Episode without trusting the filename
+  let r76 = (mkReq "Family Guy" Pending) { reqTmdbId = Just 1434, reqSeason = Just 25, reqEpisode = Just 0, reqMediaType = "tv" }
+      fromPersistSE v = either (const Nothing) (\r -> Just (reqSeason r, reqEpisode r)) (parseEither requestFromPersist v)
+  check "m76: Request JSON roundtrip keeps Season/Episode/TmdbId"
+    [ (\r -> (reqTmdbId r, reqSeason r, reqEpisode r, reqMediaType r)) <$> (Aeson.decode (Aeson.encode r76) :: Maybe Request) ]
+    [ Just (Just 1434, Just 25, Just 0, "tv") ]
+  check "m76: persist roundtrip keeps season/episode; old files without them load as Nothing"
+    [ fromPersistSE (requestToPersist r76), fromPersistSE (requestToPersist (mkReq "Y" Pending)) ]
+    [ Just (Just 25, Just 0), Just (Nothing, Nothing) ]
+  check "m76: CreateRequest parses optional Season/Episode"
+    [ (\cr -> (crSeason cr, crEpisode cr)) <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"Family Guy\",\"TmdbId\":1434,\"Type\":\"tv\",\"Season\":25,\"Episode\":0}") :: Either String CreateRequest)
+    , (\cr -> (crSeason cr, crEpisode cr)) <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"X\",\"Type\":\"movie\"}") :: Either String CreateRequest) ]
+    [ Right (Just 25, Just 0), Right (Nothing, Nothing) ]
+  let epXml = episodeNfoXml "Happy Hell-o-ween" 25 0 1434
+  check "m76: episodeNfoXml -> parseEpisodeNfo roundtrip keeps title/season/episode/tmdbid"
+    (fmap (\e -> (enTitle e, enSeason e, enEpisode e, enTmdbId e)) (parseEpisodeNfo (BSC.pack (T.unpack epXml))))
+    (Right (Just "Happy Hell-o-ween", Just 25, Just 0, Just "1434"))
+  check "m76: parseEpisodeNfo rejects a <movie> root"
+    True (case parseEpisodeNfo (BSC.pack "<movie><title>x</title></movie>") of Left _ -> True; Right _ -> False)
+  check "m76: tvShowNfoXml is parseable by parseTvShowNfo with tmdb provider id"
+    (fmap (\m -> (metaTitle m, HM.lookup "tmdb" (metaProviderIds m))) (parseTvShowNfo (BSC.pack (T.unpack (tvShowNfoXml "Family Guy" 1434)))))
+    (Right (Just "Family Guy", Just "1434"))
+  check "m76: movieNfoXml is parseable by parseMovieNfo with tmdb id + year"
+    (fmap (\m -> (metaTitle m, metaYear m, HM.lookup "tmdb" (metaProviderIds m))) (parseMovieNfo (BSC.pack (T.unpack (movieNfoXml "Shrek" 76735 (Just 2001))))))
+    (Right (Just "Shrek", Just 2001, Just "76735"))
+  check "m76: classifyItem with episode .nfo sidecar WINS over a movie-looking filename"
+    (classifyItem False (Just (25, 0)) "/dl/Some.Random.Movie.2020.1080p.mkv" "Some.Random.Movie.2020.1080p")
+    ("Episode", Just "Some Random Movie", Just 25, Just 0)
+  check "m76: classifyItem with sidecar + tvshow.nfo uses the dir name as series"
+    (classifyItem True (Just (1, 2)) "/lib/MyShow/whatever.mkv" "whatever")
+    ("Episode", Just "MyShow", Just 1, Just 2)
+  check "m76: classifyItem without sidecar still falls back to filename parsing"
+    (classifyItem False Nothing "/dl/Family.Guy.S25E00.1080p.mkv" "Family.Guy.S25E00.1080p")
+    ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m68: tmdbMovieByIdUrlAt builds plain /movie/<id> (no keywords append)"
     (tmdbMovieByIdUrlAt "http://127.0.0.1:8949/3/" "K" 680)
     "http://127.0.0.1:8949/3/movie/680?api_key=K"

@@ -36,7 +36,7 @@ import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
 import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieDetailsAt, tmdbSearchMovieAt, tmdbSearchTvAt, tmdbTvDetailsKwAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
-import FMS.Modules.Metadata.Nfo (nfoPathFor, parseMovieNfo, parseTvShowNfo)
+import FMS.Modules.Metadata.Nfo (EpisodeNfo (..), nfoPathFor, parseEpisodeNfo, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), applyProviderMerge, emptyMetadata, metadataSettingsFromConfig)
 
@@ -215,10 +215,17 @@ readNfoMetadata item = do
         Left _ -> pure Nothing
         Right bytes ->
           case parseMovieNfo bytes of
-            Left err -> do
-              logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
-              pure Nothing
             Right meta -> pure (Just meta)
+            Left _ ->
+              -- m76: an <episodedetails> sidecar is not a movie NFO; parse it
+              -- as an episode NFO and lift title + tmdb id into MediaMetadata
+              -- (season/episode themselves are carried by the item record,
+              -- set by the scanner from the same file).
+              case parseEpisodeNfo bytes of
+                Right en -> pure (Just (episodeNfoToMetadata en))
+                Left err -> do
+                  logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
+                  pure Nothing
     else if itemType item == "Episode"
       then readTvShowNfo (takeDirectory (itemPath item) </> "tvshow.nfo")
       else pure Nothing
@@ -239,6 +246,16 @@ readTvShowNfo nfoPath = do
               logErr ("metadata: cannot parse " <> T.pack nfoPath <> ": " <> T.pack err)
               pure Nothing
             Right meta -> pure (Just meta)
+
+-- | m76: lift a parsed per-episode @<episodedetails>@ NFO into
+-- 'MediaMetadata' (title + tmdb provider id; season/episode live on the
+-- 'MediaItem' itself, set by the scanner from the same NFO).
+episodeNfoToMetadata :: EpisodeNfo -> MediaMetadata
+episodeNfoToMetadata en = emptyMetadata
+  { metaTitle = enTitle en
+  , metaProviderIds = maybe HM.empty (\t -> HM.singleton "tmdb" t) (enTmdbId en)
+  , metaSource = "nfo"
+  }
 
 -- | Milestone 4c (docs/roadmap.org milestone 4, docs/todo.org section 3):
 -- the TMDB fallback for 'refreshMetadata'. When no NFO exists (or it does

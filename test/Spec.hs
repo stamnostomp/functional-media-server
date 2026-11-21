@@ -76,7 +76,8 @@ import FMS.Modules.Library.Monad (libraryAcidKey, scanProgressData, withScanLock
 import FMS.Modules.Library.Watch (eventsPending, watchFile, watchMediaFile)
 import FMS.Modules.Library.Folders (loadFolders, nextFolderId, saveFolders, validateFolderPath)
 import FMS.Modules.Library.Scan
-  ( chunksOf
+  ( episodeTitleFromName
+  , chunksOf
   , classifyItem
   , diffScan
   , extraTypeFor
@@ -5029,7 +5030,8 @@ main = do
                            , "Episodes" .= [ object [ "EpisodeNumber" .= (1 :: Int), "Downloaded" .= False ] ] ]
                    , object [ "SeasonNumber" .= (0 :: Int), "Name" .= ("Specials" :: T.Text)
                            , "Episodes" .= ([] :: [Aeson.Value]) ] ]
-      merged72 = BSC.unpack (LBS.toStrict (Aeson.encode (mergeLibraryEpisodes "Family Guy" [fgEp47, fgEp24e99, simpsonsEp, mv47] seasons72)))
+      merged72 = BSC.unpack (LBS.toStrict (Aeson.encode (mergeLibraryEpisodes "Family Guy" (Just "/poster.jpg") [fgEp47, fgEp24e99, simpsonsEp, mv47] seasons72)))
+
       posOf pat str = let (pr, r) = BSC.breakSubstring (BSC.pack pat) (BSC.pack str)
                       in if BSC.null r then Nothing else Just (BSC.length pr)
       i25 = posOf "\"SeasonNumber\":25" merged72
@@ -5043,9 +5045,9 @@ main = do
   check "m72 merge appends S24E99 into the EXISTING season 24 exactly once"
     [True, True]
     [ "\"EpisodeNumber\":99" `isInfixOf` merged72, countOcc "\"EpisodeNumber\":99" (BSC.pack merged72) == 1 ]
-  check "m72 merge keeps existing S24E1 once and does not flag it"
-    [True, False] [ countOcc "\"EpisodeNumber\":1" (BSC.pack merged72) == 1
-               , "\"EpisodeNumber\":1,\"Downloaded\":true" `isInfixOf` merged72 ]
+  check "m72 merge keeps existing S24E1 unflagged (S24E1 = last key in its object)"
+    [True, False] [ "\"Downloaded\":false,\"EpisodeNumber\":1}" `isInfixOf` merged72
+               , "\"Downloaded\":true,\"EpisodeNumber\":1}" `isInfixOf` merged72 ]
   check "m72 merge ignores other series and movies"
     [False, False]
     [ "Simpsons" `isInfixOf` merged72, "\"ItemId\":\"m1\"" `isInfixOf` merged72 ]
@@ -5058,6 +5060,27 @@ main = do
     [ countOcc "\"EpisodeNumber\":99" (BSC.pack att72) == 1
     , "\"Downloaded\":true" `isInfixOf` att72
     , "\"SeasonNumber\":25" `isInfixOf` att72 ]
+
+  -- m73: synthetic (TMDB-unknown) season gets a full greyed grid, cleaned
+  -- episode title from the filename, and the series poster as the still
+  check "m73 synthetic S25 has 21 rows (E00 filled + E01..E20 greyed placeholders)"
+    [True, True]
+    [ countOcc "\"EpisodeNumber\":" (BSC.pack merged72) >= 22  -- S24E1, S24E99, S25 grid(21)
+    , countOcc "\"Name\":\"Episode 5\"" (BSC.pack merged72) == 1 ]
+  check "m73 placeholder rows are greyed (Downloaded:false) and carry no ItemId"
+    [True, False]
+    [ "\"AirDate\":null,\"Downloaded\":false,\"EpisodeNumber\":5,\"Name\":\"Episode 5\",\"Overview\":null,\"StillUrl\":\"/poster.jpg\"}" `isInfixOf` merged72
+    , "\"Name\":\"Episode 5\",\"Overview\":null,\"StillUrl\":\"/poster.jpg\",\"ItemId\"" `isInfixOf` merged72 ]
+  check "m73 downloaded synthetic episode uses the cleaned filename title + poster still"
+    [True, True]
+    [ "\"Downloaded\":true,\"EpisodeNumber\":0,\"ItemId\":\"ep1\",\"Name\":\"Happy Hell-o-ween\"" `isInfixOf` merged72
+    , "\"StillUrl\":\"/poster.jpg\"}" `isInfixOf` merged72 ]
+  check "m73 episodeTitleFromName matrix"
+    [ episodeTitleFromName "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+    , episodeTitleFromName "Show.S01E02.Episode.Title.2160p.WEB-DL.x265-GRP"
+    , episodeTitleFromName "Show.S01E02.720p"
+    , episodeTitleFromName "NoTagHere" ]
+    [ Just "Happy Hell-o-ween", Just "Episode Title", Nothing, Nothing ]
   -- route order: the Series literals must win over the items captures
   check "m47 firstMatch: GET /Series/Search -> the literal route"
     [Just [Lit "Series", Lit "Search"]]

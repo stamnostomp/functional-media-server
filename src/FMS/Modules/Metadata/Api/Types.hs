@@ -2,6 +2,7 @@ module FMS.Modules.Metadata.Api.Types
   ( TmdbResult(..)
   , releaseYear
   , cleanTitleForProvider
+  , releaseTagTokens
   , pickTmdbResult
   , originalTitlesOf
   ) where

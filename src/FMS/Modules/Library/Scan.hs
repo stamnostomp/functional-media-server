@@ -9,6 +9,7 @@ module FMS.Modules.Library.Scan
   , classifyItem
   , parseEpisodeFilename
   , parseEpisodeTagPos
+  , episodeTitleFromName
   , seriesFromEpisodeName
   , extraTypeFor
   , hasTvShowNfo
@@ -53,7 +54,7 @@ import System.Directory
 import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
-import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider)
+import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider, releaseTagTokens)
 import FMS.Modules.Metadata.Nfo (nfoPathFor)
 
 -- | Extensions recognised as media files (lowercase, with dot).
@@ -169,6 +170,41 @@ parseEpisodeTagPos t = go 0 (T.unpack t)
                 _                       -> go (i + 1) rest
             _ -> go (i + 1) rest
       | otherwise = go (i + 1) rest
+
+-- | m73: the episode title of an episode file base name -- the part AFTER
+-- the @SxxEyy@ tag with dots/underscores turned into spaces and release
+-- tags / bracketed groups / the trailing release-group token dropped
+-- (dashes inside words are kept: episode titles use them, e.g.
+-- @Happy.Hell-o-ween.1080p...@ -> @"Happy Hell-o-ween"@). 'Nothing' when
+-- nothing usable remains. Pure.
+episodeTitleFromName :: Text -> Maybe Text
+episodeTitleFromName baseName =
+  case parseEpisodeTagPos baseName of
+    Nothing -> Nothing
+    Just (pos, _, _) ->
+      let afterTag = dropTag (drop pos (T.unpack baseName))
+          spaced   = T.map (\c -> if c == '.' || c == '_' then ' ' else c) (T.pack afterTag)
+          toks0    = filter (not . T.null) (T.words spaced)
+          isBracketed t = T.any (`elem` ("()[]{}" :: String)) t
+          toks1    = filter (\t -> not (isBracketed t)
+                                   && T.toLower t `notElem` releaseTagTokens) toks0
+          -- drop a trailing release-group token ("x265-MeGusta", "-LAMA")
+          toks2    = case reverse toks1 of
+            (t : revRest) | T.isInfixOf (T.singleton '-') t -> reverse revRest
+            _                                     -> toks1
+          cleaned  = T.unwords (filter (not . T.all isDigit) toks2)
+      in if T.null cleaned then Nothing else Just cleaned
+  where
+    dropTag (c : rest) | c == 's' || c == 'S' =
+      case span isDigit rest of
+        (ds, rest') | not (null ds) -> case rest' of
+          (e : rest'') | e == 'e' || e == 'E' ->
+            case span isDigit rest'' of
+              (es, rest''') | not (null es) -> rest'''
+              _                             -> rest''
+          _ -> rest'
+        _ -> rest
+    dropTag r = r
 
 -- | m44: the series name of an episode file base name -- the part BEFORE
 -- the first @SxxEyy@ tag, cleaned of release tags via

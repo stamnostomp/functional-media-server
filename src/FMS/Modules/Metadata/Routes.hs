@@ -60,6 +60,7 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdmin, visibleItems)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
+import FMS.Modules.Library.Scan (episodeTitleFromName)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, lookupSeriesCache, storeSeriesCache)
 import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
@@ -574,7 +575,32 @@ fetchAndCacheEpisodes apiKey base imgBase imgSize tid tidTxt items = do
           posterUrl = fmap (\p -> imgBase <> "/" <> imgSize <> p) (tdPoster d)
           year = tdFirstAirDate d >>= releaseYear
           seasonsSorted = sortOn (\sn -> (tsSeasonNumber sn == 0, tsSeasonNumber sn)) (tdSeasons d)
-      seasonVals <- forM seasonsSorted $ \sn -> do
+      -- m73: library episodes whose season the tv detail does not list
+      -- (e.g. a brand-new season) still get a full TMDB grid when the
+      -- season endpoint itself has the data (the detail list can be stale)
+      let libSeasons = nub [ fromMaybe 0 (itemSeason i)
+                           | i <- items
+                           , T.toLower (itemType i) == "episode"
+                           , maybe False (\sn -> T.toLower sn == T.toLower seriesName) (itemSeries i)
+                           , isJust (itemSeason i) ]
+          knownSeasons = map tsSeasonNumber (tdSeasons d)
+          missingSeasons = filter (`notElem` knownSeasons) libSeasons
+      extraSeasonVals <- forM missingSeasons $ \n -> do
+        eres <- liftIO (tmdbSeasonAt base apiKey tid n)
+        case eres of
+          Left _ -> pure []
+          Right es -> pure
+            [ object
+                [ "SeasonNumber" .= n
+                , "Name"         .= ("Season " <> T.pack (show n))
+                , "Episodes"     .= [ object
+                    [ "EpisodeNumber" .= teEpisodeNumber e
+                    , "Name"          .= teName e
+                    , "Overview"      .= teOverview e
+                    , "AirDate"       .= teAirDate e
+                    , "StillUrl"      .= fmap (\p -> imgBase <> "/" <> imgSize <> p) (teStill e) ]
+                  | e <- es ] ] ]
+      seasonVals0 <- forM seasonsSorted $ \sn -> do
         let n = tsSeasonNumber sn
         eres <- liftIO (tmdbSeasonAt base apiKey tid n)
         eps <- case eres of
@@ -594,7 +620,8 @@ fetchAndCacheEpisodes apiKey base imgBase imgSize tid tidTxt items = do
           [ "SeasonNumber" .= n
           , "Name"         .= tsName sn
           , "Episodes"     .= eps ])
-      let rawPayload = object
+      let seasonVals = seasonVals0 ++ concat extraSeasonVals
+          rawPayload = object
             [ "Id" .= tidTxt
             , "Name" .= tdName d
             , "Year" .= year
@@ -626,8 +653,11 @@ attachDownloadedLive :: Text -> Value -> [MediaItem] -> Value
 attachDownloadedLive seriesName payload items = case payload of
   Object o -> case KeyMap.lookup (Key.fromText "Seasons") o of
     Just (Array seasons) ->
-      Object (KeyMap.insert (Key.fromText "Seasons")
-        (Array (V.fromList (mergeLibraryEpisodes seriesName items (map seasonV (V.toList seasons))))) o)
+      let mPoster = case KeyMap.lookup (Key.fromText "PosterUrl") o of
+            Just (String p) -> Just p
+            _               -> Nothing
+      in Object (KeyMap.insert (Key.fromText "Seasons")
+        (Array (V.fromList (mergeLibraryEpisodes seriesName mPoster items (map seasonV (V.toList seasons))))) o)
     _ -> payload
   _ -> payload
   where
@@ -658,10 +688,14 @@ attachDownloadedLive seriesName payload items = case payload of
 -- synthetic episode carries @ItemId@ so API clients can play it directly;
 -- the Elm UI resolves playback via series+S/E lookup, extra keys are
 -- ignored by its decoders.
-mergeLibraryEpisodes :: Text -> [MediaItem] -> [Value] -> [Value]
-mergeLibraryEpisodes seriesName items seasons0 =
+mergeLibraryEpisodes :: Text -> Maybe Text -> [MediaItem] -> [Value] -> [Value]
+mergeLibraryEpisodes seriesName mPoster items seasons0 =
   sortOn seasonSortKey (foldl' addEpisode seasons0 missingItems)
   where
+    -- m73: a TMDB-unknown season still gets a full greyed grid: downloaded
+    -- episodes filled in, placeholders E01..E20 greyed out (real TMDB
+    -- data replaces the placeholders once TMDB lists the season)
+    syntheticSeasonEpisodeCount = 20 :: Int
     seasonSortKey v = case v of
       Object o -> case KeyMap.lookup (Key.fromText "SeasonNumber") o of
         Just (Number n) -> (round n == 0, round n)
@@ -688,23 +722,38 @@ mergeLibraryEpisodes seriesName items seasons0 =
           e  = fromMaybe 0 (itemEpisode i)
           epVal = object
             [ "EpisodeNumber" .= e
-            , "Name"          .= itemTitle i
+            , "Name"          .= fromMaybe (itemTitle i) (episodeTitleFromName (itemTitle i))
             , "Overview"      .= (Nothing :: Maybe Text)
             , "AirDate"       .= (Nothing :: Maybe Text)
-            , "StillUrl"      .= (Nothing :: Maybe Text)
+            , "StillUrl"      .= mPoster
             , "Downloaded"    .= True
             , "ItemId"        .= itemId i ]
       in case break (isSeason s) acc of
            (before, Object so : after)
              | Just (Array ea) <- KeyMap.lookup (Key.fromText "Episodes") so ->
-                 let eps' = sortOn epNum (V.toList ea ++ [epVal])
+                 -- drop a greyed placeholder with the same number (a second
+                 -- downloaded episode of the same synthetic season)
+                 let eps' = sortOn epNum (filter (\v -> epNum v /= e) (V.toList ea) ++ [epVal])
                      so'  = KeyMap.insert (Key.fromText "Episodes") (Array (V.fromList eps')) so
                  in before ++ [Object so'] ++ after
            (before, rest) ->
-             before ++ [ object
-               [ "SeasonNumber" .= s
-               , "Name"         .= ("Season " <> T.pack (show s))
-               , "Episodes"     .= [epVal] ] ] ++ rest
+             -- brand-new synthetic season: full greyed placeholder grid
+             -- with the downloaded episode(s) filled in
+             let dlEps   = [ fromMaybe 0 (itemEpisode j) | j <- libEps, fromMaybe 0 (itemSeason j) == s ]
+                 placeholders =
+                   [ object
+                       [ "EpisodeNumber" .= n
+                       , "Name"          .= ("Episode " <> T.pack (show n))
+                       , "Overview"      .= (Nothing :: Maybe Text)
+                       , "AirDate"       .= (Nothing :: Maybe Text)
+                       , "StillUrl"      .= mPoster
+                       , "Downloaded"    .= False ]
+                   | n <- [1 .. syntheticSeasonEpisodeCount], n `notElem` dlEps ]
+                 allEps  = sortOn epNum (placeholders ++ [epVal])
+             in before ++ [ object
+                  [ "SeasonNumber" .= s
+                  , "Name"         .= ("Season " <> T.pack (show s))
+                  , "Episodes"     .= allEps ] ] ++ rest
     isSeason s v = case v of
       Object o -> KeyMap.lookup (Key.fromText "SeasonNumber") o == Just (Number (fromIntegral s))
       _ -> False

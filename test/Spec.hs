@@ -13,7 +13,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBSC
-import Data.Aeson (object, (.=))
+import Data.Aeson (Value (..), object, (.=))
 import Data.ByteString.Builder (toLazyByteString)
 import Network.Wai (defaultRequest, queryString)
 import Network.Wai.Internal (Response (..))
@@ -149,7 +149,7 @@ import FMS.Modules.Hls (hlsArgs, hlsArgsFor, hlsModeLabel, hlsAudioNeedsAac, hls
 import FMS.Modules.Images (imageExtFor, imagePathFor, imageTag, isUnderDir, isValidImageType, resizeArgs, selectBackdrop)
 import FMS.Modules.Stream (resolveRange)
 import FMS.Modules.Subtitles (SubtitleSource (..), embeddedSubtitleSources, embeddedToVttArgs, indexSources, pickSubtitles, subtitleExts, subtitleList, subtitleListSources, subtitleToVttArgs)
-import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
+import FMS.Modules.Chapters (Chapter (..), chapterImageArgs, introFromChapters, introToJson, parseSceneIntro, probeSceneIntroArgs, sceneIntroMinSec, chapterImagePathFor, chapterToJson, fallbackChapters, parseChaptersJson, probeChaptersArgs, ticksFromSeconds)
 import FMS.Modules.Thumbs (thumbArgs, thumbPathFor)
 import FMS.Modules.Dash (dashArgs, dashArgsWith, dashDirFor, isValidDashSegName)
 import FMS.Modules.Transcode (burnInFilter, effectiveBitrateCap, hwEncoderFor, normalizeHwAccel, spliceBeforeF, streamTranscodeTimeoutSec, transcodeArgs, transcodeArgsWith)
@@ -3013,6 +3013,37 @@ main = do
        _ -> (True, Nothing))
   check "chapterImagePathFor: stateDir/chapters/<id>-<version>-<index>.jpg"
     "/st/chapters/7-1-3.jpg" (chapterImagePathFor "/st" "7" 1 3)
+  -- m75: intro marker detection (named chapter wins, else scene scan)
+  check "m75 introFromChapters: named intro chapter wins, end = next chapter start"
+    (Just (90, 1800))
+    (introFromChapters [Chapter 0 0 Nothing, Chapter 1 90 (Just "Intro"), Chapter 2 1800 Nothing] 1320)
+  check "m75 introFromChapters: 'Opening Credits' matches, end falls back to duration"
+    (Just (0, 60))
+    (introFromChapters [Chapter 0 0 (Just "Opening Credits"), Chapter 1 60 Nothing] 1320)
+  check "m75 introFromChapters: no intro-named chapter -> Nothing (scene scan decides)"
+    Nothing
+    (introFromChapters [Chapter 0 0 (Just "Scene 1"), Chapter 1 132 Nothing] 1320)
+  check "m75 parseSceneIntro: first pts_time >= min (25s) wins"
+    (Just 30.155)
+    (parseSceneIntro (LBS.fromStrict (BSC.pack "frame:3 pts:21605 pts_time:21.605\nframe:9 pts:30155 pts_time:30.155\nframe:11 pts:31073 pts_time:31.073\n")))
+  check "m75 parseSceneIntro: all earlier than min -> Nothing"
+    Nothing
+    (parseSceneIntro (LBS.fromStrict (BSC.pack "pts_time:1.001\npts_time:11.261\n")))
+  check "m75 parseSceneIntro: garbage -> Nothing"
+    Nothing
+    (parseSceneIntro (LBS.fromStrict (BSC.pack "nope")))
+  check "m75 probeSceneIntroArgs: 180s window, scene threshold 0.5, metadata print"
+    [True, True]
+    [ any (\a -> a == "180.0") (probeSceneIntroArgs "/x.mkv")
+    , "select=gt(scene\\,0.5),metadata=print:file=-" `elem` probeSceneIntroArgs "/x.mkv" ]
+  let introJson = BSC.unpack (LBS.toStrict (Aeson.encode (introToJson (Just (0, 30.155)))))
+      introNull = BSC.unpack (LBS.toStrict (Aeson.encode (introToJson Nothing)))
+  check "m75 introToJson: ticks encoded + nulls when Nothing"
+    [True, True, True]
+    [ "\"EndPositionTicks\":301550000" `isInfixOf` introJson
+    , "\"StartPositionTicks\":0" `isInfixOf` introJson
+    , "\"EndPositionTicks\":null" `isInfixOf` introNull ]
+
   check "probeChaptersArgs asks for chapters + format as JSON"
     (True, True) (elem "-show_chapters" (probeChaptersArgs "x"), elem "-show_format" (probeChaptersArgs "x"))
   check "chapterImageArgs: -ss start before -i, single mjpeg frame to pipe"

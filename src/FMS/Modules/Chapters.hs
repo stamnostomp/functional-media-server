@@ -5,6 +5,13 @@ module FMS.Modules.Chapters
   , parseChaptersJson
   , probeChapters
   , probeChaptersArgs
+  , probeSceneIntroArgs
+  , parseSceneIntro
+  , introFromChapters
+  , introToJson
+  , sceneIntroMinSec
+  , sceneIntroMaxSec
+  , sceneIntroThreshold
   , chapterImageArgs
   , chapterImagePathFor
   , chapterToJson
@@ -20,9 +27,12 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.ByteString.Char8 as BSC
+import Data.Maybe (listToMaybe)
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseLBS)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
+import qualified Data.Text.IO as TIO
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), (<.>), takeDirectory)
 import System.Process
@@ -36,7 +46,7 @@ import Text.Read (readMaybe)
 
 import FMS.Core.Module (Module(..), Segment(..), get, jsonResponse)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
-import FMS.Core.Process (runProcessBS, showBS)
+import FMS.Core.Process (runProcessBS, runProcessBSTimeout, showBS)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
@@ -57,6 +67,7 @@ chaptersModule = Module
       [ get [Lit "items", Capture "id", Lit "Chapters"] chaptersHandler
       , get [Lit "items", Capture "id", Lit "Chapters", Capture "index", Lit "Image"]
           chapterImageHandler
+      , get [Lit "items", Capture "id", Lit "Intro"] introHandler
       ]
   }
 
@@ -214,6 +225,118 @@ chapterImagePathFor stateDir i version idx =
 -- | @GET \/items\/:id\/Chapters@ — 404 for an unknown item, 400 for a
 -- bad @version@ param. Probes the (version-selected) file and answers
 -- the Jellyfin-shaped chapter array.
+-- | m75: @GET /items/:id/Intro@ — the intro marker of an item as
+-- @{"StartPositionTicks":..,"EndPositionTicks":..}@ (nulls when the item
+-- has no detectable intro). A chapter NAMED intro/opening wins; otherwise,
+-- for Episode items longer than 5 minutes, the first strong scene change
+-- (score >= 'sceneIntroThreshold') at or after 'sceneIntroMinSec' within
+-- the first 'sceneIntroMaxSec' seconds is the intro end (e.g. Family Guy's
+-- cold open ends ~31s in, while the 10 evenly-spaced fallback chapters
+-- would wrongly say 132s). The scene scan is cached per file under
+-- @stateDir/intro/<id>-<size>.txt@.
+introHandler :: [(Text, Text)] -> Request -> AppM Response
+introHandler captures req =
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i  -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          path <- selectedPath item req
+          cfg <- asks envConfig
+          let cacheF = configStateDir cfg </> "intro"
+                       </> (T.unpack (itemId item) <> "-" <> show (itemSize item) <.> "txt")
+          cached <- liftIO (readIntroCache cacheF)
+          mIntro <- case cached of
+            Just v  -> pure v
+            Nothing -> do
+              r <- liftIO (probeChapters path)
+              let (dur, chs) = either (const (0, [])) id r
+              case introFromChapters chs dur of
+                Just pr -> pure (Just pr)
+                Nothing
+                  | T.toLower (itemType item) == "episode" && dur > 300 -> do
+                      ms <- liftIO (probeSceneIntro path)
+                      liftIO (writeIntroCache cacheF ms)
+                      pure (fmap (\e -> (0, e)) ms)
+                  | otherwise -> pure Nothing
+          pure (jsonResponse (introToJson mIntro))
+
+-- | Scene-change scan window/threshold (m75).
+sceneIntroMinSec, sceneIntroMaxSec, sceneIntroThreshold :: Double
+sceneIntroMinSec = 25
+sceneIntroMaxSec = 180
+sceneIntroThreshold = 0.5
+
+-- | ffmpeg args for the intro scene scan: decode at most the first
+-- 'sceneIntroMaxSec' seconds, keep frames whose scene score exceeds the
+-- threshold, and print each kept frame's pts_time (pure, unit-testable).
+probeSceneIntroArgs :: FilePath -> [String]
+probeSceneIntroArgs path =
+  [ "-v", "info"
+  , "-t", show sceneIntroMaxSec
+  , "-i", path
+  , "-vf", "select=gt(scene\\," ++ show sceneIntroThreshold ++ "),metadata=print:file=-"
+  , "-an", "-f", "null", "-" ]
+
+-- | Run the scene scan (90 s timeout — only the first 3 minutes decode) and
+-- return the intro end in seconds.
+probeSceneIntro :: FilePath -> IO (Maybe Double)
+probeSceneIntro path = do
+  (exitCode, out, _err) <- runProcessBSTimeout 90 "ffmpeg" (probeSceneIntroArgs path)
+  case exitCode of
+    ExitSuccess -> pure (parseSceneIntro out)
+    ExitFailure _ -> pure Nothing
+
+-- | Pure parser: the first @pts_time@ at or after 'sceneIntroMinSec' from
+-- ffmpeg's metadata print output (stream order is chronological).
+parseSceneIntro :: LBS.ByteString -> Maybe Double
+parseSceneIntro out =
+  let times =
+        [ readMaybe (BSC.unpack (BSC.takeWhile (/= ' ') (BSC.drop 9 rest)))
+        | line <- BSC.lines (LBS.toStrict out)
+        , (_, rest) <- [BSC.breakSubstring "pts_time:" line]
+        , not (BSC.null rest) ]
+  in listToMaybe [ t | Just t <- times, t >= sceneIntroMinSec ]
+
+-- | Pure: the intro range from chapter markers — the first chapter whose
+-- title contains "intro"/"opening" (case-insensitive); its end is the next
+-- chapter's start, or the item duration.
+introFromChapters :: [Chapter] -> Double -> Maybe (Double, Double)
+introFromChapters chs dur =
+  case filter (isIntroName . chTitle) chs of
+    (c : _) -> Just (chStartSeconds c, chapterEnd (chStartSeconds c))
+    []      -> Nothing
+  where
+    isIntroName (Just n) =
+      let l = T.toLower n
+      in "intro" `T.isInfixOf` l || "opening" `T.isInfixOf` l
+    isIntroName Nothing = False
+    chapterEnd start =
+      case listToMaybe (filter (> start) (map chStartSeconds chs)) of
+        Just e  -> e
+        Nothing -> dur
+
+-- | The Intro endpoint JSON (nulls when Nothing).
+introToJson :: Maybe (Double, Double) -> Value
+introToJson m = object
+  [ "StartPositionTicks" .= fmap (ticksFromSeconds . fst) m
+  , "EndPositionTicks"   .= fmap (ticksFromSeconds . snd) m ]
+
+readIntroCache :: FilePath -> IO (Maybe (Maybe (Double, Double)))
+readIntroCache f = do
+  ok <- doesFileExist f
+  if not ok then pure Nothing else do
+    txt <- TIO.readFile f
+    let trimmed = T.strip txt
+    pure (Just (if trimmed == "none" then Nothing else readMaybe (T.unpack trimmed) >>= \d -> Just (0, d)))
+
+writeIntroCache :: FilePath -> Maybe Double -> IO ()
+writeIntroCache f ms = do
+  createDirectoryIfMissing True (takeDirectory f)
+  TIO.writeFile f (case ms of Nothing -> T.pack "none"; Just d -> T.pack (show d))
+
 chaptersHandler :: [(Text, Text)] -> Request -> AppM Response
 chaptersHandler captures req =
   case lookup "id" captures of

@@ -9,9 +9,12 @@ module FMS.Modules.Requests.Push
   , delugeConnectBody
   , delugeConnectedBody
   , delugeTorrentsStatusBody
+  , delugeSetConfigBody
   , parseTorrentStatuses
   , delugeTorrentStatuses
   , matchTorrentProgress
+  , matchTorrentName
+  , matchesDownloadAny
   , importComplete
   , getFirstHostId
   , delugeAddMagnetBody
@@ -336,6 +339,9 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title trac
               -- answer "Unknown method". Connect to the first web.get_hosts
               -- host first; if that fails, still attempt the add as before.
               _ <- tryConnect manager cookie  -- best-effort: ignore the result
+              -- m80: re-assert uTP + unlimited queue before adding
+              -- (best-effort; id 6 is free after login/hosts/connect/add)
+              _ <- postJson manager delugeUrl cookie (delugeSetConfigBody 6)
               case mMagnet of
                 Just mag -> do
                   er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir trackers 4)
@@ -396,6 +402,28 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title trac
                 pure (Right ())
           Nothing -> pure (Left "no download source")
 
+-- | m80: core.set_config body that re-asserts the client settings FMS needs
+-- on every push/poll (best-effort): uTP both ways with peer-proportional
+-- mixed mode (the NAT here blocks outbound TCP to classic peer ports, so
+-- uTP/UDP is what actually carries peer traffic), and unlimited active
+-- queues (a stuck 0% torrent must not wedge the queue and starve new
+-- requests). Values are libtorrent settings_pack keys that Deluge passes
+-- straight through to the session.
+delugeSetConfigBody :: Int -> Value
+delugeSetConfigBody rid =
+  object [ "method" .= ("core.set_config" :: Text)
+         , "params" .= [ object
+             [ "enable_outgoing_utp" .= True
+             , "enable_incoming_utp" .= True
+             , "mixed_mode_algorithm" .= (1 :: Int)
+             , "max_active_downloading" .= (-1 :: Int)
+             , "max_active_seeding" .= (-1 :: Int)
+             , "max_active_limit" .= (-1 :: Int)
+             , "max_downloads_global" .= (-1 :: Int)
+             , "dont_count_slow_torrents" .= False
+             ] ]
+         , "id" .= rid ]
+
 -- | Pure: Deluge core.get_torrents_status body (m37) -- all torrents, asking
 -- only for the keys the progress bar needs.
 delugeTorrentsStatusBody :: Int -> Value
@@ -449,6 +477,8 @@ delugeTorrentStatuses delugeUrl delugePassword = do
                   Nothing -> pure ()
                   Just hid -> do
                     _ <- postJson manager delugeUrl cookie (delugeConnectBody (T.pack hid) 3)
+                    -- m80: re-assert uTP + unlimited queue (best-effort)
+                    _ <- postJson manager delugeUrl cookie (delugeSetConfigBody 5)
                     pure ()
             eSt <- postJson manager delugeUrl cookie (delugeTorrentsStatusBody 4)
             case eSt of
@@ -471,13 +501,41 @@ matchTorrentProgress
   -> [(Text, Text, Double, Double)]    -- ^ (torrent name, state, progress, rate)
   -> Maybe (Double, Text)
 matchTorrentProgress title mRelease torrents =
-  listToMaybe [ (prog, st) | (name, st, prog, _rate) <- torrents, matchesOne name ]
+  case matchTorrentName' title mRelease torrents of
+    Nothing -> Nothing
+    Just (name, st, prog) -> Just (prog, st)
+
+-- | m80: like 'matchTorrentProgress' but also returns the matched live
+-- torrent's NAME -- Deluge names the download folder/files after the torrent
+-- name, not the request title, so file matching needs it when the release
+-- name differs (e.g. request "Shrek 2001" pushed as a magnet whose swarm
+-- name is "Shrek (2001) [1080p]").
+matchTorrentName
+  :: Text
+  -> Maybe Text
+  -> [(Text, Text, Double, Double)]
+  -> Maybe Text
+matchTorrentName title mRelease torrents =
+  case matchTorrentName' title mRelease torrents of
+    Nothing -> Nothing
+    Just (name, _st, _prog) -> Just name
+
+matchTorrentName'
+  :: Text -> Maybe Text -> [(Text, Text, Double, Double)] -> Maybe (Text, Text, Double)
+matchTorrentName' title mRelease torrents =
+  listToMaybe [ (name, st, prog) | (name, st, prog, _rate) <- torrents, matchesOne name ]
   where
     nt = normalizeTitle title
     cands = nt : maybe [] (\rel -> [normalizeTitle rel]) mRelease
     matchesOne name =
       let nn = normalizeTitle name
       in any (\c -> not (T.null c) && (nn == c || T.isInfixOf c nn || T.isInfixOf nn c)) cands
+
+-- | m80: does any candidate name match a file in the download dir? Used to
+-- also try the live Deluge torrent name (see 'matchTorrentName') when the
+-- request title / release name do not match the downloaded file name.
+matchesDownloadAny :: [Text] -> [FilePath] -> Bool
+matchesDownloadAny cands files = any (\c -> matchesDownload c files) cands
 
 -- | m38: should a Downloading request be marked Imported? When a live
 -- Deluge torrent matches (by title/release name), only when it is complete

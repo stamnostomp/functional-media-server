@@ -25,6 +25,7 @@ import Data.SafeCopy (safeGet, safePut)
 import Data.Serialize (runGet, runPut)
 import Data.Word (Word8)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime (..), addUTCTime, getCurrentTime)
 import Data.Time.LocalTime (TimeOfDay (..), timeOfDayToTime)
@@ -111,7 +112,7 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.AnnounceTrackers (parseTrackerList)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetConfigBody, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentName, matchTorrentProgress, matchesDownload, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import Data.Aeson.Types (parseEither)
 import FMS.Modules.Requests.Persistence (requestFromPersist, requestToPersist)
@@ -335,8 +336,8 @@ m29MockTests = do
     pure (Just (m29ok res))
   logATxt <- do e <- doesFileExist logA; if e then readFile logA else pure ""
   let logAMethods = map logMethod (lines logATxt)
-  check "m29 push: mock saw auth.login -> web.get_hosts -> web.connect -> core.add_torrent_magnet in order"
-    logAMethods ["auth.login", "web.get_hosts", "web.connect", "core.add_torrent_magnet"]
+  check "m29 push: mock saw auth.login -> web.get_hosts -> web.connect -> core.add_torrent_magnet in order (m80: core.set_config after connect)"
+    logAMethods ["auth.login", "web.get_hosts", "web.connect", "core.set_config", "core.add_torrent_magnet"]
   check "m29 pushRequest succeeds against the connect-requiring mock" [mPush] [Just True]
   check "m29 add_torrent_magnet carried download_location" [ (m29dir </> "dl") `isInfixOf` logATxt ] [True]
   fbA <- doesFileExist (m29dir </> "dl" </> "test-movie.magnet")
@@ -423,8 +424,8 @@ m37MockTests = do
             (Right (sort [ ("Shrek.2001.1080p.BluRay.x265-LAMA", "Downloading", 42.5, 1024.0)
                          , ("Other Movie 2020", "Seeding", 100.0, 0.0) ]))
           logTxt <- readFile logC
-          check "m37 delugeTorrentStatuses: mock saw login -> get_hosts -> connect -> get_torrents_status in order"
-            (lines logTxt) ["auth.login", "web.get_hosts", "web.connect", "core.get_torrents_status"]
+          check "m37 delugeTorrentStatuses: mock saw login -> get_hosts -> connect -> get_torrents_status in order (m80: core.set_config after connect)"
+            (lines logTxt) ["auth.login", "web.get_hosts", "web.connect", "core.set_config", "core.get_torrents_status"]
           resBad <- delugeTorrentStatuses "http://127.0.0.1:8914/json" "wrong"
           check "m37 delugeTorrentStatuses: bad password -> Left"
             (either (const True) (const False) resBad) True)
@@ -4593,6 +4594,26 @@ main = do
     (matchTorrentProgress "Nope" Nothing sts37) Nothing
   check "m37 matchTorrentProgress: empty torrent list -> Nothing"
     (matchTorrentProgress "Shrek 2001" Nothing []) Nothing
+  -- milestone 80: torrent-name file matching + deluge client config body
+  check "m80 matchTorrentName: returns matched torrent name"
+    (matchTorrentName "Other Movie" Nothing sts37) (Just "Other Movie 2020")
+  check "m80 matchTorrentName: no match -> Nothing"
+    (matchTorrentName "Nope" Nothing sts37) Nothing
+  check "m80 matchesDownloadAny: torrent name matches file, title does not"
+    (matchesDownloadAny ["Other Movie 2020"] ["/dl/Other Movie (2020) [1080p]/Other Movie 2020.mkv"])
+    True
+  check "m80 matchesDownloadAny: no candidate matches -> False"
+    (matchesDownloadAny ["Nope"] ["/dl/Shrek.2001.1080p.YIFY.mp4"]) False
+  check "m80 delugeSetConfigBody: core.set_config with utp + unlimited queue"
+    (let enc = TE.decodeUtf8 (LBS.toStrict (Aeson.encode (delugeSetConfigBody 5)))
+     in ( T.isInfixOf "\"method\":\"core.set_config\"" enc
+        , T.isInfixOf "\"enable_outgoing_utp\":true" enc
+        , T.isInfixOf "\"enable_incoming_utp\":true" enc
+        , T.isInfixOf "\"mixed_mode_algorithm\":1" enc
+        , T.isInfixOf "\"max_active_downloading\":-1" enc
+        , T.isInfixOf "\"max_active_seeding\":-1" enc
+        , T.isInfixOf "\"id\":5" enc ))
+    (True, True, True, True, True, True, True)
   -- m50: attachLiveProgress fills ANY matching request (not only Downloading)
   check "m50 attachLiveProgress: Imported request with matching Seeding torrent gets Progress 100/Seeding"
     (map (\rq -> (reqStatus rq, reqProgress rq, reqTorrentState rq))

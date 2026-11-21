@@ -42,7 +42,7 @@ import FMS.Modules.Metadata.Nfo (episodeNfoXml, movieNfoXml, tvShowNfoXml)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
 import FMS.Modules.AnnounceTrackers (currentAnnounceTrackers)
-import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentProgress, matchesRequestDownload, parseProxiedPath, pushRequest)
+import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentName, matchTorrentProgress, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, pushRequest)
 import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), SettingsPatch (..), duplicateOf, effectiveAutoApproveGb, isActiveStatus, mergeSettings, settingsPublicJson)
 
 jsonCT :: ResponseHeaders
@@ -105,6 +105,17 @@ instance FromJSON CreateRequest where
 
 -- Handlers ------------------------------------------------------------------
 
+-- | m80: the downloaded file is named after the live Deluge torrent, which
+-- can differ from the request title/release (magnet pushes) -- also match
+-- files against the matched torrent's name.
+m80TorrentFileMatch
+  :: [(Text, Text, Double, Double)]  -- ^ live deluge statuses
+  -> Text -> Maybe Text -> [FilePath] -> Bool
+m80TorrentFileMatch sts t rel fs =
+  case matchTorrentName t rel sts of
+    Nothing -> False
+    Just tn -> matchesDownloadAny [tn] fs
+
 -- | m20b: mark Downloading requests as Imported when a media file whose
 -- (extension-stripped) name normalizes to the request title appears in
 -- the download dir. Persists the status change. m30: the download dir is
@@ -119,11 +130,12 @@ markImported statuses reqs = do
   let files = either (const []) id efiles
   mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading
                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) files
+                         || m80TorrentFileMatch statuses (reqTitle r) (reqSourceRelease r) files
                      , importComplete statuses (reqTitle r) (reqSourceRelease r) ]  -- m38: only when the torrent is complete
   where
     markOne r = do
       _ <- setRequestStatus (reqId r) Imported Nothing
-      applyRequestTmdb r   -- m68: resolve metadata from the request's TMDB id when present
+      applyRequestTmdb statuses r   -- m68: resolve metadata from the request's TMDB id when present (m80: statuses for torrent-name file match)
       pure ()
 
 -- | m68/m76: when a request carries a TMDB id (Discover card), the content
@@ -134,8 +146,8 @@ markImported statuses reqs = do
 -- file exactly (right show, Episode + S/E) even when the release file name
 -- is garbage, and the TMDB tag is stored persistently in the NFO. Also set
 -- the scanned item's metadata straight from the TMDB id (no name search).
-applyRequestTmdb :: Request -> AppM ()
-applyRequestTmdb r =
+applyRequestTmdb :: [(Text, Text, Double, Double)] -> Request -> AppM ()
+applyRequestTmdb statuses r =
   case reqTmdbId r of
     Nothing -> pure ()
     Just tid -> do
@@ -150,7 +162,8 @@ applyRequestTmdb r =
           let files = either (const []) id efiles
               cands = [ f | f <- files
                       , not (null dir)
-                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [f] ]
+                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [f]
+                          || m80TorrentFileMatch statuses (reqTitle r) (reqSourceRelease r) [f] ]
           case cands of
             [] -> pure ()
             (f : _) -> do
@@ -162,7 +175,8 @@ applyRequestTmdb r =
               let icands = [ i | i <- items
                           , not (null dir)
                           , dir `isPrefixOf` itemPath i
-                          , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [itemPath i] ]
+                          , matchesRequestDownload (reqTitle r) (reqSourceRelease r) [itemPath i]
+                              || m80TorrentFileMatch statuses (reqTitle r) (reqSourceRelease r) [itemPath i] ]
               mapM_ (setItemMetadataFromTmdb cfg ms tid isTv) icands
 
 -- | m76: tv request — write @tvshow.nfo@ (series title + tmdb id) into the

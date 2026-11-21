@@ -14,6 +14,7 @@ module FMS.Modules.Library.Scan
   , seriesFromEpisodeName
   , extraTypeFor
   , hasTvShowNfo
+  , tvShowSeriesTitle
   , isMediaFile
   , mimeFor
   , mediaExtensions
@@ -58,6 +59,8 @@ import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirec
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
 import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider, releaseTagTokens)
+import FMS.Modules.Metadata.Nfo (parseTvShowNfo)
+import FMS.Modules.Metadata.Types (metaTitle)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseEpisodeNfo, EpisodeNfo(..))
 
 -- | Extensions recognised as media files (lowercase, with dot).
@@ -225,6 +228,23 @@ seriesFromEpisodeName baseName =
 hasTvShowNfo :: FilePath -> IO Bool
 hasTvShowNfo path = doesFileExist (takeDirectory path </> "tvshow.nfo")
 
+-- | m76: the SERIES name for a file whose parent dir has a tvshow.nfo:
+-- the <title> from the NFO when present, else the parent dir name.
+-- 'Nothing' when there is no tvshow.nfo at all.
+tvShowSeriesTitle :: FilePath -> IO (Maybe Text)
+tvShowSeriesTitle path = do
+  ok <- hasTvShowNfo path
+  if not ok
+    then pure Nothing
+    else do
+      r <- try (BS.readFile (takeDirectory path </> "tvshow.nfo")) :: IO (Either SomeException BS.ByteString)
+      let mTitle = case r of
+            Left _ -> Nothing
+            Right b -> case parseTvShowNfo b of
+              Right m -> metaTitle m
+              Left _  -> Nothing
+      pure (Just (maybe (T.pack (takeFileName (takeDirectory path))) id mTitle))
+
 -- | Pure (milestone 4g): classify a file as an Extra (trailer,
 -- behind-the-scenes, ...) or not. The second argument is the file's base
 -- name WITHOUT extension (matched case-insensitively); the first is the
@@ -268,24 +288,22 @@ parentDirNames p = go (takeDirectory p)
 -- series name cleaned from the file name; in all other cases the type
 -- comes from the mime and the episode fields are 'Nothing'.
 classifyItem
-  :: Bool            -- ^ hasTvShowNfo (parent dir contains tvshow.nfo)
+  :: Maybe Text      -- ^ m76: series title from a parent-dir tvshow.nfo
+                     --   ('tvShowSeriesTitle'; 'Nothing' = no tvshow.nfo)
   -> Maybe (Int, Int) -- ^ m76: (season, episode) from a per-file <base>.nfo
                      --   <episodedetails> sidecar -- wins over the file name
   -> FilePath        -- ^ the file path
   -> Text            -- ^ the file base name
   -> (Text, Maybe Text, Maybe Int, Maybe Int)
-classifyItem hasNfo mEpNfo path baseName
+classifyItem mTvTitle mEpNfo path baseName
   | Just (s, e) <- mEpNfo =
       -- m76: the request-time NFO knows the exact episode (written from the
       -- TMDB id the user picked) even when the release file name has no
-      -- usable SxxEyy tag
-      let series = if hasNfo
-                     then T.pack (takeFileName (takeDirectory path))
-                     else seriesFromEpisodeName baseName
+      -- usable SxxEyy tag; the series comes from tvshow.nfo when present
+      let series = maybe (seriesFromEpisodeName baseName) id mTvTitle
       in ("Episode", Just series, Just s, Just e)
-  | hasNfo =
-      let series = T.pack (takeFileName (takeDirectory path))
-          (season, episode) = case parseEpisodeFilename baseName of
+  | Just series <- mTvTitle =
+      let (season, episode) = case parseEpisodeFilename baseName of
             Just (s, e) -> (Just s, Just e)
             Nothing     -> (Nothing, Nothing)
       in ("Episode", Just series, season, episode)
@@ -402,11 +420,11 @@ itemFromPath :: Text -> FilePath -> IO MediaItem
 itemFromPath folder p = do
   size  <- getFileSize p
   mtime <- getModificationTime p
-  nfo   <- hasTvShowNfo p
+  tvSeries <- tvShowSeriesTitle p
   epNfo <- episodeNfoSidecar p
   let base  = T.pack (takeBaseName p)
       mime  = mimeFor p
-      (itype, series, season, episode) = classifyItem nfo epNfo p base
+      (itype, series, season, episode) = classifyItem tvSeries epNfo p base
       (finalType, extra, finalSeries, finalSeason, finalEpisode) =
         case extraTypeFor p base of
           Just et | "video" `T.isPrefixOf` mime -> ("Extra", Just et, Nothing, Nothing, Nothing)

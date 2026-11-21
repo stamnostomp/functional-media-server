@@ -34,7 +34,7 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (scanDirectory)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, TmdbTvDetails(..))
+import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, TmdbEpisode (..), TmdbTvDetails(..))
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, tmdbResultToMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), msTmdbApiKey)
 import FMS.Modules.Metadata.Nfo (episodeNfoXml, movieNfoXml, tvShowNfoXml)
@@ -180,10 +180,18 @@ applyTvRequestTmdb cfg ms tid r f = do
                <> ") next to " <> T.pack f)
       case (reqSeason r, reqEpisode r) of
         (Just sn, Just ep) -> do
+          -- m76: prefer the real episode title from TMDB
+          -- (/tv/<id>/season/<s>) over the release file name
+          esres <- liftIO (tmdbSeasonAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid sn)
+          let epTitle = case esres of
+                Right es -> case [ teName e | e <- es, teEpisodeNumber e == ep, Just _ <- [teName e] ] of
+                  (Just t : _) -> t
+                  _            -> T.pack (takeBaseName f)
+                Left _ -> T.pack (takeBaseName f)
           liftIO (TIO.writeFile (replaceExtension f ".nfo")
-                     (episodeNfoXml (T.pack (takeBaseName f)) sn ep tid))
+                     (episodeNfoXml epTitle sn ep tid))
           logInfo ("requests: wrote episode nfo S" <> T.pack (show sn) <> "E" <> T.pack (show ep)
-                   <> " (tmdb " <> T.pack (show tid) <> ") for " <> T.pack f)
+                   <> " (\"" <> epTitle <> "\", tmdb " <> T.pack (show tid) <> ") for " <> T.pack f)
         _ -> pure ()
 
 -- | m76: movie request — write @<file>.nfo@ (title + tmdb id) next to the

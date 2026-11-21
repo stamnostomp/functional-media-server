@@ -43,7 +43,7 @@ import FMS.Core.Types.MediaItem (MediaItem(..))
 import FMS.Modules.Library.Folders
   ( defaultFolders, foldersFilePath, loadFolders, nextFolderId, saveFolders )
 import FMS.Modules.Library.Scan
-  ( classifyItem, episodeNfoSidecar, groupVersions, hasTvShowNfo, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
+  ( classifyItem, episodeNfoSidecar, groupVersions, hasTvShowNfo, tvShowSeriesTitle, isMediaFile, itemFromGroup, itemFromPath, mimeFor, planRescan
   , pooledMapIO, statFile, walkWithLoops
   )
 import FMS.Modules.Library.State
@@ -277,10 +277,10 @@ scanFoldersAndApply folders follow = do
           case mItem of
             Nothing -> pure ()
             Just item -> do
-              nfo <- liftIO (hasTvShowNfo p)
+              tvSeries <- liftIO (tvShowSeriesTitle p)
               epNfo <- liftIO (episodeNfoSidecar p)
               let baseName = T.pack (takeBaseName p)
-                  (ty, sn, se, ep) = classifyItem nfo epNfo p baseName
+                  (ty, sn, se, ep) = classifyItem tvSeries epNfo p baseName
               when (itemType item /= ty || itemSeries item /= sn
                     || itemSeason item /= se || itemEpisode item /= ep) $ do
                 _ <- withAcid (`update` ReclassifyItem p ty sn se ep)

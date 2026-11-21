@@ -632,7 +632,7 @@ main = do
   let acidDir46 = "/tmp/fms-test-acid-46"
       epPath = "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv"
       (ty46, sn46, se46, ep46) =
-        classifyItem False Nothing epPath "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
+        classifyItem Nothing Nothing epPath "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta"
   check "m46 live filename classifies as Episode/Family Guy/25/0"
     (ty46, sn46, se46, ep46) ("Episode", Just "Family Guy", Just 25, Just 0)
   resetDir acidDir46
@@ -2270,15 +2270,15 @@ main = do
     (Just (2, 5)) (parseEpisodeFilename "My Show S02E05")
   check "classifyItem with tvshow.nfo -> Episode of the dir name"
     ("Episode", Just "MyShow", Just 1, Just 2)
-    (classifyItem True Nothing "/lib/MyShow/S01E02.mp4" "S01E02")
+    (classifyItem (Just "MyShow") Nothing "/lib/MyShow/S01E02.mp4" "S01E02")
   check "classifyItem without nfo -> Movie from mime"
     ("Movie", Nothing, Nothing, Nothing)
-    (classifyItem False Nothing "/lib/movie.mp4" "movie")
+    (classifyItem Nothing Nothing "/lib/movie.mp4" "movie")
   check "m43 classifyItem: scene SxxEyy file without nfo -> Episode with cleaned series"
-    (classifyItem False Nothing "/dl/Family.Guy.S25E00.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.1080p.HEVC.x265-MeGusta")
+    (classifyItem Nothing Nothing "/dl/Family.Guy.S25E00.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.1080p.HEVC.x265-MeGusta")
     ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m44 classifyItem: exact live filename -> series cut at the SxxEyy tag"
-    (classifyItem False Nothing "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
+    (classifyItem Nothing Nothing "/dl/Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta.mkv" "Family.Guy.S25E00.Happy.Hell-o-ween.1080p.HEVC.x265-MeGusta")
     ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m44 parseEpisodeTagPos returns the tag start offset"
     (parseEpisodeTagPos "Family.Guy.S25E00.1080p.x265-MeGusta")
@@ -2293,11 +2293,11 @@ main = do
     (seriesFromEpisodeName "Family.Guy.1080p.x265-MeGusta")
     "Family Guy"
   check "m43 classifyItem with tvshow.nfo still wins (unchanged)"
-    (classifyItem True Nothing "/lib/MyShow/S01E02.mkv" "S01E02.mkv")
+    (classifyItem (Just "MyShow") Nothing "/lib/MyShow/S01E02.mkv" "S01E02.mkv")
     ("Episode", Just "MyShow", Just 1, Just 2)
   check "classifyItem without nfo, audio -> Audio"
     ("Audio", Nothing, Nothing, Nothing)
-    (classifyItem False Nothing "/lib/song.mp3" "song")
+    (classifyItem Nothing Nothing "/lib/song.mp3" "song")
   let tvNfo = BSC.pack (unlines
         [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         , "<tvshow>"
@@ -4090,14 +4090,17 @@ main = do
     (fmap (\m -> (metaTitle m, metaYear m, HM.lookup "tmdb" (metaProviderIds m))) (parseMovieNfo (BSC.pack (T.unpack (movieNfoXml "Shrek" 76735 (Just 2001))))))
     (Right (Just "Shrek", Just 2001, Just "76735"))
   check "m76: classifyItem with episode .nfo sidecar WINS over a movie-looking filename"
-    (classifyItem False (Just (25, 0)) "/dl/Some.Random.Movie.2020.1080p.mkv" "Some.Random.Movie.2020.1080p")
+    (classifyItem Nothing (Just (25, 0)) "/dl/Some.Random.Movie.2020.1080p.mkv" "Some.Random.Movie.2020.1080p")
     ("Episode", Just "Some Random Movie", Just 25, Just 0)
   check "m76: classifyItem with sidecar + tvshow.nfo uses the dir name as series"
-    (classifyItem True (Just (1, 2)) "/lib/MyShow/whatever.mkv" "whatever")
+    (classifyItem (Just "MyShow") (Just (1, 2)) "/lib/MyShow/whatever.mkv" "whatever")
     ("Episode", Just "MyShow", Just 1, Just 2)
   check "m76: classifyItem without sidecar still falls back to filename parsing"
-    (classifyItem False Nothing "/dl/Family.Guy.S25E00.1080p.mkv" "Family.Guy.S25E00.1080p")
+    (classifyItem Nothing Nothing "/dl/Family.Guy.S25E00.1080p.mkv" "Family.Guy.S25E00.1080p")
     ("Episode", Just "Family Guy", Just 25, Just 0)
+  check "m76: classifyItem uses the tvshow.nfo TITLE as series for an episode-nfo file with a garbage name"
+    (classifyItem (Just "Star Wars: Maul - Shadow Lord") (Just (1, 1)) "/downloads/garbage.name.2020.mkv" "garbage.name.2020")
+    ("Episode", Just "Star Wars: Maul - Shadow Lord", Just 1, Just 1)
   check "m68: tmdbMovieByIdUrlAt builds plain /movie/<id> (no keywords append)"
     (tmdbMovieByIdUrlAt "http://127.0.0.1:8949/3/" "K" 680)
     "http://127.0.0.1:8949/3/movie/680?api_key=K"

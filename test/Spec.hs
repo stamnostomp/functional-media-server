@@ -3814,14 +3814,15 @@ main = do
       uiKeys = case simpleItemJson uiItem of
         Aeson.Object o -> sort (map Key.toText (KeyMap.keys o))
         _ -> []
-  check "simpleItemJson: exactly the lowercase keys id/title/size/mime"
-    ["id", "mime", "size", "title"] uiKeys
-  check "simpleItemJson: values for id/title/size/mime"
-    [True, True, True, True]
+  check "simpleItemJson: exactly the lowercase keys id/title/size/mime/path (m77 adds path)"
+    ["id", "mime", "path", "size", "title"] uiKeys
+  check "simpleItemJson: values for id/title/size/mime/path"
+    [True, True, True, True, True]
     [ "\"id\":\"7\"" `BSC.isInfixOf` uiEnc
     , "\"title\":\"Movie\"" `BSC.isInfixOf` uiEnc
     , "\"size\":12345" `BSC.isInfixOf` uiEnc
-    , "\"mime\":\"video/mp4\"" `BSC.isInfixOf` uiEnc ]
+    , "\"mime\":\"video/mp4\"" `BSC.isInfixOf` uiEnc
+    , "\"path\":\"/lib/movie.mp4\"" `BSC.isInfixOf` uiEnc ]
   check "progressPercent: 0/negative duration -> 0, half -> 50, over -> 100, neg cur -> 0"
     [0, 0, 50, 100, 0, 25, 100]
     [ progressPercent 30 0, progressPercent 5 (-3), progressPercent 50 100

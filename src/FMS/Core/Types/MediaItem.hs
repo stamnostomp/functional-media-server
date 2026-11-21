@@ -247,7 +247,7 @@ instance ToJSON MediaItem where
     ]
 
 -- | The legacy SIMPLE lowercase item shape decoded by the stamno-media
--- Elm UI (@Api.elm@ itemDecoder): exactly @id@/@title@/@size@/@mime@.
+-- Elm UI (@Api.elm@ itemDecoder): @id@/@title@/@size@/@mime@/@path@.
 -- Used ONLY by the four legacy endpoints (@GET /library@,
 -- @/continuewatching@, @/popular@, @/new@); the Jellyfin-shaped
 -- endpoints keep the PascalCase 'ToJSON' above.
@@ -257,4 +257,5 @@ simpleItemJson i = object
   , "title" .= itemTitle i
   , "size"  .= itemSize i
   , "mime"  .= itemMime i
+  , "path"  .= itemPath i   -- m77: the real file path, so the UI player can show the actual FILE name (with extension), not the TMDB title
   ]

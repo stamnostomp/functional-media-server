@@ -4604,6 +4604,9 @@ main = do
     True
   check "m80 matchesDownloadAny: no candidate matches -> False"
     (matchesDownloadAny ["Nope"] ["/dl/Shrek.2001.1080p.YIFY.mp4"]) False
+  check "m80 matchesDownload: torrent-name FOLDER component matches even when the file name differs"
+    (matchesDownload "Shrek (2001) [1080p]" ["/media/downloads/Shrek (2001) [1080p]/Shrek.2001.1080p.BluRay.x264.YIFY.mp4"])
+    True
   check "m80 delugeSetConfigBody: core.set_config with utp + unlimited queue"
     (let enc = TE.decodeUtf8 (LBS.toStrict (Aeson.encode (delugeSetConfigBody 5)))
      in ( T.isInfixOf "\"method\":\"core.set_config\"" enc

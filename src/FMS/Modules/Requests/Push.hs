@@ -83,10 +83,14 @@ matchesDownload title files =
       stripExt p =
         let e = takeExtension p
         in if null e then p else take (length p - length e) p
+      -- m80: match against EVERY path component (Deluge saves into
+      -- <downloads>/<Torrent.Name>/<release file>), not just the file name
+      comps f = filter (not . T.null) (T.splitOn "/" (T.pack f))
       matches f =
-        let nf = normalizeTitle (T.pack (stripExt (takeFileName f)))
+        let nf c = normalizeTitle (T.pack (stripExt (T.unpack c)))
             yearSuffix r = not (T.null target) && T.length (T.strip r) == 4 && T.all isDigit (T.strip r)
-        in nf == target || maybe False yearSuffix (T.stripPrefix target nf)
+            compOk c = let n = nf c in n == target || maybe False yearSuffix (T.stripPrefix target n)
+        in any compOk (comps f)
   in any matches files
 
 -- | m31: like 'matchesDownload' but also tries the SOURCE RELEASE name

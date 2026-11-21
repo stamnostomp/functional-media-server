@@ -9,6 +9,8 @@ module FMS.Modules.Chapters
   , parseSceneIntro
   , introFromChapters
   , introToJson
+  , detectIntro
+  , introScanHandler
   , sceneIntroMinSec
   , sceneIntroMaxSec
   , sceneIntroThreshold
@@ -18,6 +20,7 @@ module FMS.Modules.Chapters
   , ticksFromSeconds
   ) where
 
+import Control.Monad (foldM)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
@@ -28,7 +31,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.ByteString.Char8 as BSC
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isJust, listToMaybe)
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseLBS)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -44,13 +47,14 @@ import System.Process
   )
 import Text.Read (readMaybe)
 
-import FMS.Core.Module (Module(..), Segment(..), get, jsonResponse)
+import FMS.Core.Module (Module(..), Segment(..), get, jsonResponse, post)
 import FMS.Core.Monad (AppError(..), AppM, MonadLog(..), envConfig)
 import FMS.Core.Process (runProcessBS, runProcessBSTimeout, showBS)
 import FMS.Core.Query (queryParams, versionParam, versionPathFor)
 import FMS.Core.Types.Config (Config(..))
 import FMS.Core.Types.MediaItem (MediaItem(..))
-import FMS.Modules.Auth.Monad (getItemWithAccess)
+import FMS.Modules.Auth.Monad (getItemWithAccess, requireAdmin)
+import FMS.Modules.Library.Monad (MonadLibrary (..))
 
 -- | The chapter-images module (docs/todo.org section 7, milestone 6e):
 -- @GET /items/:id/Chapters@ lists the item's chapters probed with ffprobe
@@ -64,7 +68,8 @@ chaptersModule = Module
   { moduleName   = "chapters"
   , moduleInit   = pure ()
   , moduleRoutes =
-      [ get [Lit "items", Capture "id", Lit "Chapters"] chaptersHandler
+      [ post [Lit "items", Lit "Intro", Lit "Scan"] introScanHandler  -- m78: before the :id capture routes
+      , get [Lit "items", Capture "id", Lit "Chapters"] chaptersHandler
       , get [Lit "items", Capture "id", Lit "Chapters", Capture "index", Lit "Image"]
           chapterImageHandler
       , get [Lit "items", Capture "id", Lit "Intro"] introHandler
@@ -251,17 +256,58 @@ introHandler captures req =
           mIntro <- case cached of
             Just v  -> pure v
             Nothing -> do
-              r <- liftIO (probeChapters path)
-              let (dur, chs) = either (const (0, [])) id r
-              case introFromChapters chs dur of
-                Just pr -> pure (Just pr)
-                Nothing
-                  | T.toLower (itemType item) == "episode" && dur > 300 -> do
-                      ms <- liftIO (probeSceneIntro path)
-                      liftIO (writeIntroCache cacheF ms)
-                      pure (fmap (\e -> (0, e)) ms)
-                  | otherwise -> pure Nothing
+              m <- liftIO (detectIntro path (itemType item))
+              case m of
+                -- m75/m78: scene-scan results (start = 0) are cached; chapter
+                -- markers are cheap to re-probe and stay uncached
+                Just (0, e) -> liftIO (writeIntroCache cacheF (Just e)) >> pure m
+                _           -> pure m
           pure (jsonResponse (introToJson mIntro))
+
+-- | m78: the intro detection shared by the per-item endpoint and the
+-- dashboard scan-all. Chapter markers first; for Episode items longer
+-- than 5 minutes without a named intro chapter, the scene-change scan.
+detectIntro :: FilePath -> Text -> IO (Maybe (Double, Double))
+detectIntro path itemType = do
+  r <- probeChapters path
+  let (dur, chs) = either (const (0, [])) id r
+  case introFromChapters chs dur of
+    Just pr -> pure (Just pr)
+    Nothing
+      | T.toLower itemType == "episode" && dur > 300 ->
+          fmap (\e -> (0, e)) <$> probeSceneIntro path
+      | otherwise -> pure Nothing
+
+-- | m78: @POST /items/Intro/Scan@ (admin only) — run intro detection for
+-- every video library item that has no cached result, writing the scene
+-- scans to @stateDir/intro/<id>-<size>.txt@. Answers
+-- @{"Scanned":n,"IntroFound":m,"AlreadyCached":k}@.
+introScanHandler :: [(Text, Text)] -> Request -> AppM Response
+introScanHandler _captures req = do
+  requireAdmin req
+  cfg <- asks envConfig
+  items <- listItems
+  let videos = [ i | i <- items, "video/" `T.isPrefixOf` itemMime i ]
+      cacheF i = configStateDir cfg </> "intro"
+                 </> (T.unpack (itemId i) <> "-" <> show (itemSize i) <.> "txt")
+      scanOne i = do
+        cached <- readIntroCache (cacheF i)
+        if isJust cached
+          then pure (0, 0, 1)
+          else do
+            m <- detectIntro (itemPath i) (itemType i)
+            case m of
+              Just (0, e) -> do writeIntroCache (cacheF i) (Just e); pure (1, 1, 0)
+              Just _      -> pure (1, 1, 0)
+              Nothing     -> do writeIntroCache (cacheF i) Nothing; pure (1, 0, 0)
+  (sc, fo, ca) <- liftIO (foldM (\(a,b,c) i -> do (x,y,z) <- scanOne i; pure (a+x, b+y, c+z)) (0,0,0) videos) :: AppM (Int, Int, Int)
+  logInfo ("chapters: intro scan done - scanned " <> T.pack (show sc)
+           <> ", intros found " <> T.pack (show fo)
+           <> ", already cached " <> T.pack (show ca))
+  pure (jsonResponse (object
+    [ "Scanned" .= sc
+    , "IntroFound" .= fo
+    , "AlreadyCached" .= ca ]))
 
 -- | Scene-change scan window/threshold (m75).
 sceneIntroMinSec, sceneIntroMaxSec, sceneIntroThreshold :: Double

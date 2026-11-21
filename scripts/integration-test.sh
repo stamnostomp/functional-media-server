@@ -258,6 +258,15 @@ check_code "meta-settings-test-nonadmin-403" 403 "$code"
 code="$(req POST /Metadata/Settings '{"tmdbApiKey":""}' )"
 check_code "meta-settings-post-unauth-401" 401 "$code"
 
+# m78: POST /items/Intro/Scan - admin 200 with counters, non-admin 403, unauth 401
+code="$(req POST /items/Intro/Scan "" "$TOKEN")"
+check_code "intro-scan-admin-200" 200 "$code"
+check_eq "intro-scan-has-counters" True "$(jget "isinstance(d.get('Scanned'), int) and isinstance(d.get('IntroFound'), int) and isinstance(d.get('AlreadyCached'), int)")"
+code="$(req POST /items/Intro/Scan "" "$UTOKEN")"
+check_code "intro-scan-nonadmin-403" 403 "$code"
+code="$(req POST /items/Intro/Scan "")"
+check_code "intro-scan-unauth-401" 401 "$code"
+
 # --- summary -----------------------------------------------------------------
 echo "INTEGRATION: $PASS passed, $FAIL failed"
 if [[ "$FAIL" -gt 0 ]]; then exit 1; fi

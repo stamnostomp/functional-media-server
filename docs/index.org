@@ -17,6 +17,7 @@ sibling repository =../functional-media-server=.
 - [[file:roadmap.org][Roadmap]] — Jellyfin feature parity + backlog, as org TODO items
 - [[file:todo.org][TODO]] — step-by-step checklist for Jellyfin feature parity
 - [[file:methodology.org][Methodology]] — how we track work in org (TODO states, sections, tags)
+- [[file:deploy.org][Deploy]] — running it on a server (nix or docker) + Deluge container
 - [[file:modules.org][Module system]] — monadic modules: AppM, Module/Route, capability classes
 - [[file:acid-state.org][acid-state]] — persistent, stable library IDs
 - [[file:architecture.org][Architecture]] — principles, module layout, tech choices, data flow

@@ -15,6 +15,7 @@ module FMS.Modules.Requests.Push
   , importComplete
   , getFirstHostId
   , delugeAddMagnetBody
+  , delugeSetTrackersBody
   , delugeAddFileBody
   , pushRequest
   , delugeLoginTest
@@ -177,6 +178,17 @@ delugeAddFileBody name b64 downloadDir trackers rid =
                        , delugeAddOptions downloadDir trackers ]
          , "id" .= rid ]
 
+-- | m79: Deluge core.set_torrent_trackers body — attaches the announce
+-- tracker list to an EXISTING torrent as [{"url":..,"tier":0}] entries
+-- (the add-time @add_trackers@ option is silently ignored by some
+-- deluge-web/daemon builds, which left pushed magnets with zero trackers).
+delugeSetTrackersBody :: Text -> [Text] -> Int -> Value
+delugeSetTrackersBody torrentId trackers rid =
+  object [ "method" .= ("core.set_torrent_trackers" :: Text)
+         , "params" .= [ Aeson.String torrentId
+                       , Aeson.toJSON [ object [ "url" .= u, "tier" .= (0 :: Int) ] | u <- trackers ] ]
+         , "id" .= rid ]
+
 -- | Extract the "result" field of a JSON-RPC response body.
 rpcResult :: LBS.ByteString -> Maybe Value
 rpcResult b = Aeson.decode b >>= \v -> case v of
@@ -327,7 +339,17 @@ pushRequest delugeUrl delugePassword downloadDir mMagnet mDownloadUrl title trac
               case mMagnet of
                 Just mag -> do
                   er <- postJson manager delugeUrl cookie (delugeAddMagnetBody mag downloadDir trackers 4)
-                  pure (rpcOk er)
+                  -- m79: add_torrent_magnet returns the info hash; some
+                  -- deluge builds ignore the add_trackers option, so attach
+                  -- the announce list explicitly afterwards (best-effort)
+                  case er of
+                    Right (body, _)
+                      | rpcResultOk (rpcResult body)
+                      , not (null trackers)
+                      , Just (Aeson.String tid) <- rpcResult body -> do
+                          _ <- postJson manager delugeUrl cookie (delugeSetTrackersBody tid trackers 5)
+                          pure (Right ())
+                    _ -> pure (rpcOk er)
                 Nothing -> case mDownloadUrl of
                   Just u -> do
                     ef <- fetchSource u

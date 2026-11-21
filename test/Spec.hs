@@ -111,7 +111,7 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.AnnounceTrackers (parseTrackerList)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentProgress, matchesDownload, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import Data.Aeson.Types (parseEither)
 import FMS.Modules.Requests.Persistence (requestFromPersist, requestToPersist)
@@ -4235,6 +4235,9 @@ main = do
     [ "[\"pw\"]"
     , "[\"magnet:?x\",{\"add_trackers\":[\"udp://t1:1337/announce\"],\"download_location\":\"/dl\"}]"
     , "[\"n.torrent\",\"QUJD\",{\"add_trackers\":[\"udp://t1:1337/announce\"],\"download_location\":\"/dl\"}]" ]
+  check "m79: set_torrent_trackers body carries [{\"url\":..,\"tier\":0}] entries"
+    (LBSC.unpack (Aeson.encode (delugeSetTrackersBody "abc123" ["udp://t1:1337/announce", "udp://t2:80/announce"] 5)))
+    ("{\"id\":5,\"method\":\"core.set_torrent_trackers\",\"params\":[\"abc123\",[{\"tier\":0,\"url\":\"udp://t1:1337/announce\"},{\"tier\":0,\"url\":\"udp://t2:80/announce\"}]]}")
   check "m62: add bodies omit add_trackers when the list is empty"
     [ LBSC.unpack (Aeson.encode (paramsOf (delugeAddMagnetBody "magnet:?x" "/dl" [] 2)))
     , LBSC.unpack (Aeson.encode (paramsOf (delugeAddFileBody "n" "QQ==" "/dl" [] 2))) ]

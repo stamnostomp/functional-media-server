@@ -4077,10 +4077,10 @@ main = do
     [ (\cr -> (crSeason cr, crEpisode cr)) <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"Family Guy\",\"TmdbId\":1434,\"Type\":\"tv\",\"Season\":25,\"Episode\":0}") :: Either String CreateRequest)
     , (\cr -> (crSeason cr, crEpisode cr)) <$> (Aeson.eitherDecode (LBSC.pack "{\"Title\":\"X\",\"Type\":\"movie\"}") :: Either String CreateRequest) ]
     [ Right (Just 25, Just 0), Right (Nothing, Nothing) ]
-  let epXml = episodeNfoXml "Happy Hell-o-ween" 25 0 1434
+  let epXml = episodeNfoXml "Family Guy" "Happy Hell-o-ween" 25 0 1434
   check "m76: episodeNfoXml -> parseEpisodeNfo roundtrip keeps title/season/episode/tmdbid"
-    (fmap (\e -> (enTitle e, enSeason e, enEpisode e, enTmdbId e)) (parseEpisodeNfo (BSC.pack (T.unpack epXml))))
-    (Right (Just "Happy Hell-o-ween", Just 25, Just 0, Just "1434"))
+    (fmap (\e -> (enTitle e, enShowTitle e, enSeason e, enEpisode e, enTmdbId e)) (parseEpisodeNfo (BSC.pack (T.unpack epXml))))
+    (Right (Just "Happy Hell-o-ween", Just "Family Guy", Just 25, Just 0, Just "1434"))
   check "m76: parseEpisodeNfo rejects a <movie> root"
     True (case parseEpisodeNfo (BSC.pack "<movie><title>x</title></movie>") of Left _ -> True; Right _ -> False)
   check "m76: tvShowNfoXml is parseable by parseTvShowNfo with tmdb provider id"
@@ -4090,16 +4090,16 @@ main = do
     (fmap (\m -> (metaTitle m, metaYear m, HM.lookup "tmdb" (metaProviderIds m))) (parseMovieNfo (BSC.pack (T.unpack (movieNfoXml "Shrek" 76735 (Just 2001))))))
     (Right (Just "Shrek", Just 2001, Just "76735"))
   check "m76: classifyItem with episode .nfo sidecar WINS over a movie-looking filename"
-    (classifyItem Nothing (Just (25, 0)) "/dl/Some.Random.Movie.2020.1080p.mkv" "Some.Random.Movie.2020.1080p")
+    (classifyItem Nothing (Just (EpisodeNfo Nothing (Just 25) (Just 0) Nothing Nothing)) "/dl/Some.Random.Movie.2020.1080p.mkv" "Some.Random.Movie.2020.1080p")
     ("Episode", Just "Some Random Movie", Just 25, Just 0)
   check "m76: classifyItem with sidecar + tvshow.nfo uses the dir name as series"
-    (classifyItem (Just "MyShow") (Just (1, 2)) "/lib/MyShow/whatever.mkv" "whatever")
+    (classifyItem (Just "MyShow") (Just (EpisodeNfo Nothing (Just 1) (Just 2) Nothing Nothing)) "/lib/MyShow/whatever.mkv" "whatever")
     ("Episode", Just "MyShow", Just 1, Just 2)
   check "m76: classifyItem without sidecar still falls back to filename parsing"
     (classifyItem Nothing Nothing "/dl/Family.Guy.S25E00.1080p.mkv" "Family.Guy.S25E00.1080p")
     ("Episode", Just "Family Guy", Just 25, Just 0)
   check "m76: classifyItem uses the tvshow.nfo TITLE as series for an episode-nfo file with a garbage name"
-    (classifyItem (Just "Star Wars: Maul - Shadow Lord") (Just (1, 1)) "/downloads/garbage.name.2020.mkv" "garbage.name.2020")
+    (classifyItem Nothing (Just (EpisodeNfo Nothing (Just 1) (Just 1) (Just "289219") (Just "Star Wars: Maul - Shadow Lord"))) "/downloads/garbage.name.2020.mkv" "garbage.name.2020")
     ("Episode", Just "Star Wars: Maul - Shadow Lord", Just 1, Just 1)
   check "m68: tmdbMovieByIdUrlAt builds plain /movie/<id> (no keywords append)"
     (tmdbMovieByIdUrlAt "http://127.0.0.1:8949/3/" "K" 680)

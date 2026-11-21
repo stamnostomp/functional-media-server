@@ -59,7 +59,7 @@ import System.FilePath (dropExtension, replaceExtension, takeBaseName, takeDirec
 
 import FMS.Core.Types.MediaItem (MediaItem(..), itemTypeFromMime)
 import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider, releaseTagTokens)
-import FMS.Modules.Metadata.Nfo (parseTvShowNfo)
+import FMS.Modules.Metadata.Nfo (EpisodeNfo (..), parseEpisodeNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Types (metaTitle)
 import FMS.Modules.Metadata.Nfo (nfoPathFor, parseEpisodeNfo, EpisodeNfo(..))
 
@@ -290,18 +290,21 @@ parentDirNames p = go (takeDirectory p)
 classifyItem
   :: Maybe Text      -- ^ m76: series title from a parent-dir tvshow.nfo
                      --   ('tvShowSeriesTitle'; 'Nothing' = no tvshow.nfo)
-  -> Maybe (Int, Int) -- ^ m76: (season, episode) from a per-file <base>.nfo
-                     --   <episodedetails> sidecar -- wins over the file name
+  -> Maybe EpisodeNfo -- ^ m76: parsed per-file <base>.nfo <episodedetails>
+                     --   sidecar -- wins over the file name
   -> FilePath        -- ^ the file path
   -> Text            -- ^ the file base name
   -> (Text, Maybe Text, Maybe Int, Maybe Int)
 classifyItem mTvTitle mEpNfo path baseName
-  | Just (s, e) <- mEpNfo =
+  | Just en <- mEpNfo
+  , Just s <- enSeason en
+  , Just e <- enEpisode en =
       -- m76: the request-time NFO knows the exact episode (written from the
       -- TMDB id the user picked) even when the release file name has no
-      -- usable SxxEyy tag; the series comes from tvshow.nfo when present
-      let series = maybe (seriesFromEpisodeName baseName) id mTvTitle
-      in ("Episode", Just series, Just s, Just e)
+      -- usable SxxEyy tag; the series comes from the NFO's <showtitle>,
+      -- else tvshow.nfo, else the file name
+      let series = enShowTitle en <|> mTvTitle <|> Just (seriesFromEpisodeName baseName)
+      in ("Episode", series, Just s, Just e)
   | Just series <- mTvTitle =
       let (season, episode) = case parseEpisodeFilename baseName of
             Just (s, e) -> (Just s, Just e)
@@ -314,9 +317,9 @@ classifyItem mTvTitle mEpNfo path baseName
       in ("Episode", Just series, Just s, Just e)
   | otherwise = (itemTypeFromMime (mimeFor path), Nothing, Nothing, Nothing)
 
--- | m76: IO: the (season, episode) from a per-file @<base>.nfo@
--- @<episodedetails>@ sidecar next to @path@, when present and parseable.
-episodeNfoSidecar :: FilePath -> IO (Maybe (Int, Int))
+-- | m76: IO: the parsed per-file @<base>.nfo@ @<episodedetails>@ sidecar
+-- next to @path@, when present and parseable.
+episodeNfoSidecar :: FilePath -> IO (Maybe EpisodeNfo)
 episodeNfoSidecar p = do
   let f = replaceExtension p ".nfo"
   ok <- doesFileExist f
@@ -326,11 +329,7 @@ episodeNfoSidecar p = do
       r <- try (BS.readFile f) :: IO (Either SomeException BS.ByteString)
       pure $ case r of
         Left _ -> Nothing
-        Right b -> case parseEpisodeNfo b of
-          Right en -> case (enSeason en, enEpisode en) of
-            (Just s, Just e) -> Just (s, e)
-            _                -> Nothing
-          Left _ -> Nothing
+        Right b -> either (const Nothing) Just (parseEpisodeNfo b)
 
 -- | Milestone 4j quality/codec tokens stripped by 'normalizeVersionTitle'
 -- (lowercase; matched as whole dot/underscore/space-separated words).

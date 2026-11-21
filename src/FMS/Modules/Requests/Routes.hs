@@ -9,6 +9,7 @@ module FMS.Modules.Requests.Routes
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Data.List (isPrefixOf)
+import Control.Monad (when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, asks)
@@ -174,10 +175,17 @@ applyTvRequestTmdb cfg ms tid r f = do
     Left err ->
       logWarn ("requests: tmdb /tv/" <> T.pack (show tid) <> " failed: " <> T.pack err)
     Right d -> do
+      s0 <- getRequestSettings
       let title = fromMaybe' (reqTitle r) (tdName d)
-      liftIO (TIO.writeFile (takeDirectory f </> "tvshow.nfo") (tvShowNfoXml title tid))
-      logInfo ("requests: wrote tvshow.nfo (\"" <> title <> "\", tmdb " <> T.pack (show tid)
-               <> ") next to " <> T.pack f)
+          inSubdir = takeDirectory f /= T.unpack (rsDownloadDir s0)
+      -- m76b: only write tvshow.nfo when the torrent got its own subfolder;
+      -- a single-file torrent lands in the SHARED download root, and a root
+      -- tvshow.nfo would claim every other file there as an episode of this
+      -- show. The per-episode nfo carries <showtitle> instead.
+      when inSubdir $ do
+        liftIO (TIO.writeFile (takeDirectory f </> "tvshow.nfo") (tvShowNfoXml title tid))
+        logInfo ("requests: wrote tvshow.nfo (\"" <> title <> "\", tmdb " <> T.pack (show tid)
+                 <> ") next to " <> T.pack f)
       case (reqSeason r, reqEpisode r) of
         (Just sn, Just ep) -> do
           -- m76: prefer the real episode title from TMDB
@@ -189,7 +197,7 @@ applyTvRequestTmdb cfg ms tid r f = do
                   _            -> T.pack (takeBaseName f)
                 Left _ -> T.pack (takeBaseName f)
           liftIO (TIO.writeFile (replaceExtension f ".nfo")
-                     (episodeNfoXml epTitle sn ep tid))
+                     (episodeNfoXml title epTitle sn ep tid))
           logInfo ("requests: wrote episode nfo S" <> T.pack (show sn) <> "E" <> T.pack (show ep)
                    <> " (\"" <> epTitle <> "\", tmdb " <> T.pack (show tid) <> ") for " <> T.pack f)
         _ -> pure ()

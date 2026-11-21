@@ -164,10 +164,13 @@ premieredYear c = firstText "premiered" c >>= \t -> readMaybe (take 4 (T.unpack 
 -- | m76: the parsed content of a Kodi per-episode @<episodedetails>..@
 -- sidecar (@<file>.nfo@ next to an episode media file).
 data EpisodeNfo = EpisodeNfo
-  { enTitle   :: Maybe Text
-  , enSeason  :: Maybe Int
-  , enEpisode :: Maybe Int
-  , enTmdbId  :: Maybe Text   -- ^ <tmdbid> (series id) or <uniqueid type="tmdb">
+  { enTitle     :: Maybe Text
+  , enSeason    :: Maybe Int
+  , enEpisode   :: Maybe Int
+  , enTmdbId    :: Maybe Text   -- ^ <tmdbid> (series id) or <uniqueid type="tmdb">
+  , enShowTitle :: Maybe Text   -- ^ m76b: <showtitle> — the series name, so a single-file
+                                --   torrent landing in the SHARED download root can still be
+                                --   classified without a root-level tvshow.nfo
   } deriving (Eq, Show)
 
 -- | Parse a per-episode @<episodedetails>@ NFO. Malformed XML or a
@@ -184,10 +187,11 @@ parseEpisodeNfo bytes =
 episodeFromCursor :: Cursor -> EpisodeNfo
 episodeFromCursor c =
   EpisodeNfo
-    { enTitle   = firstText "title" c
-    , enSeason  = readIntField "season" c
-    , enEpisode = readIntField "episode" c
-    , enTmdbId  = firstText "tmdbid" c <|> firstText "uniqueid" c
+    { enTitle     = firstText "title" c
+    , enSeason    = readIntField "season" c
+    , enEpisode   = readIntField "episode" c
+    , enTmdbId    = firstText "tmdbid" c <|> firstText "uniqueid" c
+    , enShowTitle = firstText "showtitle" c
     }
 
 -- | Escape the five XML special characters (for NFO text fields).
@@ -203,11 +207,12 @@ xmlEscape = T.concatMap esc
 
 -- | m76: a Kodi per-episode NFO body: title, season, episode and the
 -- TMDB series id (both <tmdbid> and <uniqueid type="tmdb">). Pure.
-episodeNfoXml :: Text -> Int -> Int -> Int -> Text
-episodeNfoXml title season episode tmdbId =
+episodeNfoXml :: Text -> Text -> Int -> Int -> Int -> Text
+episodeNfoXml showTitle title season episode tmdbId =
   T.concat
     [ "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<episodedetails>\n"
     , "  <title>", xmlEscape title, "</title>\n"
+    , "  <showtitle>", xmlEscape showTitle, "</showtitle>\n"
     , "  <season>", T.pack (show season), "</season>\n"
     , "  <episode>", T.pack (show episode), "</episode>\n"
     , "  <tmdbid>", T.pack (show tmdbId), "</tmdbid>\n"

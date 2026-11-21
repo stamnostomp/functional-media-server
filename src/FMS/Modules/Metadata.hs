@@ -9,6 +9,7 @@ import FMS.Modules.Metadata.Monad (MonadMetadata (..), loadMetadataIntoState, lo
 import FMS.Modules.Metadata.Routes
   ( addItemTagsHandler
   , editMetadataHandler
+  , setTmdbMetadataHandler
   , genresHandler
   , getMetadataSettingsHandler
   , listItemTagsHandler
@@ -54,6 +55,7 @@ metadataModule =
         , get  [Lit "items", Capture "id", Lit "metadata"] metadataHandler
         , post [Lit "items", Capture "id", Lit "metadata"] editMetadataHandler          -- milestone 4k
         , post [Lit "items", Capture "id", Lit "metadata", Lit "refresh"] refreshMetadataHandler
+        , post [Lit "items", Capture "id", Lit "metadata", Lit "tmdb"] setTmdbMetadataHandler   -- m83 manual TMDB override
         -- item tags API (literal "Tags" after the capture; captures keep
         -- their case, so DELETE /Items/1/Tags/Hd matches tag "Hd")
         , get    [Lit "items", Capture "id", Lit "Tags"] listItemTagsHandler

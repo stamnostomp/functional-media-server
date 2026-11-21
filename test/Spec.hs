@@ -193,7 +193,7 @@ import FMS.Modules.Metadata (metadataModule)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, cacheGet, cachePut, emptySeriesCache, loadSeriesCache, loadSeriesCacheIntoState, saveSeriesCache, seriesCachePath)
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, loadMetadataIntoState, loadMetadataSettingsIntoState, refreshFromTmdb, updateMetadataSettings)
 import FMS.Modules.Metadata.Persistence (loadMetadata, saveMetadata)
-import FMS.Modules.Metadata.Routes (attachDownloadedLive, mergeLibraryEpisodes, discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesNameOfPayload, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
+import FMS.Modules.Metadata.Routes (attachDownloadedLive, tmdbMetadataFor, mergeLibraryEpisodes, discoverEntry, discoverSection, genresFromMetadata, matchDownloaded, personsFromMetadata, seriesEpisodesHandler, seriesNameOfPayload, seriesSearchHandler, studiosFromMetadata, tagsFromMetadata, tmdbResultToSearchHit, unmatchedItems)
 import FMS.Modules.Metadata.Types (MetadataSettings (..), MetadataSettingsPatch (..), emptyMetadataSettingsPatch, mergeMetadataSettings, metadataSettingsFromConfig, metadataSettingsPublicJson)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), applyManualPatch, applyProviderMerge, emptyMetadata, fieldNameFor, mergeTags, metadataStoredJSON, removeTag)
 import FMS.Modules.Playlists.Monad (addItem, removeItem)
@@ -239,12 +239,71 @@ import FMS.Modules.Web (contentTypeFor, dashboardBeforeCapture, dashboardPageHtm
 -- | Plain base-only assertions (no extra test deps): print PASS/FAIL per
 -- case and exit non-zero on the first failure.
 check :: (Eq a, Show a) => String -> a -> a -> IO ()
+
 check label expected actual
   | expected == actual = putStrLn ("PASS: " ++ label)
   | otherwise = do
       putStrLn ("FAIL: " ++ label
         ++ " -- expected " ++ show expected ++ ", got " ++ show actual)
       exitFailure
+
+waitReadyFile :: FilePath -> Int -> IO Bool
+waitReadyFile f n = do
+  e <- doesFileExist f
+  if e then pure True else if n <= (0 :: Int) then pure False else threadDelay 250000 >> waitReadyFile f (n - 1)
+
+-- | m83: manual TMDB override - tmdbMetadataFor against a mock TMDB
+-- (movie /3/movie/42 and tv /3/tv/1942 with genres+keywords).
+m83MockTests :: IO ()
+m83MockTests = do
+  let m83mock = "/tmp/fms-m83-mock"
+      m83log = m83mock ++ "/calls.log"
+      m83src = unlines
+        [ "import json, sys"
+        , "from http.server import BaseHTTPRequestHandler, HTTPServer"
+        , "from urllib.parse import urlparse"
+        , "port = int(sys.argv[1]); log = sys.argv[2]"
+        , "class H(BaseHTTPRequestHandler):"
+        , "    def log_message(self, *a): pass"
+        , "    def _send(self, code, body):"
+        , "        b = body.encode()"
+        , "        self.send_response(code)"
+        , "        self.send_header('Content-Type', 'application/json')"
+        , "        self.send_header('Content-Length', str(len(b)))"
+        , "        self.end_headers()"
+        , "        self.wfile.write(b)"
+        , "    def do_GET(self):"
+        , "        u = urlparse(self.path)"
+        , "        with open(log, 'a') as f: f.write(u.path + chr(10))"
+        , "        if u.path == '/3/movie/42':"
+        , "            return self._send(200, json.dumps({'id':42,'title':'Iron Man','release_date':'2008-05-02','overview':'A billionaire builds a suit.','vote_average':7.0,'poster_path':'/p.jpg','genres':[{'id':28,'name':'Action'}],'keywords':{'keywords':[{'id':9,'name':'superhero'}]}}))"
+        , "        if u.path == '/3/tv/1942':"
+        , "            return self._send(200, json.dumps({'id':1942,'name':'Family Guy','overview':'A cartoon family.','first_air_date':'1999-01-31','genres':[{'id':16,'name':'Animation'}],'keywords':{'results':[{'id':5,'name':'cartoon'}]}}))"
+        , "        return self._send(404, '{}')"
+        , "srv = HTTPServer(('127.0.0.1', port), H)"
+        , "open(log + '.ready', 'w').write('ok')"
+        , "srv.serve_forever()" ]
+  resetDir m83mock
+  createDirectoryIfMissing True m83mock
+  writeFile (m83mock ++ "/mock.py") m83src
+  bracket (createProcess (proc "python3" [m83mock ++ "/mock.py", "8951", m83log]))
+    (\(_, _, _, ph) -> terminateProcess ph >> waitForProcess ph)
+    (\_ -> do
+      ok0 <- waitReadyFile (m83log ++ ".ready") 40
+      if not ok0 then pure () else do
+        em <- tmdbMetadataFor "http://127.0.0.1:8951/3" "K" 42 False
+        check "m83 tmdbMetadataFor movie: title/year/genres/keywords/providerIds"
+          (case em of
+             Right m -> (metaTitle m, metaYear m, metaGenres m, metaKeywords m, HM.lookup "tmdb" (metaProviderIds m), metaSource m)
+             Left e -> (Just (T.pack "LEFT"), Just 0, [], [], Nothing, T.pack e))
+          (Just "Iron Man", Just 2008, ["Action"], ["superhero"], Just "42", "tmdb")
+        et <- tmdbMetadataFor "http://127.0.0.1:8951/3" "K" 1942 True
+        check "m83 tmdbMetadataFor tv: name/genres/keywords/providerIds"
+          (case et of
+             Right m -> (metaTitle m, metaGenres m, metaKeywords m, HM.lookup "tmdb" (metaProviderIds m))
+             Left _ -> (Just (T.pack "LEFT"), [], [], Nothing))
+          (Just "Family Guy", ["Animation"], ["cartoon"], Just "1942"))
+
 
 -- | Remove a scratch dir under /tmp if it exists.
 resetDir :: FilePath -> IO ()
@@ -4627,6 +4686,12 @@ main = do
   check "m82 parseTorrentStatusesRich: missing keys skipped, defaults 0"
     (parseTorrentStatusesRich (case Aeson.decode (LBSC.pack "{\"abc\":{\"name\":\"X\",\"state\":\"Seeding\",\"progress\":100}}") of Just v -> v; Nothing -> Aeson.Null))
     [("X", "Seeding", 100.0, 0.0, 0, 0)]
+
+  mPy83 <- findExecutable "python3"
+  case mPy83 of
+    Just _  -> m83MockTests
+    Nothing -> putStrLn "PASS: m83 mock-tmdb IO tests skipped (python3 not in PATH)"
+
   check "m80 delugeSetConfigBody: core.set_config with utp + unlimited queue"
     (let enc = TE.decodeUtf8 (LBS.toStrict (Aeson.encode (delugeSetConfigBody 5)))
      in ( T.isInfixOf "\"method\":\"core.set_config\"" enc

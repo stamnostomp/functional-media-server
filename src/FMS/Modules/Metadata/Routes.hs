@@ -2,6 +2,8 @@ module FMS.Modules.Metadata.Routes
   ( metadataHandler
   , refreshMetadataHandler
   , editMetadataHandler
+  , setTmdbMetadataHandler
+  , tmdbMetadataFor
   , genresHandler
   , studiosHandler
   , personsHandler
@@ -38,7 +40,7 @@ import Control.Monad (forM, forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecode, object, withObject, (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecode, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.HashMap.Strict (HashMap)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -48,8 +50,11 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Time.Clock (getCurrentTime)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 import qualified Data.Vector as V
 import Network.Wai (Request, Response, queryString, strictRequestBody)
+import System.FilePath ((</>), (<.>), takeDirectory)
 import Text.Read (readMaybe)
 
 import FMS.Core.Module (jsonResponse)
@@ -62,9 +67,10 @@ import FMS.Modules.Auth.Monad (currentUserFromReq, getItemWithAccess, requireAdm
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (episodeTitleFromName)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, lookupSeriesCache, storeSeriesCache)
-import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt)
+import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, updateMetadataSettings)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, tmdbResultToMetadata, updateMetadataSettings)
+import FMS.Modules.Metadata.Nfo (movieNfoXml, tvShowNfoXml)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), MetadataSettingsPatch (..), applyManualPatch, emptyMetadata, mergeMetadataSettings, mergeTags, metadataSettingsPublicJson, removeTag)
 
 -- | @GET \/items\/:id\/metadata@ — the library item merged with its
@@ -136,6 +142,103 @@ editMetadataHandler captures req = do
               let updated = applyManualPatch (fromMaybe emptyMetadata mOld) patch
               setMetadata i updated
               pure (jsonResponse updated)
+
+-- | m83 body of @POST /items/:id/metadata/tmdb@:
+-- @{"TmdbId": 123, "Type": "movie"|"tv"}@ (@Type@ optional, defaults to
+-- the item's current type; "tv"/"series"/"show" all mean tv).
+data SetTmdbBody = SetTmdbBody { stTmdbId :: Int, stType :: Maybe Text }
+
+instance FromJSON SetTmdbBody where
+  parseJSON = withObject "SetTmdbBody" $ \o ->
+    SetTmdbBody <$> o .: "TmdbId" <*> o .:? "Type"
+
+-- | m83: @POST /items/:id/metadata/tmdb@ - admin-only MANUAL TMDB override:
+-- fetch the full TMDB record for the given id, store it as the item's
+-- metadata (providerIds.tmdb set, so later refreshes follow this id), write
+-- the NFO sidecar IN PLACE (movie -> <file>.nfo, tv -> tvshow.nfo in the
+-- item's folder) and rescan so the NFO-driven classification (m46/m76) keeps
+-- the identity. Root-cause fix for misdetected downloads (e.g. a release
+-- name that parsed as the wrong movie): the admin picks the right TMDB item
+-- once and it sticks. 200 with the stored metadata JSON, 400 on a bad body /
+-- missing TMDB key / TMDB fetch failure, 404 unknown item.
+setTmdbMetadataHandler :: [(Text, Text)] -> Request -> AppM Response
+setTmdbMetadataHandler captures req = do
+  _ <- requireAdmin req
+  case lookup "id" captures of
+    Nothing -> throwError (BadRequest "missing id capture")
+    Just i -> do
+      mItem <- getItemWithAccess req i
+      case mItem of
+        Nothing -> throwError (NotFound ("no library item with id " <> i))
+        Just item -> do
+          body <- liftIO (strictRequestBody req)
+          case eitherDecode body of
+            Left err -> throwError (BadRequest ("invalid JSON body: " <> T.pack err))
+            Right (SetTmdbBody tid mType) -> do
+              cfg <- asks envConfig
+              ms <- getMetadataSettings
+              if T.null (msTmdbApiKey ms)
+                then throwError (BadRequest "no TMDB API key set (see /Metadata/Settings)")
+                else do
+                  let base = configTmdbBaseUrl cfg
+                      key  = msTmdbApiKey ms
+                      isTvByDefault = T.toLower (itemType item) == "episode"
+                      isTv = case mType of
+                        Nothing -> isTvByDefault
+                        Just t  -> T.toLower (T.strip t) `elem` ["tv", "series", "show"]
+                  eMeta <- liftIO (tmdbMetadataFor base key tid isTv)
+                  case eMeta of
+                    Left err -> throwError (BadRequest ("tmdb fetch failed: " <> T.pack err))
+                    Right meta -> do
+                      setMetadata i meta
+                      -- write the NFO sidecar in place so rescans keep this identity
+                      liftIO $
+                        if isTv
+                          then BS.writeFile (takeDirectory (itemPath item) </> "tvshow.nfo")
+                                 (TE.encodeUtf8 (tvShowNfoXml (fromMaybe (itemTitle item) (metaTitle meta)) tid))
+                          else BS.writeFile (itemPath item <.> "nfo")
+                                 (TE.encodeUtf8 (movieNfoXml (fromMaybe (itemTitle item) (metaTitle meta)) tid (metaYear meta)))
+                      _ <- rescanLibrary   -- m46: re-classify from the NFO
+                      mNew <- getMetadata i
+                      logInfo ("metadata: manual TMDB override for item " <> i <> " -> tmdb/" <> T.pack (show tid))
+                      pure (jsonResponse (fromMaybe meta mNew))
+
+-- | m83: fetch the full TMDB record for @tid@ and shape it into
+-- MediaMetadata with providerIds set. Movie: /movie/<id> +
+-- append_to_response=keywords (genres+keywords). TV: /tv/<id> + keywords.
+tmdbMetadataFor :: Text -> Text -> Int -> Bool -> IO (Either String MediaMetadata)
+tmdbMetadataFor base key tid isTv
+  | isTv = do
+      dres <- tmdbTvDetailsAt base key tid
+      kres <- tmdbTvDetailsKwAt base key tid
+      let (gs, kws) = either (const ([], [])) id kres
+      pure $ case dres of
+        Left err -> Left err
+        Right d -> Right MediaMetadata
+          { metaTitle          = tdName d
+          , metaOverview       = tdOverview d
+          , metaGenres         = gs
+          , metaKeywords       = kws
+          , metaStudios        = []
+          , metaPersons        = []
+          , metaTags           = []
+          , metaYear           = tdFirstAirDate d >>= releaseYear
+          , metaRating         = Nothing
+          , metaOfficialRating = Nothing
+          , metaRuntimeMinutes = Nothing
+          , metaProviderIds    = HM.singleton "tmdb" (T.pack (show tid))
+          , metaSource         = "tmdb"
+          , metaLockedFields   = []
+          }
+  | otherwise = do
+      eres <- tmdbMovieByIdAt base key tid
+      case eres of
+        Left err -> pure (Left err)
+        Right top -> do
+          dres <- tmdbMovieDetailsAt base key tid
+          let (gs, kws) = either (const ([], [])) id dres
+          pure (Right (tmdbResultToMetadata top) { metaGenres = gs, metaKeywords = kws })
+
 
 -- | @GET \/Genres@ — 200 JSON array of @{\"Name\": genre, \"ItemCount\": n}@
 -- derived from all stored 'MediaMetadata', grouped by genre and sorted by

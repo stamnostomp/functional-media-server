@@ -138,7 +138,20 @@ Dashboard (/dashboard, admin) -> TORRENTS tab -> DOWNLOAD CLIENT:
   udp, plus 8096/8112). NOTE: m79 - FMS now calls core.set_torrent_trackers
   after every push because add_torrent_magnet's add_trackers option is
   ignored by the linuxserver/deluge 2.x web stack (magnets arrived with 0
-  trackers -> stuck at 0%). Rebuild with
+  trackers -> stuck at 0%). NOTE: m80 - the NAT on this network blocks
+  outbound TCP to classic peer ports (TCP to 1.1.1.1:6881 and to live swarm
+  peers times out; 443/853/8443 answer; UDP high ports e.g. STUN 19302 work),
+  so peer traffic only flows over uTP/UDP. FMS therefore sends
+  core.set_config on every push AND every status poll (delugeSetConfigBody):
+  enable_outgoing_utp/enable_incoming_utp=true, mixed_mode_algorithm=1,
+  max_active_downloading/seeding/limit=-1 (a stuck 0% torrent otherwise
+  wedges the active queue and new requests sit Queued forever). m80 also
+  fixed the import matcher: downloaded files are matched against the live
+  Deluge TORRENT name and against every path component raw + extension
+  stripped (deluge saves into <downloads>/<Torrent.Name>/<release file>;
+  takeExtension mangles "[YTS.AM]" folder names). Verified live: all queued
+  torrents reached 100% Seeding (up to 37 MB/s) and flipped to Imported with
+  in-place NFOs. Rebuild with
   =sudo env NIX_PATH="nixpkgs=$(readlink -f /nix/var/nix/profiles/per-user/root/channels/nixos):nixos-config=/etc/nixos/configuration.nix" nixos-rebuild switch=
   (bootloader install fails on this VM — harmless; run switch-to-configuration
   with =NIXOS_INSTALL_BOOTLOADER== if needed).

@@ -88,8 +88,12 @@ matchesDownload title files =
       comps f = filter (not . T.null) (T.splitOn "/" (T.pack f))
       matches f =
         let nf c = normalizeTitle (T.pack (stripExt (T.unpack c)))
+            n0 c = normalizeTitle c
             yearSuffix r = not (T.null target) && T.length (T.strip r) == 4 && T.all isDigit (T.strip r)
-            compOk c = let n = nf c in n == target || maybe False yearSuffix (T.stripPrefix target n)
+            -- m80b: compare the raw component too -- takeExtension mangles
+            -- folder names containing dots in brackets (e.g. "[YTS.AM]")
+            compOk c = let n = nf c
+                       in n == target || n0 c == target || maybe False yearSuffix (T.stripPrefix target n)
         in any compOk (comps f)
   in any matches files
 

@@ -4607,6 +4607,12 @@ main = do
   check "m80 matchesDownload: torrent-name FOLDER component matches even when the file name differs"
     (matchesDownload "Shrek (2001) [1080p]" ["/media/downloads/Shrek (2001) [1080p]/Shrek.2001.1080p.BluRay.x264.YIFY.mp4"])
     True
+  check "m80b matchesDownload: folder with dotted bracket (YTS.AM) not mangled by takeExtension"
+    (matchesDownload "Good Time (2017) [1080p] [YTS.AM]" ["/media/downloads/Good Time (2017) [1080p] [YTS.AM]/Good.Time.2017.1080p.BluRay.x264-[YTS.AM].mp4"])
+    True
+  check "m80b matchesDownload: torrent name with media extension matches extension-stripped file"
+    (matchesDownload "Some Movie 2025 1080p.mkv" ["/media/downloads/Some Movie 2025 1080p.mkv"])
+    True
   check "m80 delugeSetConfigBody: core.set_config with utp + unlimited queue"
     (let enc = TE.decodeUtf8 (LBS.toStrict (Aeson.encode (delugeSetConfigBody 5)))
      in ( T.isInfixOf "\"method\":\"core.set_config\"" enc

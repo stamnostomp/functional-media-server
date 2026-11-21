@@ -110,3 +110,34 @@ Dashboard (/dashboard, admin) -> TORRENTS tab -> DOWNLOAD CLIENT:
 3. Rescan library; GENERATE SKIP INTRO
 4. Requests tab: search -> request -> auto-approve (<= autoApproveGb) ->
    pushed to Deluge -> Imported when complete -> appears in library
+
+* Deployed on 192.168.1.180 (2026-11-21)
+
+- Repos on GitHub: =stamnostomp/functional-media-server= (public, main) and
+  =stamnostomp/stamno-media= (public, created via =gh repo create= + push).
+  Server clones at =~/services/functional-media-server= and
+  =~/services/stamno-media=.
+- FMS runs as a systemd USER unit =~/.config/systemd/user/fms.service=
+  (enable --now, Restart=always): binary from the nix store
+  (=nix build .#default=), =FMS_UI_DIR= points at the built stamno-media
+  output, port 8096 (8080 was taken), =MEDIA_LIBRARY_PATH=/media=,
+  =FMS_STATE_DIR=~/services/functional-media-server/var=,
+  =FMS_REQUIRE_AUTH=true=, admin password =FMS_ADMIN_PASSWORD= env (change
+  in dashboard Users), =MEDIA_TMDB_API_KEY= set, =FMS_WATCH=true=,
+  =FMS_FETCH_IMAGES=true=, and Deluge env seeded:
+  =FMS_DELUGE_URL=http://127.0.0.1:8112/json=, =FMS_DELUGE_PASSWORD=deluge=,
+  =FMS_DOWNLOAD_DIR=/media/downloads=.
+- Deluge: =linuxserver/deluge= container, =-p 8112:8112=,
+  =~/services/deluge/config:/config=, =/media/downloads:/downloads=.
+- Firewall: =networking.firewall.allowedTCPPorts = [ 8096 8112 ];= added to
+  /etc/nixos/configuration.nix and activated (runtime iptables rules in
+  nixos-fw also present). Rebuild with
+  =sudo env NIX_PATH="nixpkgs=$(readlink -f /nix/var/nix/profiles/per-user/root/channels/nixos):nixos-config=/etc/nixos/configuration.nix" nixos-rebuild switch=
+  (bootloader install fails on this VM — harmless; run switch-to-configuration
+  with =NIXOS_INSTALL_BOOTLOADER== if needed).
+- Verified from outside: http://192.168.1.180:8096/ serves the Elm UI,
+  admin auth works, /Dashboard 200, /Requests/Settings/Test -> {"Ok":true},
+  library folders Media=/media + Downloads=/media/downloads, deluge-web
+  JSON-RPC on 8112 reachable.
+- UI URL: http://192.168.1.180:8096/ (admin password from the unit's
+  FMS_ADMIN_PASSWORD). Dashboard: http://192.168.1.180:8096/dashboard

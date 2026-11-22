@@ -4747,6 +4747,12 @@ main = do
     , ("Shrek", Just 2001), ("Se7en", Just 1995) ]
   check "m39 cleanTitleForProvider: hyphenated title word without group kept"
     (cleanTitleForProvider "Spider-Man") ("Spider Man", Nothing)
+  check "m87 cleanTitleForProvider: platform tags, single-letter video tag, bracketed scene group with dots"
+    [ cleanTitleForProvider "The Drama 2026 REPACK 1080p AMZN WEB-DL DDP5 1 Atmos H 264-SCOPE"
+    , cleanTitleForProvider "Crusty.Fouler.2025.720p.WEBRip.x264.AAC-[YTS.GG - YTS.BZ]"
+    , cleanTitleForProvider "Movie (2025) [1080p]"
+    , cleanTitleForProvider "Some.Show.S01E05.1080p.AMZN.WEB-DL.DDP5.1.H.264-GRP" ]
+    [ ("The Drama", Just 2026), ("Crusty Fouler", Just 2025), ("Movie", Just 2025), ("Some Show S01E05", Nothing) ]
 
   -- milestone 43: legacy rows carry type/seriesName + episode displayTitle
   let m43fieldOf :: T.Text -> Aeson.Value -> Maybe Aeson.Value

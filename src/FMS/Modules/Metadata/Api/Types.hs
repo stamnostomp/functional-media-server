@@ -77,7 +77,39 @@ releaseTagTokens =
   , "dd5", "ddp5", "dd51", "ddp51", "vp8"
   , "hdr", "hdr10", "hdr10plus", "dv", "dolbyvision", "proper", "repack"
   , "extended", "unrated", "imax", "anime", "remastered"
+  -- m87: streaming-service / scene-source tokens that otherwise poison the
+  -- provider query ("The Drama AMZN H" -> no TMDB hit)
+  , "amzn", "amazon", "nf", "netflix", "hulu", "hmax", "max", "dsnp", "dsny"
+  , "disney", "atvp", "appletv", "hbo", "pcok", "cr", "yts", "yify", "rarbg"
+  , "ettv", "scope", "brrip", "webdl", "p2p", "internal"
   ]
+
+-- | m87: remove bracketed spans from a raw title, returning a year found
+-- inside a pure-year bracket (e.g. "(2025)") plus the de-bracketed text.
+extractBrackets :: Text -> (Maybe Int, Text)
+extractBrackets = go []
+  where
+    go acc t =
+      case T.findIndex (\c -> c == '(' || c == '[' || c == '{') t of
+        Nothing ->
+          (Nothing, T.concat (reverse (t : acc)))
+        Just i ->
+          let open = T.index t i
+              close = if open == '(' then ')' else if open == '[' then ']' else '}'
+              afterOpen = T.drop (i + 1) t
+              (inside, rest) = T.break (== close) afterOpen
+              rest' = if not (T.null rest) then T.drop 1 rest else rest
+          in case go [] rest' of
+               (yr2, cleaned) ->
+                 (bracketYear inside <|> yr2
+                 , T.concat (reverse (cleaned : T.take i t : acc)))
+    bracketYear s =
+      case T.unpack (T.strip s) of
+        [a, b, c, d] | all isDigit [a, b, c, d] ->
+          let y = read [a, b, c, d] :: Int
+          in if y >= 1900 && y <= 2099 then Just y else Nothing
+        _ -> Nothing
+
 
 -- | Clean a scene/release-style file title for a provider (TMDB) search:
 -- replace dots/underscores/dashes with spaces, tokenize, drop release-tag
@@ -88,8 +120,14 @@ releaseTagTokens =
 -- @The.Matrix.1999.2160p.UHD.BluRay.REMUX-FraMeSToR@ -> (@"The Matrix"@,
 -- @Just 1999@); @sample-long@ -> (@"sample long"@, 'Nothing').
 cleanTitleForProvider :: Text -> (Text, Maybe Int)
-cleanTitleForProvider raw =
-  let spaced = T.map (\c -> if c == '.' || c == '_' || c == '-' then ' ' else c) raw
+cleanTitleForProvider raw0 =
+  let -- m87: strip bracketed spans (…)/(…)/[…]/[…] BEFORE tokenizing --
+      -- dots/dashes inside them ("[YTS.GG - YTS.BZ]") would otherwise split
+      -- into stray tokens ("GG") that poison the query. A bracket whose whole
+      -- content is a 4-digit year counts as the year when no year token
+      -- exists outside brackets.
+      (parenYear, raw) = extractBrackets raw0
+      spaced = T.map (\c -> if c == '.' || c == '_' || c == '-' then ' ' else c) raw
       toks0 = filter (not . T.null) (T.words spaced)
       isBracketed t = T.any (\c -> c == '(' || c == ')' || c == '[' || c == ']'
                                    || c == '{' || c == '}') t
@@ -111,14 +149,18 @@ cleanTitleForProvider raw =
       isTag t =
         let l = T.toLower t
         in l `elem` releaseTagTokens || isBitsTok l || isAudioTok l
-      toks1 = filter (\t -> not (isBracketed t) && not (isTag t)) toks0
+      -- m87: single-letter tokens ("H" of "H 264") are video tags, not title
+      toks1 = filter (\t -> not (isBracketed t) && not (isTag t) && T.length t > 1) toks0
       isYearTok t = case T.unpack t of
         [a, b, c, d] -> all (`elem` ("0123456789" :: String)) [a, b, c, d]
                         && let y = read (T.unpack t) :: Int in y >= 1900 && y <= 2099
         _ -> False
-      (mYear, toks2) = case break isYearTok toks1 of
+      (mYearTok, toks2) = case break isYearTok toks1 of
         (before, yt : after) -> (Just (read (T.unpack yt) :: Int), before ++ after)
         (_, [])              -> (Nothing, toks1)
+      mYear = case mYearTok of
+        Just y  -> Just y
+        Nothing -> parenYear
       -- m39: leftover pure-digit tokens (the 1 of DD5.1 etc.); title tokens
       -- that merely CONTAIN a digit (Se7en) are kept
       isPureDigit t = not (T.null t) && T.all isDigit t

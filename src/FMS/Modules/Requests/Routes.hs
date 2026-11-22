@@ -35,11 +35,11 @@ import FMS.Core.Types.User (User (..))
 import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (scanDirectory)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, TmdbEpisode (..), TmdbTvDetails(..))
+import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, tmdbSearchMovieAt, tmdbSearchTvAt, TmdbEpisode (..), TmdbTvDetails(..))
 import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, tmdbResultToMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), msTmdbApiKey)
 import FMS.Modules.Metadata.Nfo (episodeNfoXml, movieNfoXml, tvShowNfoXml)
-import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
+import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult, releaseYear)
 import FMS.Modules.Requests.Monad (MonadRequests (..), getRequestSettings, newRequestId, updateRequestSettings)
 import FMS.Modules.AnnounceTrackers (currentAnnounceTrackers)
 import FMS.Modules.Requests.Push (autoApproveSize, delugeLoginTest, delugeTorrentStatuses, importComplete, matchTorrentName, matchTorrentProgress, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, pushRequest)
@@ -377,13 +377,19 @@ createRequestHandler _captures req = do
             Nothing -> ("", "")
           threshold = round (effectiveAutoApproveGb cfg s * 1024 * 1024 * 1024) :: Integer
           autoAppr = autoApproveSize (crSizeBytes cr) threshold
-          r0 = Request
+      -- m87: when the client did not send a TMDB id (plain torrent-list
+      -- request), resolve one NOW from the cleaned query title + year, so
+      -- the exact tag is stored on the request and the .nfo is written at
+      -- import even if the release file name is garbage.
+      ms <- getMetadataSettings
+      mResolvedTmdb <- liftIO (resolveRequestTmdb cfg ms cr)
+      let r0 = Request
             { reqId = rid
             , reqUserId = uid
             , reqUserName = uname
             , reqTitle = crTitle cr
             , reqYear = crYear cr
-            , reqTmdbId = crTmdbId cr   -- m68
+            , reqTmdbId = crTmdbId cr <|> mResolvedTmdb  -- m68 + m87
             , reqSeason = crSeason cr   -- m76
             , reqEpisode = crEpisode cr -- m76
             , reqMediaType = crType cr
@@ -407,6 +413,28 @@ createRequestHandler _captures req = do
       -- m20b: auto-approved requests are pushed immediately
       r1 <- if autoAppr then pushAndAdvance r0 else pure r0
       pure (responseLBS status201 jsonCT (encode r1))
+
+-- | m87: resolve a TMDB id for a request that did not carry one: clean the
+-- query/title with 'cleanTitleForProvider', search TMDB (movie or tv by the
+-- request type) and pick the best hit for the year. 'Nothing' when there is
+-- no API key, the search fails, or there are no results.
+resolveRequestTmdb :: Config -> MetadataSettings -> CreateRequest -> IO (Maybe Int)
+resolveRequestTmdb cfg ms cr
+  | T.null (msTmdbApiKey ms) = pure Nothing
+  | otherwise =
+      let base = configTmdbBaseUrl cfg
+          key = msTmdbApiKey ms
+          rawQ = maybe (crTitle cr) id (crQuery cr)
+          (cleanQ, parsedYear) = cleanTitleForProvider rawQ
+          q = if T.null cleanQ then rawQ else cleanQ
+          yr = parsedYear <|> crYear cr
+          isTv = T.toLower (crType cr) == "tv"
+          search = if isTv then tmdbSearchTvAt base key q else tmdbSearchMovieAt base key q
+      in do
+        eres <- search
+        pure (case eres of
+                Left _   -> Nothing
+                Right rs -> tmdbId <$> pickTmdbResult yr rs)
 
 -- | @POST /Requests/:id/Approve@ and @.../Reject@ (admin only): transition
 -- from Pending to the given status (400 otherwise), bumping UpdatedAt;

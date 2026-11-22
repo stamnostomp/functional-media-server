@@ -25,7 +25,7 @@ import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.Policy (AccessSchedule, UserPolicy (..))
 import FMS.Core.Types.User (User (..), checkPasswordPolicy)
-import FMS.Modules.Auth.Monad (MonadAuth (..), requireAdmin, verifyPassword)
+import FMS.Modules.Auth.Monad (MonadAuth (..), currentUserFromReq, requireAdmin, verifyPassword)
 
 -- | The users/auth/sessions API (docs/todo.org section 8,
 -- Jellyfin-shaped). Order matters: the literal routes ([Users, Public],
@@ -37,6 +37,7 @@ authRoutes =
   , get    [Lit "Users", Lit "Public"]             publicUsersHandler
   , get    [Lit "Users"]                          listUsersHandler
   , post   [Lit "Users"]                          createUserHandler
+  , get    [Lit "Users", Lit "Me"]                meHandler
   , get    [Lit "Users", Capture "id"]            getUserHandler
   , delete [Lit "Users", Capture "id"]            deleteUserHandler
   , post   [Lit "Users", Capture "id", Lit "Password"] passwordHandler
@@ -207,6 +208,16 @@ createUserHandler _captures req = do
     Right _ -> pure ()
   u <- createUser (curName cur) (curPassword cur) (curIsAdmin cur)
   pure (responseLBS status201 jsonCT (encode u))
+
+-- | @GET /Users/Me@ (m87) — the user behind the request's credential
+-- (session token or API key), Jellyfin-style; 401 when there is none.
+-- Registered BEFORE the @:id@ capture so "Me" is not parsed as an id.
+meHandler :: [(Text, Text)] -> Request -> AppM Response
+meHandler _captures req = do
+  m <- currentUserFromReq req
+  case m of
+    Nothing -> throwError (Unauthorized "no valid credential")
+    Just u  -> pure (jsonResponse u)
 
 -- | @GET /Users/:id@ — one user, self or admin.
 getUserHandler :: [(Text, Text)] -> Request -> AppM Response

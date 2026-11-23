@@ -253,7 +253,13 @@ settingsFromConfig cfg = RequestSettings
 mergeSettings :: RequestSettings -> SettingsPatch -> RequestSettings
 mergeSettings s p = s
   { rsDelugeUrl = maybe (rsDelugeUrl s) id (spDelugeUrl p)
-  , rsDelugePassword = maybe (rsDelugePassword s) id (spDelugePassword p)
+  -- m91: an empty-string password patch means "keep current" (the GET
+  -- response no longer carries the secret, so the UI sends blank when
+  -- the user did not type a new one)
+  , rsDelugePassword = case spDelugePassword p of
+      Nothing -> rsDelugePassword s
+      Just pw | T.null (T.strip pw) -> rsDelugePassword s
+      Just pw -> pw
   , rsDownloadDir = maybe (rsDownloadDir s) id (spDownloadDir p)
   , rsAutoApproveGb = case spAutoApproveGb p of
       Nothing -> rsAutoApproveGb s
@@ -266,12 +272,15 @@ effectiveAutoApproveGb :: Config -> RequestSettings -> Double
 effectiveAutoApproveGb cfg s =
   maybe (fromIntegral (configRequestAutoApproveGb cfg)) id (rsAutoApproveGb s)
 
--- | API JSON (PascalCase). SECURITY: 'DelugePassword' is redacted to null
--- for non-admins (same pattern as indexer ApiKey/Cookie).
+-- | API JSON (PascalCase). SECURITY (m91): 'DelugePassword' is ALWAYS
+-- redacted to null -- even admins never get the secret back over the API
+-- (same pattern as indexer ApiKey/Cookie); a blank password in a POST
+-- patch keeps the stored one (see 'mergeSettings'). The isAdmin flag is
+-- kept for signature compatibility but no longer unredacts.
 settingsPublicJson :: Bool -> RequestSettings -> Value
-settingsPublicJson isAdmin s = object
+settingsPublicJson _isAdmin s = object
   [ "DelugeUrl" .= rsDelugeUrl s
-  , "DelugePassword" .= (if isAdmin then Aeson.String (rsDelugePassword s) else Aeson.Null)
+  , "DelugePassword" .= Aeson.Null
   , "DownloadDir" .= rsDownloadDir s
   , "AutoApproveGb" .= rsAutoApproveGb s
   ]

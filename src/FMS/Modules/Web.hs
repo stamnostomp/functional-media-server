@@ -446,7 +446,7 @@ dashboardPageHtml = LBSC.pack (unlines
   , "function createUser(){"
   , "  var body = { Name: el('nu').value, Password: el('np').value, IsAdmin: el('na').checked };"
   , "  api('/Users', { method:'POST', body: JSON.stringify(body) }).then(function(d){"
-  , "    el('usernote').textContent = d && d.Id ? ('CREATED ' + d.Name + ' (' + d.Id + ')') : 'CREATE FAILED';"
+  , "    el('usernote').textContent = d && d.Id ? ('CREATED ' + d.Name + ' (' + d.Id + ')') : ('CREATE FAILED' + (d && d.error ? ': ' + d.error : ''));"
   , "    el('nu').value=''; el('np').value=''; el('na').checked=false;"
   , "    renderUsersTab();"
   , "  }).catch(function(e){ el('usernote').textContent = 'CREATE FAILED: ' + (e && e.message ? e.message : e); });"
@@ -506,6 +506,10 @@ dashboardPageHtml = LBSC.pack (unlines
   , "        + '</table>'"
   , "      : '<i>no plugins</i>');"
   , "  }).catch(function(){ section('plugins', '<i>unavailable</i>'); });"
+  -- m91: the overview also shows the Indexers / external trackers / download
+  -- client / metadata panels -- render them here too (previously they stayed
+  -- at "..." until the user visited the TRACKERS tab once)
+  , "  if (IS_ADMIN) { renderIndexers(); renderTrackers(); renderDlcfg(); renderMeta(); }"
   , "}"
   , "function renderTrackersTab(){"
   , "  if (!IS_ADMIN) {"
@@ -642,7 +646,7 @@ dashboardPageHtml = LBSC.pack (unlines
   , "function dlFormHtml(){"
   , "  return '<div class=\"flex items-center flex-wrap gap-2\">'"
   , "    + '<input id=\"deluge-url\" placeholder=\"deluge url http://127.0.0.1:8112/json\">'"
-  , "    + '<input id=\"deluge-password\" type=\"password\" placeholder=\"deluge password\">'"
+  , "    + '<input id=\"deluge-password\" type=\"password\" placeholder=\"deluge password (blank = keep current)\">'"
   , "    + '<input id=\"download-dir\" placeholder=\"download dir\">'"
   , "    + '<input id=\"auto-approve-gb\" placeholder=\"auto-approve GB\">'"
   , "    + '<button class=\"btn btn-primary\" onclick=\"saveDl()\">Save</button>'"

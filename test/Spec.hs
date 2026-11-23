@@ -4381,13 +4381,16 @@ main = do
   check "effectiveAutoApproveGb: saved override wins, else env config"
     [ effectiveAutoApproveGb cfg27 rs0, effectiveAutoApproveGb cfg27 rs0 { rsAutoApproveGb = Nothing } ]
     [ 5, 7 ]
-  check "settingsPublicJson: admin sees password, non-admin gets Null (redaction)"
+  check "settingsPublicJson: password ALWAYS redacted to Null, even for admins (m91)"
     [ fieldOf "DelugePassword" (settingsPublicJson True rs0)
     , fieldOf "DelugePassword" (settingsPublicJson False rs0)
     , fieldOf "DelugeUrl" (settingsPublicJson False rs0)
     , fieldOf "AutoApproveGb" (settingsPublicJson False rs0) ]
-    [ Just (Aeson.String "deluge"), Just Aeson.Null
+    [ Just Aeson.Null, Just Aeson.Null
     , Just (Aeson.String "http://127.0.0.1:8112/json"), Just (Aeson.Number 5) ]
+  check "mergeSettings: empty-string password patch keeps the stored password (m91)"
+    [ rsDelugePassword (mergeSettings rs0 emptySettingsPatch { spDelugePassword = Just "  " }) ]
+    [ "deluge" ]
   check "SettingsPatch FromJSON: PascalCase + camelCase keys, subset only"
     (case Aeson.decode (LBSC.pack "{\"DelugeUrl\":\"http://a/\",\"downloadDir\":\"/x\"}") of
         Just p  -> [spDelugeUrl p, spDownloadDir p, spDelugePassword p]

@@ -29,7 +29,10 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Network.HTTP.Types (status200)
 import Network.Wai (Request, Response, queryString, responseLBS)
-import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory, removeDirectory, removePathForcibly)
+import System.Directory
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, getModificationTime, listDirectory, removeDirectory, removePathForcibly)
+import System.Posix.Process (getProcessID)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.FilePath ((</>), dropFileName)
 
 import FMS.Core.Module (Module(..), Segment(..), get)
@@ -202,9 +205,9 @@ ensureHls cfg item = do
     then pure m3u8
     else do
       liftIO (createDirectoryIfMissing True dir)
-      r <- liftIO (try (createDirectory lock) :: IO (Either IOException ()))
-      case r of
-        Right () -> do
+      held <- liftIO (acquireLockRecovering lock)
+      if held
+        then do
           -- we won the race: drop any stale cache written under a
           -- different codec mode (m71), then package in the background,
           -- keeping an ffmpeg slot for the lifetime of the job. If the
@@ -239,7 +242,7 @@ ensureHls cfg item = do
                        ("ffmpeg HLS packaging produced no segments within "
                         <> T.pack (show firstSegmentWaitSec) <> "s for item "
                         <> itemId item))
-        Left _ -> do
+        else do
           -- another request is already packaging this item: just wait
           ok <- liftIO (waitForFirstSegment firstSegmentWaitSec m3u8)
           if ok
@@ -248,6 +251,56 @@ ensureHls cfg item = do
                    ("ffmpeg HLS packaging produced no segments within "
                     <> T.pack (show firstSegmentWaitSec) <> "s for item "
                     <> itemId item))
+
+-- | m89: create the @.starting@ lock dir, recovering from a STALE lock left
+-- behind when the server was killed mid-packaging (restart): the lock dir
+-- records the packager's pid; if that process no longer exists (checked
+-- via \/proc), the lock is removed and creation retried once. A lock with
+-- no pid file (pre-m89) is considered stale when older than 15 minutes.
+-- Returns 'True' when the caller now holds the lock.
+acquireLockRecovering :: FilePath -> IO Bool
+acquireLockRecovering lock = do
+  r <- try (createDirectory lock) :: IO (Either IOException ())
+  case r of
+    Right () -> do
+      pid <- getProcessID
+      _ <- try (TIO.writeFile (lock </> "pid") (T.pack (show pid)))
+                :: IO (Either IOException ())
+      pure True
+    Left _ -> do
+      stale <- isStaleLock lock
+      if not stale
+        then pure False
+        else do
+          removePathForcibly lock
+          r2 <- try (createDirectory lock) :: IO (Either IOException ())
+          case r2 of
+            Right () -> do
+              pid <- getProcessID
+              _ <- try (TIO.writeFile (lock </> "pid") (T.pack (show pid)))
+                        :: IO (Either IOException ())
+              pure True
+            Left _ -> pure False
+
+-- | Is this lock dir stale? True when the recorded pid is dead, or (locks
+-- written before m89 have no pid file) the dir is older than 15 minutes.
+isStaleLock :: FilePath -> IO Bool
+isStaleLock lock = do
+  mPid <- try (TIO.readFile (lock </> "pid")) :: IO (Either IOException Text)
+  case mPid of
+    Right t ->
+      case reads (T.unpack (T.strip t)) of
+        [(pid, _)] -> do
+          alive <- doesDirectoryExist ("/proc/" ++ show (pid :: Int))
+          pure (not alive)
+        _ -> pure True
+    Left _ -> do
+      mAge <- try (getModificationTime lock) :: IO (Either IOException UTCTime)
+      case mAge of
+        Right mt -> do
+          now <- getCurrentTime
+          pure (diffUTCTime now mt > 900)
+        Left _ -> pure True
 
 -- | Read the persisted packaging-mode label, if present.
 readModeFile :: FilePath -> IO (Maybe Text)

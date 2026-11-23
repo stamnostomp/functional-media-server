@@ -202,6 +202,10 @@ setTmdbMetadataHandler captures req = do
                           else BS.writeFile (itemPath item <.> "nfo")
                                  (TE.encodeUtf8 (movieNfoXml (fromMaybe (itemTitle item) (metaTitle meta)) tid (metaYear meta)))
                       _ <- rescanLibrary   -- m46: re-classify from the NFO
+                      -- m89: the bare NFO carries only title/year/tmdbid, so
+                      -- re-apply the full TMDB record AFTER the rescan (the
+                      -- rescan would otherwise wipe overview/genres/rating)
+                      setMetadata i meta
                       mNew <- getMetadata i
                       logInfo ("metadata: manual TMDB override for item " <> i <> " -> tmdb/" <> T.pack (show tid))
                       pure (jsonResponse (fromMaybe meta mNew))

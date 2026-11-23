@@ -159,6 +159,7 @@ library
                     , directory
                     , filepath
                     , time
+                    , unix
                     , stm
                     , template-haskell
                     , aeson

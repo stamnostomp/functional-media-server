@@ -87,6 +87,7 @@ continueWatching stats =
     [ (ident, p)
     | (ident, s) <- HM.toList stats
     , Just p <- [statsProgress s]
+    , progressCurrentTime p > 0                              -- m89: 0% is not "continue"
     , progressCurrentTime p < progressDuration p * 0.95
     ]
 

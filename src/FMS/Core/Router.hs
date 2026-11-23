@@ -352,7 +352,9 @@ tokenFromQuery qs =
               , not (B.null v) ]
 
 -- | Combined credential lookup, pure on the parts (exported for tests):
--- the header token wins; otherwise the query-param token (m32).
+-- the header token wins; otherwise the @fms_session@ cookie (m89, so page
+-- and media URLs never need the token in the query string); otherwise the
+-- query-param token (m32).
 tokenFromRequestParts
   :: [(B.ByteString, B.ByteString)]        -- ^ raw headers
   -> [(B.ByteString, Maybe B.ByteString)]  -- ^ query string
@@ -360,7 +362,29 @@ tokenFromRequestParts
 tokenFromRequestParts hs qs =
   case parseTokenHeader hs of
     Just t  -> Just t
-    Nothing -> tokenFromQuery qs
+    Nothing -> case cookieToken hs of
+      Just t  -> Just t
+      Nothing -> tokenFromQuery qs
+
+-- | m89: extract @fms_session=<token>@ from a @Cookie@ header. Pure.
+cookieToken :: [(B.ByteString, B.ByteString)] -> Maybe Text
+cookieToken hs =
+  listToMaybe
+    [ T.strip v
+    | (k, v) <- hs
+    , T.toLower (TE.decodeUtf8 k) == "cookie"
+    , Just v <- [cookieParam "fms_session" (TE.decodeUtf8 v)]
+    , not (T.null (T.strip v))
+    ]
+
+-- | One @name=value@ pair out of a cookie header string (first match).
+cookieParam :: Text -> Text -> Maybe Text
+cookieParam name cookies =
+  case T.breakOn (name <> "=") cookies of
+    (_, rest) | T.null rest -> Nothing
+    (_, rest) ->
+      let val = T.takeWhile (/= ';') (T.drop (T.length name + 1) rest)
+      in if T.null val then Nothing else Just val
 
 -- | The credential carried by a request, if any: 'parseTokenHeader' over
 -- the raw (unwrapped) header list, falling back to the query string

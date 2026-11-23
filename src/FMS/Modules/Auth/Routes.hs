@@ -16,7 +16,9 @@ import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Types (ResponseHeaders, status201, status204)
+import qualified Data.Text.Encoding as TE
+import Network.HTTP.Types (ResponseHeaders, status201, status204
+  , status200)
 import Network.Wai (Request, Response, responseLBS, strictRequestBody)
 
 import FMS.Core.Module (Route, Segment (..), delete, get, jsonResponse, post)
@@ -180,7 +182,15 @@ authenticateHandler _captures req = do
   case m of
     Nothing -> throwError (Unauthorized "invalid username or password")
     Just (u, tok) ->
-      pure (jsonResponse (object ["AccessToken" .= tok, "User" .= u]))
+      -- m89: also set an HttpOnly session cookie so page/media URLs
+      -- (/dashboard, /videos/..., <img> posters) authenticate without the
+      -- token in the query string (which leaks into history/logs)
+      pure (responseLBS status200
+              [ ("Content-Type", "application/json")
+              , ("Set-Cookie", "fms_session=" <> TE.encodeUtf8 tok
+                  <> "; HttpOnly; Path=/; SameSite=Lax")
+              ]
+              (encode (object ["AccessToken" .= tok, "User" .= u])))
 
 -- | @GET /Users/Public@ — @[{\"Id\":\"...\",\"Name\":\"...\"}, ...]@; open
 -- even in strict mode (it is in the router's open list).

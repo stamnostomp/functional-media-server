@@ -54,9 +54,11 @@ import Network.HTTP.Client
   , responseBody
   , responseHeaders
   , responseStatus
+  , responseTimeout
+  , ResponseTimeout (..)
   , RequestBody (..)
   )
-import Network.HTTP.Client (responseTimeoutMicro)
+import Network.HTTP.Client (ResponseTimeout (..), responseTimeoutMicro)
 import Network.HTTP.Conduit (httpLbs, newManager, parseRequest_)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import qualified Data.CaseInsensitive as CI
@@ -230,6 +232,7 @@ postJson manager url mCookie body = do
         req1 = req0 { method = "POST"
                     , requestHeaders = [(hContentType, "application/json")]
                     , requestBody = RequestBodyLBS (Aeson.encode body)
+                    , responseTimeout = responseTimeoutMicro 5000000  -- m89: never stall /Requests on a hung deluge
                     }
         req2 = case mCookie of
           Just c  -> req1 { requestHeaders = (hCookie, TE.encodeUtf8 c) : requestHeaders req1 }

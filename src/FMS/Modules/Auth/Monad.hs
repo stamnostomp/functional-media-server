@@ -77,6 +77,7 @@ class Monad m => MonadAuth m where
   addApiKey    :: Text -> m Text                   -- ^ userId -> fresh API key
   authenticate :: Text -> Text -> m (Maybe (User, Text))  -- ^ name, password -> (user, session token)
   resolveToken :: Text -> m (Maybe User)           -- ^ session token OR api key -> user
+  revokeToken  :: Text -> m ()                     -- ^ m93: drop a session token (logout)
   listSessions :: m [(Text, Text)]                 -- ^ (token, userName) for live session tokens
   setAllowedFolders :: Text -> Maybe [Text] -> m Bool  -- ^ userId, folders (Nothing = all); False when unknown (milestone 5d)
   setPolicy :: Text -> UserPolicy -> m Bool            -- ^ userId, parental policy; False when unknown (milestone 9)
@@ -142,6 +143,10 @@ instance MonadAuth AppM where
          | (tok, uid) <- HM.toList toks
          , Just u <- [HM.lookup uid usrs]
          ]
+
+  revokeToken tok = do
+    tt <- tokensTVar
+    liftIO (atomically (modifyTVar' tt (HM.delete tok)))
 
   setAllowedFolders i mFolders = do
     m <- getUser i

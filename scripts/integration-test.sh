@@ -149,6 +149,17 @@ if [[ -n "$TOKEN" && -n "$USERID" ]]; then ok "auth-returns-token-and-user"; els
 code="$(req POST /Users/AuthenticateByName '{"Username":"admin","Pw":"wrong-pass"}')"
 check_code "auth-wrong-pw-401" 401 "$code"
 
+# m93: logout revokes the session token server-side (uses a DEDICATED token
+# so the shared $TOKEN stays valid for the rest of the suite)
+code="$(req POST /Users/AuthenticateByName '{"Username":"admin","Pw":"it-admin-pass"}')"
+T2="$(jget "d.get('AccessToken','')")"
+code="$(req GET /Users/Me "" "$T2")"
+check_code "me-before-logout-200" 200 "$code"
+code="$(req POST /Users/Logout "" "$T2")"
+check_code "logout-204" 204 "$code"
+code="$(req GET /Users/Me "" "$T2")"
+check_code "me-after-logout-401" 401 "$code"
+
 # scan the library + refresh metadata, then poll until >= 2 items are visible
 req POST /library/rescan "" "$TOKEN" > /dev/null
 req POST "/Library/Refresh?replaceAll=true" "" "$TOKEN" > /dev/null

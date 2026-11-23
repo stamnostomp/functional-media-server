@@ -27,7 +27,7 @@ import FMS.Core.Router (tokenFromRequest)
 import FMS.Core.Types.Config (Config (..))
 import FMS.Core.Types.Policy (AccessSchedule, UserPolicy (..))
 import FMS.Core.Types.User (User (..), checkPasswordPolicy)
-import FMS.Modules.Auth.Monad (MonadAuth (..), currentUserFromReq, requireAdmin, verifyPassword)
+import FMS.Modules.Auth.Monad (MonadAuth (..), currentUserFromReq, requireAdmin, revokeToken, verifyPassword)
 
 -- | The users/auth/sessions API (docs/todo.org section 8,
 -- Jellyfin-shaped). Order matters: the literal routes ([Users, Public],
@@ -36,6 +36,7 @@ import FMS.Modules.Auth.Monad (MonadAuth (..), currentUserFromReq, requireAdmin,
 authRoutes :: [Route]
 authRoutes =
   [ post   [Lit "Users", Lit "AuthenticateByName"] authenticateHandler
+  , post   [Lit "Users", Lit "Logout"]             logoutHandler
   , get    [Lit "Users", Lit "Public"]             publicUsersHandler
   , get    [Lit "Users"]                          listUsersHandler
   , post   [Lit "Users"]                          createUserHandler
@@ -51,6 +52,20 @@ authRoutes =
   , post   [Lit "Users", Capture "id", Lit "Enable"]  (setEnabledHandler True)
   , post   [Lit "Users", Capture "id", Lit "Disable"] (setEnabledHandler False)
   ]
+
+-- | m93: @POST /Users/Logout@ — revoke the caller's session token (from the
+-- @X-Emby-Token@ header or the @fms_session@ cookie) server-side, so a signed-out
+-- browser can no longer use it, and expire the cookie via Set-Cookie (only the
+-- server can clear an HttpOnly cookie). Always 204, even without a token.
+logoutHandler :: [(Text, Text)] -> Request -> AppM Response
+logoutHandler _captures req =
+  case tokenFromRequest req of
+    Just tok -> revokeToken tok
+    Nothing  -> pure ()
+  >> pure (responseLBS status204
+            [ ("Set-Cookie", "fms_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax") ]
+            "")
+
 
 -- Request bodies ------------------------------------------------------------
 

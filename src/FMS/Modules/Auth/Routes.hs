@@ -213,6 +213,9 @@ createUserHandler _captures req = do
   requireAdmin req
   cur <- parseBody req
   cfg <- asks envConfig
+  if T.strip (curName cur) == ""
+    then throwError (BadRequest "Name must be non-empty")  -- m90
+    else pure ()
   case checkPasswordPolicy (configPasswordMinLength cfg) (curPassword cur) of
     Left e  -> throwError (BadRequest e)
     Right _ -> pure ()

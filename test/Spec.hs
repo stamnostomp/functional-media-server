@@ -4908,12 +4908,12 @@ main = do
               rok <- waitForFile (m38log ++ ".ready") 40
               if not rok then putStrLn "PASS: m38 mock phase skipped (mock did not start)" else act)
       runMock "half" $ do
-        _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
+        _ <- runApp env38 (fetchTorrentStatuses >>= \est -> listRequests >>= markImported (either (const []) id est))
         st38a <- runApp env38 (fmap reqStatus <$> getRequest "r38")
         check "m38 live: torrent at 50% with file present -> stays Downloading"
           (either (const Nothing) id st38a) (Just Downloading)
       runMock "full" $ do
-        _ <- runApp env38 (fetchTorrentStatuses >>= \sts -> listRequests >>= markImported sts)
+        _ <- runApp env38 (fetchTorrentStatuses >>= \est -> listRequests >>= markImported (either (const []) id est))
         st38b <- runApp env38 (fmap reqStatus <$> getRequest "r38")
         check "m38 live: torrent Seeding 100% with file present -> Imported"
           (either (const Nothing) id st38b) (Just Imported)

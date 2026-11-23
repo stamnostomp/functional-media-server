@@ -280,15 +280,15 @@ fromMaybe' _ (Just x) = x
 
 -- | m38: fetch live Deluge torrent statuses ONCE per read (shared by
 -- 'markImported' and 'attachLiveProgress'); graceful [] on any failure.
-fetchTorrentStatuses :: AppM [(Text, Text, Double, Double)]
+fetchTorrentStatuses :: AppM (Either String [(Text, Text, Double, Double)])
 fetchTorrentStatuses = do
   s <- getRequestSettings
   est <- liftIO (delugeTorrentStatuses (rsDelugeUrl s) (rsDelugePassword s))
   case est of
     Left err -> do
       logWarn ("requests: deluge status query failed: " <> T.pack err)
-      pure []
-    Right sts -> pure sts
+      pure (Left err)
+    Right sts -> pure (Right sts)
 
 -- | m37: fill live Deluge progress/state onto requests whose title/release
 -- matches a live torrent by querying the Deluge web API
@@ -311,7 +311,8 @@ listRequestsHandler :: [(Text, Text)] -> Wai.Request -> AppM Response
 listRequestsHandler _captures req = do
   mUser <- currentUserFromReq req
   all0 <- listRequests
-  sts <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  est <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  let sts = either (const []) id est   -- m92: keep graceful-[] but remember the error
   markImported sts all0
   all' <- listRequests
   let all'' = attachLiveProgress sts all'   -- m37: live Deluge progress on Downloading rows
@@ -329,6 +330,9 @@ listRequestsHandler _captures req = do
   pure (jsonResponse (object
     [ "Requests" .= filtered
     , "TotalRecordCount" .= length filtered
+    -- m92: when the downloader is unreachable/wedged, say so instead of
+    -- silently showing stale Downloading rows with null progress
+    , "DownloaderError" .= either Just (const Nothing) est
     ]))
 
 -- | @GET /Requests/:id@ — owner or admin (403 otherwise), 404 unknown.
@@ -337,7 +341,8 @@ getRequestHandler captures req = do
   rid <- captureId captures
   mUser <- currentUserFromReq req
   all0 <- listRequests
-  sts <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  est <- fetchTorrentStatuses       -- m38: one Deluge query per read
+  let sts = either (const []) id est
   markImported sts all0
   m <- getRequest rid
   case m of

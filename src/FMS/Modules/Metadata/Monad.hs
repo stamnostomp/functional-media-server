@@ -11,6 +11,7 @@ module FMS.Modules.Metadata.Monad
   , updateMetadataSettings
   , refreshFromTmdb
   , tmdbResultToMetadata
+  , fetchAndStoreTmdbImages
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)

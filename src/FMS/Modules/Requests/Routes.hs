@@ -36,7 +36,7 @@ import FMS.Modules.Auth.Monad (currentUserFromReq, requireAdmin)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Library.Scan (scanDirectory)
 import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt, tmdbSearchMovieAt, tmdbSearchTvAt, TmdbEpisode (..), TmdbTvDetails(..))
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, tmdbResultToMetadata)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), fetchAndStoreTmdbImages, getMetadataSettings, tmdbResultToMetadata)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), msTmdbApiKey)
 import FMS.Modules.Metadata.Nfo (episodeNfoXml, movieNfoXml, tvShowNfoXml)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult, releaseYear)
@@ -258,6 +258,7 @@ setItemMetadataFromTmdb cfg ms tid isTv i
             , metaKeywords       = kws
             , metaLockedFields   = []
             }
+      fetchAndStoreTmdbImages cfg False (itemId i) (itemType i) tid  -- m88: artwork at import too
   | otherwise = do
       eres <- liftIO (tmdbMovieByIdAt (configTmdbBaseUrl cfg) (msTmdbApiKey ms) tid)
       case eres of
@@ -268,6 +269,7 @@ setItemMetadataFromTmdb cfg ms tid isTv i
           let (gs, kws) = either (const ([], [])) id dres
               fresh = (tmdbResultToMetadata top) { metaGenres = gs, metaKeywords = kws }
           setMetadata (itemId i) fresh
+          fetchAndStoreTmdbImages cfg False (itemId i) (itemType i) tid  -- m88: artwork at import too
           logInfo ("requests: import metadata for \"" <> itemTitle i
                    <> "\" set from TMDB id " <> T.pack (show tid))
 

@@ -69,7 +69,7 @@ import FMS.Modules.Library.Scan (episodeTitleFromName)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, lookupSeriesCache, storeSeriesCache)
 import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), getMetadataSettings, refreshAllMetadata, tmdbResultToMetadata, updateMetadataSettings)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), fetchAndStoreTmdbImages, getMetadataSettings, refreshAllMetadata, tmdbResultToMetadata, updateMetadataSettings)
 import FMS.Modules.Metadata.Nfo (movieNfoXml, tvShowNfoXml)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), MetadataSettingsPatch (..), applyManualPatch, emptyMetadata, mergeMetadataSettings, mergeTags, metadataSettingsPublicJson, removeTag)
 
@@ -191,6 +191,9 @@ setTmdbMetadataHandler captures req = do
                     Left err -> throwError (BadRequest ("tmdb fetch failed: " <> T.pack err))
                     Right meta -> do
                       setMetadata i meta
+                      -- m88: also (re)fetch the TMDB artwork so the manual
+                      -- override immediately shows poster/backdrop
+                      fetchAndStoreTmdbImages cfg True i (itemType item) tid
                       -- write the NFO sidecar in place so rescans keep this identity
                       liftIO $
                         if isTv

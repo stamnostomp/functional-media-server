@@ -4,6 +4,7 @@ module FMS.Modules.Metadata.Monad
   , metadataFilePath
   , loadMetadataIntoState
   , refreshAllMetadata
+  , tmdbMetadataFor
   , metadataSettingsStateKey
   , metadataSettingsFilePath
   , loadMetadataSettingsIntoState
@@ -22,7 +23,8 @@ import Control.Monad.Reader (asks)
 import qualified Data.ByteString as BS
 import Data.List (nub)
 import Data.HashMap.Strict (HashMap)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, maybeToList)
+import Text.Read (readMaybe)
 import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -35,7 +37,8 @@ import FMS.Core.Types.MediaItem (MediaItem (..))
 import FMS.Modules.Images (hasStoredImage, removeStoredImages, storeImageBytes)
 import FMS.Modules.Library.Monad (MonadLibrary (..))
 import FMS.Modules.Metadata.Api.Images (fetchTmdbImages)
-import FMS.Modules.Metadata.Api.Tmdb (tmdbMovieDetailsAt, tmdbSearchMovieAt, tmdbSearchTvAt, tmdbTvDetailsKwAt)
+import FMS.Modules.Metadata.Api.Tmdb (TmdbTvDetails (..), tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbSearchMovieAt, tmdbSearchTvAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt)
+import FMS.Modules.Metadata.Api.Types (releaseYear)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), cleanTitleForProvider, pickTmdbResult)
 import FMS.Modules.Metadata.Nfo (EpisodeNfo (..), nfoPathFor, parseEpisodeNfo, parseMovieNfo, parseTvShowNfo)
 import FMS.Modules.Metadata.Persistence (loadMetadata, loadMetadataSettings, saveMetadata, saveMetadataSettings)
@@ -152,9 +155,45 @@ instance MonadMetadata AppM where
         nfoMeta <- readNfoMetadata item
         case nfoMeta of
           Just meta -> do
-            merged <- mergeWithStored itemIdent meta
-            setMetadata itemIdent merged
-            pure (Just merged)
+            -- m94: an NFO that pins a TMDB id (written by the manual override
+            -- or locked at request time) is re-fetched from TMDB on refresh,
+            -- so the full record (overview/genres/rating/...) survives
+            -- /Library/Refresh instead of collapsing to the bare NFO fields.
+            cfg0 <- asks envConfig
+            ms0 <- getMetadataSettings
+            let key = msTmdbApiKey ms0
+                isTv = T.toLower (itemType item) == "episode"
+            eFull <- if T.null key
+              then pure Nothing
+              else case HM.lookup "tmdb" (metaProviderIds meta) >>= \t -> readMaybe (T.unpack t) of
+                Nothing -> pure Nothing
+                Just tid -> do
+                  r <- liftIO (tmdbMetadataFor (configTmdbBaseUrl cfg0) key tid isTv)
+                  case r of
+                    Left err -> do
+                      logWarn ("metadata: tmdb re-fetch for pinned id failed: " <> T.pack err)
+                      pure Nothing
+                    Right full -> pure (Just full)
+            case eFull of
+              Just full -> do
+                -- NFO identity fields win; the TMDB record fills the rest
+                let base = full
+                      { metaProviderIds = metaProviderIds meta
+                      , metaTitle = case metaTitle meta of
+                          Just t | not (T.null t) -> Just t
+                          _ -> metaTitle full
+                      , metaYear = case metaYear meta of
+                          Just y -> Just y
+                          Nothing -> metaYear full
+                      , metaSource = "nfo"
+                      }
+                merged <- mergeWithStored itemIdent base
+                setMetadata itemIdent merged
+                pure (Just merged)
+              Nothing -> do
+                merged <- mergeWithStored itemIdent meta
+                setMetadata itemIdent merged
+                pure (Just merged)
           -- Milestone 4c: no usable NFO -> remote provider fallback (TMDB),
           -- keyed by the item's title, only when an API key is configured.
           -- m57: force is threaded through so an explicit refresh also
@@ -264,6 +303,42 @@ episodeNfoToMetadata en = emptyMetadata
 -- and cache the first hit with 'metaSource' = @\"tmdb\"@. Empty results or
 -- any TMDB error are logged and yield 'Nothing' — never throw, so the
 -- router keeps mapping this to a graceful 404.
+-- | m94 (moved here from Routes so the Monad can re-fetch pinned ids on
+-- refresh without a circular import): full TMDB record for an id -> metadata.
+tmdbMetadataFor :: Text -> Text -> Int -> Bool -> IO (Either String MediaMetadata)
+tmdbMetadataFor base key tid isTv
+  | isTv = do
+      dres <- tmdbTvDetailsAt base key tid
+      kres <- tmdbTvDetailsKwAt base key tid
+      let (gs, kws) = either (const ([], [])) id kres
+      pure $ case dres of
+        Left err -> Left err
+        Right d -> Right MediaMetadata
+          { metaTitle          = tdName d
+          , metaOverview       = tdOverview d
+          , metaGenres         = gs
+          , metaKeywords       = kws
+          , metaStudios        = []
+          , metaPersons        = []
+          , metaTags           = []
+          , metaYear           = tdFirstAirDate d >>= releaseYear
+          , metaRating         = Nothing
+          , metaOfficialRating = Nothing
+          , metaRuntimeMinutes = Nothing
+          , metaProviderIds    = HM.singleton "tmdb" (T.pack (show tid))
+          , metaSource         = "tmdb"
+          , metaLockedFields   = []
+          }
+  | otherwise = do
+      eres <- tmdbMovieByIdAt base key tid
+      case eres of
+        Left err -> pure (Left err)
+        Right top -> do
+          dres <- tmdbMovieDetailsAt base key tid
+          let (gs, kws) = either (const ([], [])) id dres
+          pure (Right (tmdbResultToMetadata top) { metaGenres = gs, metaKeywords = kws })
+
+
 refreshFromTmdb :: Bool -> Text -> MediaItem -> AppM (Maybe MediaMetadata)
 refreshFromTmdb force itemIdent item = do
   cfg <- asks envConfig

@@ -3,7 +3,6 @@ module FMS.Modules.Metadata.Routes
   , refreshMetadataHandler
   , editMetadataHandler
   , setTmdbMetadataHandler
-  , tmdbMetadataFor
   , genresHandler
   , studiosHandler
   , personsHandler
@@ -69,7 +68,7 @@ import FMS.Modules.Library.Scan (episodeTitleFromName)
 import FMS.Modules.Metadata.Cache (SeriesCacheEntry (..), cacheFresh, lookupSeriesCache, storeSeriesCache)
 import FMS.Modules.Metadata.Api.Tmdb (TmdbEpisode (..), TmdbSeason (..), TmdbTvDetails (..), tmdbMovieByIdAt, tmdbMovieDetailsAt, tmdbPopularMoviesAt, tmdbPopularTvAt, tmdbSearchMovie, tmdbSearchMovieAt, tmdbSearchTv, tmdbSearchTvAt, tmdbSeasonAt, tmdbTvDetailsAt, tmdbTvDetailsKwAt)
 import FMS.Modules.Metadata.Api.Types (TmdbResult (..), releaseYear)
-import FMS.Modules.Metadata.Monad (MonadMetadata (..), fetchAndStoreTmdbImages, getMetadataSettings, refreshAllMetadata, tmdbResultToMetadata, updateMetadataSettings)
+import FMS.Modules.Metadata.Monad (MonadMetadata (..), fetchAndStoreTmdbImages, getMetadataSettings, refreshAllMetadata, tmdbMetadataFor, tmdbResultToMetadata, updateMetadataSettings)
 import FMS.Modules.Metadata.Nfo (movieNfoXml, tvShowNfoXml)
 import FMS.Modules.Metadata.Types (MediaMetadata (..), MetadataSettings (..), MetadataSettingsPatch (..), applyManualPatch, emptyMetadata, mergeMetadataSettings, mergeTags, metadataSettingsPublicJson, removeTag)
 
@@ -213,40 +212,6 @@ setTmdbMetadataHandler captures req = do
 -- | m83: fetch the full TMDB record for @tid@ and shape it into
 -- MediaMetadata with providerIds set. Movie: /movie/<id> +
 -- append_to_response=keywords (genres+keywords). TV: /tv/<id> + keywords.
-tmdbMetadataFor :: Text -> Text -> Int -> Bool -> IO (Either String MediaMetadata)
-tmdbMetadataFor base key tid isTv
-  | isTv = do
-      dres <- tmdbTvDetailsAt base key tid
-      kres <- tmdbTvDetailsKwAt base key tid
-      let (gs, kws) = either (const ([], [])) id kres
-      pure $ case dres of
-        Left err -> Left err
-        Right d -> Right MediaMetadata
-          { metaTitle          = tdName d
-          , metaOverview       = tdOverview d
-          , metaGenres         = gs
-          , metaKeywords       = kws
-          , metaStudios        = []
-          , metaPersons        = []
-          , metaTags           = []
-          , metaYear           = tdFirstAirDate d >>= releaseYear
-          , metaRating         = Nothing
-          , metaOfficialRating = Nothing
-          , metaRuntimeMinutes = Nothing
-          , metaProviderIds    = HM.singleton "tmdb" (T.pack (show tid))
-          , metaSource         = "tmdb"
-          , metaLockedFields   = []
-          }
-  | otherwise = do
-      eres <- tmdbMovieByIdAt base key tid
-      case eres of
-        Left err -> pure (Left err)
-        Right top -> do
-          dres <- tmdbMovieDetailsAt base key tid
-          let (gs, kws) = either (const ([], [])) id dres
-          pure (Right (tmdbResultToMetadata top) { metaGenres = gs, metaKeywords = kws })
-
-
 -- | @GET \/Genres@ — 200 JSON array of @{\"Name\": genre, \"ItemCount\": n}@
 -- derived from all stored 'MediaMetadata', grouped by genre and sorted by
 -- name (docs/todo.org section 10, milestone 10a). Always 200; with no

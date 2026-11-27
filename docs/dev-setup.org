@@ -63,3 +63,9 @@ nix develop --command cabal2nix . > default.nix
 - Keep the roadmap in [[file:roadmap.org][docs/roadmap.org]] up to date in the same
   commit as the work it describes; follow the conventions in
   [[file:methodology.org][docs/methodology.org]] (TODO states, sections, tags).
+
+* Push/signing node
+
+Node one is the dedicated GitHub push/signing node. Use node-1 for GitHub
+pushes and SSH signing keys. GitHub auth/signing public keys are generated
+there.

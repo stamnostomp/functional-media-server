@@ -4237,7 +4237,18 @@ main = do
     , matchesDownload "Dune" ["/dl/DUNE.2021.mp4"]
     , matchesDownload "Dune" ["/dl/dune2.mkv"]
     , matchesDownload "Dune" ["/dl/dune.srt"] ]
-    [ True, False, True, False, True ]
+    [ True, False, True, False, False ]  -- m97: .srt is not a media file
+  -- m97: sidecar files fms writes into the download dir (.magnet/.nfo) must
+  -- NOT satisfy a request, and a different-year same-title video must not
+  -- match the bare title
+  check "matchesDownload m97: .magnet/.nfo sidecars and wrong-year videos do not match"
+    [ matchesDownload "The Hand That Rocks the Cradle" ["/dl/the-hand-that-rocks-the-cradle.magnet"]
+    , matchesDownload "The Hand That Rocks the Cradle" ["/dl/The Hand That Rocks the Cradle 2025 1080p WEB-DL HEVC x265 5.1 BONE.nfo"]
+    , matchesDownload "The Hand That Rocks the Cradle" ["/dl/The Hand That Rocks the Cradle 2025 1080p WEB-DL HEVC x265 5.1 BONE.mkv"]
+    , matchesDownload "The Hand That Rocks the Cradle" ["/dl/The Hand That Rocks the Cradle 2025.mkv"]
+    , matchesRequestDownload "The Hand That Rocks the Cradle" (Just "The Hand That Rocks the Cradle (1992) 1080p BrRip") ["/dl/The Hand That Rocks the Cradle 2025 1080p WEB-DL HEVC x265 5.1 BONE.mkv"]
+    , matchesRequestDownload "The Hand That Rocks the Cradle" (Just "The Hand That Rocks the Cradle (1992) 1080p BrRip") ["/dl/The Hand That Rocks the Cradle (1992) 1080p BrRip/The Hand That Rocks the Cradle (1992) 1080p BrRip.mkv"] ]
+    [ False, False, False, True, False, True ]
   -- milestone 30: markImported walks the download dir RECURSIVELY (Deluge
   -- saves into <downloads>/<Torrent.Name>/file.mp4)
   let m30dir = "/tmp/fms-m30-dl"

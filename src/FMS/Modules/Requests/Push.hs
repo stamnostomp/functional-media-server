@@ -67,6 +67,7 @@ import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>), (<.>), takeExtension, takeFileName)
 
 import FMS.Modules.Requests.Types (normalizeTitle)
+import FMS.Modules.Library.Scan (isMediaFile)
 
 -- | Pure: slug for fallback file names -- normalized title with spaces as
 -- dashes; empty becomes "request".
@@ -85,8 +86,12 @@ autoApproveSize mSize thresholdBytes =
 -- title as the request (extension stripped first)? Used to mark requests
 -- Imported when a matching media file appears in the download dir.
 matchesDownload :: Text -> [FilePath] -> Bool
-matchesDownload title files =
-  let target = normalizeTitle title
+matchesDownload title files0 =
+  -- m97: only real media files can satisfy a request -- the .magnet/.nfo
+  -- sidecars fms writes into the download dir normalize to the bare title
+  -- and used to false-match (wrong-version import)
+  let files = filter isMediaFile files0
+      target = normalizeTitle title
       stripExt p =
         let e = takeExtension p
         in if null e then p else take (length p - length e) p

@@ -128,10 +128,15 @@ markImported statuses reqs = do
   let dir = T.unpack (rsDownloadDir s)
   efiles <- liftIO (try (scanDirectory False dir) :: IO (Either SomeException [FilePath]))
   let files = either (const []) id efiles
-  mapM_ markOne [ r | r <- reqs, reqStatus r == Downloading
+      toImport = [ r | r <- reqs, reqStatus r == Downloading
                      , matchesRequestDownload (reqTitle r) (reqSourceRelease r) files
                          || m80TorrentFileMatch statuses (reqTitle r) (reqSourceRelease r) files
                      , importComplete statuses (reqTitle r) (reqSourceRelease r) ]  -- m38: only when the torrent is complete
+  mapM_ markOne toImport
+  -- A request import writes media / NFO sidecars into the download dir; scan
+  -- once afterwards so the library sees them without waiting for the next
+  -- filesystem-watch or manual rescan. No scan when nothing was imported.
+  when (not (null toImport)) rescanLibrary
   where
     markOne r = do
       _ <- setRequestStatus (reqId r) Imported Nothing

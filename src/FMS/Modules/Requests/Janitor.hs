@@ -32,8 +32,9 @@ import FMS.Modules.Requests.Push
   ( btihFromMagnet
   , delugeReaddTorrent
   , delugeTorrentStatusesRich
+  , matchesTorrentTitle
   )
-import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..), normalizeTitle)
+import FMS.Modules.Requests.Types (Request (..), RequestSettings (..), RequestStatus (..))
 
 -- | Stalled-torrent threshold: progress below 0.5% with 0 connected seeds.
 stalledProgress :: Double
@@ -119,8 +120,5 @@ matchRich title mRelease torrents =
     (t : _) -> Just t
     []      -> Nothing
   where
-    nt = normalizeTitle title
-    cands = nt : maybe [] (\rel -> [normalizeTitle rel]) mRelease
     matchesOne (name, _st, _prog, _rate, _seeds, _peers) =
-      let nn = normalizeTitle name
-      in any (\c -> not (T.null c) && (nn == c || T.isInfixOf c nn || T.isInfixOf nn c)) cands
+      matchesTorrentTitle title mRelease name

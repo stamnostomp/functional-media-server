@@ -14,6 +14,7 @@ module FMS.Modules.Requests.Push
   , delugeTorrentStatuses
   , matchTorrentProgress
   , matchTorrentName
+  , matchesTorrentTitle
   , matchesDownloadAny
   , importComplete
   , delugeTorrentsStatusRichBody
@@ -33,7 +34,7 @@ module FMS.Modules.Requests.Push
 import Control.Exception (SomeException, try)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Char (isDigit)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (catMaybes, listToMaybe)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -66,6 +67,7 @@ import Network.HTTP.Types (hContentType, hCookie, statusCode)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>), (<.>), takeExtension, takeFileName)
 
+import FMS.Modules.Metadata.Api.Types (cleanTitleForProvider)
 import FMS.Modules.Requests.Types (normalizeTitle)
 import FMS.Modules.Library.Scan (isMediaFile)
 
@@ -546,11 +548,27 @@ matchTorrentName'
 matchTorrentName' title mRelease torrents =
   listToMaybe [ (name, st, prog) | (name, st, prog, _rate) <- torrents, matchesOne name ]
   where
-    nt = normalizeTitle title
-    cands = nt : maybe [] (\rel -> [normalizeTitle rel]) mRelease
-    matchesOne name =
-      let nn = normalizeTitle name
-      in any (\c -> not (T.null c) && (nn == c || T.isInfixOf c nn || T.isInfixOf nn c)) cands
+    matchesOne = matchesTorrentTitle title mRelease
+
+-- | Pure: compare a torrent name against a request title and optional
+-- source release name. Titles are cleaned of scene tags and release years;
+-- when both sides carry a four-digit year they must agree, so a torrent
+-- for a different year's release cannot match a request. Containment is
+-- retained for the tag-stripped titles (e.g. torrent "Other Movie 2020"
+-- still matches the untagged request title "Other Movie").
+matchesTorrentTitle :: Text -> Maybe Text -> Text -> Bool
+matchesTorrentTitle title mRelease name =
+  let (ct, yTitle) = cleanTitleForProvider title
+      mRel = fmap cleanTitleForProvider mRelease
+      years = catMaybes [yTitle, mRel >>= snd]
+      (cn, yName) = cleanTitleForProvider name
+      -- Enforce the year only when both sides carry one. A missing year
+      -- supplies no evidence of a mismatch, while conflicting explicit
+      -- years must not match.
+      yearOk = maybe True (\y -> null years || y `elem` years) yName
+      titleOk c = not (T.null c)
+               && (c == cn || T.isInfixOf c cn || T.isInfixOf cn c)
+  in yearOk && any titleOk (ct : maybe [] (pure . fst) mRel)
 
 -- | m80: does any candidate name match a file in the download dir? Used to
 -- also try the live Deluge torrent name (see 'matchTorrentName') when the

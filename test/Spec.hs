@@ -112,7 +112,7 @@ import FMS.Modules.UserData.Monad (markPlayed, setFavorite, setPosition)
 import FMS.Modules.UserData.Persistence (loadUserData, saveUserData)
 import FMS.Modules.UserData.Routes (parseIdsBody)
 import FMS.Modules.AnnounceTrackers (parseTrackerList)
-import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, btihFromMagnet, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetConfigBody, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentName, matchTorrentProgress, matchesDownload, matchesDownloadAny, matchesRequestDownload, parseProxiedPath, parseTorrentStatuses, parseTorrentStatusesRich, pushRequest, slugify)
+import FMS.Modules.Requests.Push (autoApproveSize, base64Encode, btihFromMagnet, delugeAddFileBody, delugeAddMagnetBody, delugeConnectedBody, delugeConnectBody, delugeGetHostsBody, delugeLoginBody, delugeLoginTest, delugeSetConfigBody, delugeSetTrackersBody, delugeTorrentStatuses, delugeTorrentsStatusBody, getFirstHostId, importComplete, matchTorrentName, matchTorrentProgress, matchesDownload, matchesDownloadAny, matchesRequestDownload, matchesTorrentTitle, parseProxiedPath, parseTorrentStatuses, parseTorrentStatusesRich, pushRequest, slugify)
 import FMS.Modules.Requests.Monad (MonadRequests (..), loadRequestSettingsIntoState, loadRequestsIntoState)
 import Data.Aeson.Types (parseEither)
 import FMS.Modules.Requests.Persistence (requestFromPersist, requestToPersist)
@@ -4673,6 +4673,19 @@ main = do
     (matchTorrentName "Other Movie" Nothing sts37) (Just "Other Movie 2020")
   check "m80 matchTorrentName: no match -> Nothing"
     (matchTorrentName "Nope" Nothing sts37) Nothing
+  check "matchesTorrentTitle: year mismatch does not match"
+    [ matchesTorrentTitle "Shrek 2001" Nothing "Shrek.2001.1080p.BluRay.x265-LAMA"
+    , matchesTorrentTitle "Other Movie" Nothing "Other Movie 2020"
+    , matchesTorrentTitle "Other Movie 2019" Nothing "Other Movie 2020" ]
+    [ True, True, False ]
+  check "matchesTorrentTitle: untagged title matches a tagged torrent"
+    [ matchesTorrentTitle "Amelie" Nothing "Amelie (2001) 1080p BluRay"
+    , matchesTorrentTitle "Amelie (2001)" Nothing "Amelie 1080p BluRay" ]
+    [ True, True ]
+  check "matchesTorrentTitle: release candidate with matching year works"
+    [ matchesTorrentTitle "Unknown Title" (Just "Amelie (2001) 1080p BluRay") "Amelie.2001.1080p.BluRay.x265-LAMA"
+    , matchesTorrentTitle "Unknown Title" (Just "Amelie (1999) 1080p BluRay") "Amelie.2001.1080p.BluRay.x265-LAMA" ]
+    [ True, False ]
   check "m80 matchesDownloadAny: torrent name matches file, title does not"
     (matchesDownloadAny ["Other Movie 2020"] ["/dl/Other Movie (2020) [1080p]/Other Movie 2020.mkv"])
     True
